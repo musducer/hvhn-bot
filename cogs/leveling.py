@@ -1,13 +1,13 @@
 import discord
 from discord.ext import commands
 from discord import app_commands
-import aiosqlite
+import asyncpg
 
 
 class Leveling(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self.db: aiosqlite.Connection = bot.db
+        self.db: asyncpg.Pool = bot.db
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -15,21 +15,18 @@ class Leveling(commands.Cog):
             return
 
         user_id = message.author.id
-        async with self.db.execute("SELECT xp, level FROM users WHERE user_id = ?", (user_id,)) as cursor:
-            result = await cursor.fetchone()
+        result = await self.db.fetchrow("SELECT xp, level FROM users WHERE user_id = $1", user_id)
 
         if result is None:
-            await self.db.execute("INSERT INTO users (user_id, xp, level) VALUES (?, ?, ?)", (user_id, 10, 1))
-            await self.db.commit()
+            await self.db.execute("INSERT INTO users (user_id, xp, level) VALUES ($1, $2, $3)", user_id, 10, 1)
             return
 
-        xp = result[0] + 10
-        current_level = result[1]
+        xp = result["xp"] + 10
+        current_level = result["level"]
         new_level = 1 + (xp // 100)
 
         if new_level > current_level:
-            await self.db.execute("UPDATE users SET level = ?, xp = ? WHERE user_id = ?", (new_level, xp, user_id))
-            await self.db.commit()
+            await self.db.execute("UPDATE users SET level = $1, xp = $2 WHERE user_id = $3", new_level, xp, user_id)
 
             guild = message.guild
             if new_level == 5:
@@ -43,30 +40,27 @@ class Leveling(commands.Cog):
                     await message.author.add_roles(role)
                 await message.channel.send(f"🔥 Xuất sắc! {message.author.mention} đã đạt Cấp 10, thăng hạng **Chiến thần Nghị luận**!")
         else:
-            await self.db.execute("UPDATE users SET xp = ? WHERE user_id = ?", (xp, user_id))
-            await self.db.commit()
+            await self.db.execute("UPDATE users SET xp = $1 WHERE user_id = $2", xp, user_id)
 
     @app_commands.command(name="rank", description="Kiểm tra cấp độ và XP hiện tại của bạn")
     async def rank(self, interaction: discord.Interaction, member: discord.Member = None):
         user = member or interaction.user
-        async with self.db.execute("SELECT xp, level FROM users WHERE user_id = ?", (user.id,)) as cursor:
-            result = await cursor.fetchone()
+        result = await self.db.fetchrow("SELECT xp, level FROM users WHERE user_id = $1", user.id)
         if result:
-            await interaction.response.send_message(f"🏆 {user.mention} đang ở **Cấp {result[1]}** với **{result[0]} XP**.", ephemeral=True)
+            await interaction.response.send_message(f"🏆 {user.mention} đang ở **Cấp {result['level']}** với **{result['xp']} XP**.", ephemeral=True)
         else:
             await interaction.response.send_message(f"💤 {user.mention} chưa có XP nào. Hãy tương tác nhiều hơn nhé!", ephemeral=True)
 
     @app_commands.command(name="leaderboard", description="Xem top 5 thành viên chăm chỉ nhất máy chủ")
     async def leaderboard(self, interaction: discord.Interaction):
-        async with self.db.execute("SELECT user_id, xp, level FROM users ORDER BY xp DESC LIMIT 5") as cursor:
-            results = await cursor.fetchall()
+        results = await self.db.fetch("SELECT user_id, xp, level FROM users ORDER BY xp DESC LIMIT 5")
         if not results:
             await interaction.response.send_message("Bảng xếp hạng hiện đang trống.")
             return
 
         embed = discord.Embed(title="🌟 BẢNG XẾP HẠNG HVHN", color=discord.Color.gold())
         for idx, row in enumerate(results, 1):
-            embed.add_field(name=f"Hạng {idx}", value=f"<@{row[0]}> - Cấp {row[2]} ({row[1]} XP)", inline=False)
+            embed.add_field(name=f"Hạng {idx}", value=f"<@{row['user_id']}> - Cấp {row['level']} ({row['xp']} XP)", inline=False)
         await interaction.response.send_message(embed=embed)
 
 

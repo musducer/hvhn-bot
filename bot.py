@@ -1,7 +1,7 @@
 import os
 import asyncio
 
-import aiosqlite
+import asyncpg
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -19,20 +19,20 @@ INITIAL_EXTENSIONS = [
 
 
 class HVHNBot(commands.Bot):
-    def __init__(self):
+    def __init__(self, database_url: str):
         intents = discord.Intents.default()
         intents.members = True
         intents.message_content = True
         intents.voice_states = True
         super().__init__(command_prefix="!", intents=intents)
-        self.db: aiosqlite.Connection | None = None
+        self.database_url = database_url
+        self.db: asyncpg.Pool | None = None
 
     async def setup_hook(self):
-        self.db = await aiosqlite.connect("xp.db")
+        self.db = await asyncpg.create_pool(self.database_url)
         await self.db.execute(
-            "CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, xp INTEGER, level INTEGER)"
+            "CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, xp INTEGER, level INTEGER)"
         )
-        await self.db.commit()
 
         for extension in INITIAL_EXTENSIONS:
             await self.load_extension(extension)
@@ -51,9 +51,13 @@ async def main():
     if not token:
         raise RuntimeError("Thiếu DISCORD_TOKEN trong file .env")
 
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("Thiếu DATABASE_URL trong file .env")
+
     keep_alive()
 
-    bot = HVHNBot()
+    bot = HVHNBot(database_url)
     async with bot:
         await bot.start(token)
 
