@@ -57,6 +57,14 @@ CREATE TABLE IF NOT EXISTS warnings (
 CREATE TABLE IF NOT EXISTS banned_words (
     word TEXT PRIMARY KEY
 );
+
+CREATE TABLE IF NOT EXISTS questions (
+    id SERIAL PRIMARY KEY,
+    content TEXT NOT NULL,
+    asker_id BIGINT NOT NULL,
+    answered BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

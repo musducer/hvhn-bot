@@ -1,13 +1,16 @@
 import random
 import asyncio
+import datetime
 import discord
 from discord.ext import commands
 from discord import app_commands
+import asyncpg
 
 
 class Utilities(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.db: asyncpg.Pool = bot.db
 
     @app_commands.command(name="giverole", description="Cấp role cho thành viên (Chỉ Admin)")
     @app_commands.checks.has_permissions(manage_roles=True)
@@ -61,23 +64,108 @@ class Utilities(commands.Cog):
         if not admin_channel:
             await interaction.response.send_message("❌ Kênh duyệt câu hỏi chưa thiết lập.", ephemeral=True)
             return
-        embed = discord.Embed(title="❓ Câu hỏi ẩn danh mới", description=question, color=discord.Color.orange())
-        embed.set_footer(text=f"Từ: {interaction.user.name}")
+        question_id = await self.db.fetchval(
+            "INSERT INTO questions (content, asker_id) VALUES ($1, $2) RETURNING id",
+            question, interaction.user.id
+        )
+        embed = discord.Embed(title=f"❓ Câu hỏi ẩn danh mới (ID: {question_id})", description=question, color=discord.Color.orange())
+        embed.set_footer(text=f"Trả lời bằng: /answer id:{question_id} reply:...")
         await admin_channel.send(embed=embed)
-        await interaction.response.send_message("✅ Câu hỏi đã được gửi kín!", ephemeral=True)
+        await interaction.response.send_message(f"✅ Câu hỏi đã được gửi kín! (Mã số của bạn: **{question_id}**)", ephemeral=True)
 
-    @app_commands.command(name="answer", description="Trả lời câu hỏi ẩn danh (Chỉ Admin)")
+    @app_commands.command(name="answer", description="Trả lời câu hỏi ẩn danh theo ID (Chỉ Admin)")
     @app_commands.checks.has_permissions(manage_messages=True)
-    async def answer(self, interaction: discord.Interaction, question: str, reply: str):
+    async def answer(self, interaction: discord.Interaction, id: int, reply: str):
+        row = await self.db.fetchrow("SELECT content, answered FROM questions WHERE id = $1", id)
+        if not row:
+            await interaction.response.send_message(f"❌ Không tìm thấy câu hỏi có ID **{id}**.", ephemeral=True)
+            return
+
         public_channel = discord.utils.get(interaction.guild.text_channels, name="hỏi-đáp-bài-tập")
         if not public_channel:
-            await interaction.response.send_message("❌ Lỗi kênh.", ephemeral=True)
+            await interaction.response.send_message("❌ Không tìm thấy kênh hỏi-đáp-bài-tập.", ephemeral=True)
             return
-        embed = discord.Embed(title="📝 Q&A Ẩn Danh", color=discord.Color.green())
-        embed.add_field(name="Hỏi:", value=question, inline=False)
+
+        embed = discord.Embed(title=f"📝 Q&A Ẩn Danh (ID: {id})", color=discord.Color.green())
+        embed.add_field(name="Hỏi:", value=row["content"], inline=False)
         embed.add_field(name="Đáp:", value=reply, inline=False)
         await public_channel.send(embed=embed)
-        await interaction.response.send_message("✅ Đã đăng câu trả lời!", ephemeral=True)
+
+        await self.db.execute("UPDATE questions SET answered = TRUE WHERE id = $1", id)
+        note = " (câu này đã được trả lời trước đó)" if row["answered"] else ""
+        await interaction.response.send_message(f"✅ Đã đăng câu trả lời cho câu hỏi ID **{id}**{note}.", ephemeral=True)
+
+    @app_commands.command(name="questions", description="Xem các câu hỏi ẩn danh chưa được trả lời (Chỉ Admin)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def questions(self, interaction: discord.Interaction):
+        rows = await self.db.fetch(
+            "SELECT id, content FROM questions WHERE answered = FALSE ORDER BY created_at ASC LIMIT 15"
+        )
+        if not rows:
+            await interaction.response.send_message("✅ Không có câu hỏi nào đang chờ trả lời.", ephemeral=True)
+            return
+        embed = discord.Embed(title="❓ Câu hỏi đang chờ trả lời", color=discord.Color.orange())
+        for row in rows:
+            content = row["content"] if len(row["content"]) <= 200 else row["content"][:197] + "..."
+            embed.add_field(name=f"ID {row['id']}", value=content, inline=False)
+        embed.set_footer(text="Dùng /answer id:<số> reply:<nội dung> để trả lời.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="wordcount", description="Đếm số từ và số ký tự của một đoạn văn")
+    async def wordcount(self, interaction: discord.Interaction, text: str):
+        words = len(text.split())
+        chars = len(text)
+        chars_no_space = len(text.replace(" ", ""))
+        await interaction.response.send_message(
+            f"📊 **Thống kê đoạn văn:**\n"
+            f"• Số từ: **{words}**\n"
+            f"• Số ký tự (kể cả dấu cách): **{chars}**\n"
+            f"• Số ký tự (không dấu cách): **{chars_no_space}**",
+            ephemeral=True
+        )
+
+    @app_commands.command(name="remindme", description="Đặt lời nhắc cá nhân sau một số phút")
+    async def remindme(self, interaction: discord.Interaction, minutes: int, content: str):
+        if minutes <= 0 or minutes > 1440:
+            await interaction.response.send_message("❌ Số phút phải từ 1 đến 1440 (24 giờ).", ephemeral=True)
+            return
+        await interaction.response.send_message(f"⏰ Đã đặt lời nhắc sau {minutes} phút.", ephemeral=True)
+        await asyncio.sleep(minutes * 60)
+        try:
+            await interaction.user.send(f"🔔 **Nhắc nhở:** {content}")
+        except discord.Forbidden:
+            channel = interaction.channel
+            if channel:
+                await channel.send(f"🔔 {interaction.user.mention} nhắc nhở: {content}")
+
+    @app_commands.command(name="userinfo", description="Xem thông tin của một thành viên")
+    async def userinfo(self, interaction: discord.Interaction, member: discord.Member = None):
+        user = member or interaction.user
+        embed = discord.Embed(title=f"👤 Thông tin: {user.display_name}", color=user.color)
+        embed.set_thumbnail(url=user.display_avatar.url)
+        embed.add_field(name="Tên tài khoản", value=str(user), inline=True)
+        embed.add_field(name="ID", value=user.id, inline=True)
+        embed.add_field(name="Ngày tạo tài khoản", value=user.created_at.strftime("%d/%m/%Y"), inline=False)
+        if user.joined_at:
+            embed.add_field(name="Ngày vào server", value=user.joined_at.strftime("%d/%m/%Y"), inline=False)
+        roles = [r.mention for r in user.roles if r.name != "@everyone"]
+        embed.add_field(name=f"Vai trò ({len(roles)})", value=" ".join(roles) if roles else "Không có", inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="serverinfo", description="Xem thông tin và thống kê server")
+    async def serverinfo(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        embed = discord.Embed(title=f"🏫 {guild.name}", color=discord.Color.blurple())
+        if guild.icon:
+            embed.set_thumbnail(url=guild.icon.url)
+        embed.add_field(name="Số thành viên", value=guild.member_count, inline=True)
+        embed.add_field(name="Số kênh chat", value=len(guild.text_channels), inline=True)
+        embed.add_field(name="Số kênh voice", value=len(guild.voice_channels), inline=True)
+        embed.add_field(name="Số vai trò", value=len(guild.roles), inline=True)
+        if guild.owner:
+            embed.add_field(name="Chủ server", value=guild.owner.mention, inline=True)
+        embed.add_field(name="Ngày lập server", value=guild.created_at.strftime("%d/%m/%Y"), inline=True)
+        await interaction.response.send_message(embed=embed)
 
 
 async def setup(bot: commands.Bot):

@@ -130,13 +130,76 @@ class Setup(commands.Cog):
 
         await get_or_create_category("🎉 SỰ KIỆN & WORKSHOP", member_only)
 
-        # 4. GỬI LẠI EMBED LUẬT VÀ XÁC NHẬN
-        rules_history = [msg async for msg in rules_channel.history(limit=5)]
-        if not any(msg.author == guild.me for msg in rules_history):
-            rules_embed = discord.Embed(title="📜 BỘ LUẬT CHÍNH THỨC - NHÓM HỌC TẬP HVHN", color=0x2b2d31)
-            rules_embed.add_field(name="Chương I", value="Tôn trọng sự đa dạng tư duy.", inline=False)
-            rules_embed.add_field(name="Chương II", value="Gửi tài liệu đúng Forum phân loại.", inline=False)
-            await rules_channel.send(embed=rules_embed)
+        # 4. CẬP NHẬT LUẬT VÀ XÁC NHẬN
+        old_rules_messages = [msg async for msg in rules_channel.history(limit=20) if msg.author == guild.me]
+        for msg in old_rules_messages:
+            await msg.delete()
+
+        rules_embed = discord.Embed(
+            title="Bộ luật chính thức - Nhóm học tập HVHN",
+            description="Đọc hết trước khi tham gia thảo luận hoặc dùng lệnh bot. Vi phạm bị xử lý theo Chương V.",
+            color=0x2b2d31
+        )
+        rules_embed.add_field(
+            name="Chương I. Tôn trọng thành viên",
+            value=(
+                "Không công kích cá nhân, không miệt thị vùng miền, giới tính hay tôn giáo. "
+                "Tranh luận về đề bài, tác phẩm hay quan điểm văn học là bình thường, nhưng giữ lập luận ở mức học thuật. "
+                "Không chuyển từ phản biện ý kiến sang chỉ trích người viết."
+            ),
+            inline=False
+        )
+        rules_embed.add_field(
+            name="Chương II. Đăng bài đúng kênh",
+            value=(
+                "Câu hỏi bài tập đăng ở hỏi-đáp-bài-tập. Tài liệu, đề thi, dàn ý chia sẻ ở chia-sẻ-tài-liệu. "
+                "Thảo luận tự do về tác phẩm dùng thảo-luận-văn-học. "
+                "Đăng sai kênh, quản trị viên có quyền xoá và nhắc lại mà không cần giải thích thêm."
+            ),
+            inline=False
+        )
+        rules_embed.add_field(
+            name="Chương III. Dùng bot có trách nhiệm",
+            value=(
+                "/ask dùng để hỏi câu hỏi ẩn danh thật sự cần giải đáp, không dùng để spam hoặc trêu đùa quản trị viên. "
+                "/flashcard_add và /quote_add đăng công khai cho cả server xem, nội dung phải liên quan học tập hoặc là trích dẫn có giá trị. "
+                "/poll dùng cho việc chung của lớp, không lạm dụng để vote chuyện cá nhân. "
+                "Phòng voice tạo qua nút Tạo Phòng Mới sẽ tự xoá khi trống, không cố giữ phòng bằng tài khoản phụ ngồi im. "
+                "/timer dùng để tự canh giờ học, không phải công cụ spam thông báo trong kênh chat."
+            ),
+            inline=False
+        )
+        rules_embed.add_field(
+            name="Chương IV. Cấp độ và vai trò",
+            value=(
+                "Nhắn tin tích luỹ XP để lên cấp. Đạt cấp 5 nhận vai trò Nhà thơ mộng mơ, cấp 10 nhận vai trò Chiến thần Nghị luận. "
+                "Vai trò theo cấp độ không thể xin cấp trước hạn."
+            ),
+            inline=False
+        )
+        rules_embed.add_field(
+            name="Chương V. Vi phạm và xử lý",
+            value=(
+                "Vi phạm nhẹ nhận cảnh cáo qua /warn, xem lại lịch sử bằng /warnings. "
+                "Ba cảnh cáo trong 30 ngày dẫn đến bị mute tạm thời. "
+                "Vi phạm nghiêm trọng như quấy rối, spam liên tục hoặc phát tán nội dung độc hại bị kick hoặc ban ngay, không cần đủ ba cảnh cáo trước."
+            ),
+            inline=False
+        )
+        rules_embed.add_field(
+            name="Chương VI. Phòng học voice",
+            value=(
+                "Chủ phòng riêng có quyền mời thêm người qua /add_friend, nhưng không có quyền ép người khác rời phòng chung. "
+                "Không bật nhạc to hoặc gây ồn trong phòng học chung khi có người đang tập trung."
+            ),
+            inline=False
+        )
+        rules_embed.add_field(
+            name="Chương VII. Điều chỉnh luật",
+            value="Quản trị viên có quyền cập nhật bộ luật này khi cần. Thay đổi sẽ được thông báo ở bảng-tin-thông-báo.",
+            inline=False
+        )
+        await rules_channel.send(embed=rules_embed)
 
         verify_history = [msg async for msg in verify_channel.history(limit=5)]
         if not any(msg.author == guild.me for msg in verify_history):

@@ -3,7 +3,7 @@ from discord.ext import commands
 from discord import app_commands
 
 ADMIN_ONLY_COMMANDS = {
-    "giverole", "removerole", "clear", "lock", "unlock", "answer", "setup",
+    "giverole", "removerole", "clear", "lock", "unlock", "answer", "questions", "setup",
     "warn", "mute", "unmute", "kick", "ban", "slowmode", "addbadword", "removebadword",
 }
 
