@@ -15,7 +15,47 @@ INITIAL_EXTENSIONS = [
     "cogs.leveling",
     "cogs.voice",
     "cogs.utilities",
+    "cogs.study",
+    "cogs.moderation",
 ]
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, xp INTEGER, level INTEGER);
+
+CREATE TABLE IF NOT EXISTS flashcards (
+    id SERIAL PRIMARY KEY,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    author_id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS quotes (
+    id SERIAL PRIMARY KEY,
+    content TEXT NOT NULL,
+    author_id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS deadlines (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    due_date DATE NOT NULL,
+    created_by BIGINT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS warnings (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    moderator_id BIGINT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS banned_words (
+    word TEXT PRIMARY KEY
+);
+"""
 
 
 class HVHNBot(commands.Bot):
@@ -30,9 +70,7 @@ class HVHNBot(commands.Bot):
 
     async def setup_hook(self):
         self.db = await asyncpg.create_pool(self.database_url)
-        await self.db.execute(
-            "CREATE TABLE IF NOT EXISTS users (user_id BIGINT PRIMARY KEY, xp INTEGER, level INTEGER)"
-        )
+        await self.db.execute(SCHEMA)
 
         for extension in INITIAL_EXTENSIONS:
             await self.load_extension(extension)

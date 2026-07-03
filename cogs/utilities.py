@@ -40,16 +40,6 @@ class Utilities(commands.Cog):
         await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
         await interaction.response.send_message("🔓 Kênh đã được mở khóa.")
 
-    @app_commands.command(name="ielts_vocab", description="Học một từ vựng Academic đắt giá cho bài nghị luận / IELTS")
-    async def ielts_vocab(self, interaction: discord.Interaction):
-        words = [
-            "**Profound** (Sâu sắc, uyên thâm) - Rất thích hợp để phân tích tư tưởng tác giả.",
-            "**Resilience** (Sự kiên cường) - Hoàn hảo cho các bài nghị luận xã hội về ý chí.",
-            "**Meticulous** (Tỉ mỉ, cẩn trọng) - Dùng để mô tả cách xây dựng nhân vật tinh tế.",
-            "**Paradigm** (Hệ tư tưởng, mô hình) - Dùng để nâng tầm luận điểm khi so sánh các thời kỳ văn học."
-        ]
-        await interaction.response.send_message(f"📚 **Từ vựng hôm nay:**\n{random.choice(words)}")
-
     @app_commands.command(name="relax", description="Gợi ý hoạt động giải lao ngắn hạn sau giờ học căng thẳng")
     async def relax(self, interaction: discord.Interaction):
         activities = [
@@ -58,15 +48,6 @@ class Utilities(commands.Cog):
             "Nhắm mắt lại và nghe một bản nhạc lofi không lời trong 5 phút."
         ]
         await interaction.response.send_message(f"☕ **Đã đến giờ nghỉ ngơi:**\n{random.choice(activities)}")
-
-    @app_commands.command(name="design_idea", description="Gợi ý bảng màu và phong cách thiết kế tài liệu/slide")
-    async def design_idea(self, interaction: discord.Interaction):
-        ideas = [
-            "🎨 **Phong cách:** Hiện đại & Tối giản (Modern Minimalist). **Tông màu:** Xanh Navy & Trắng (White and Blue). Rất thanh lịch, phù hợp làm bìa sách ảnh du lịch hoặc các bảng biểu khoa học (như Bảng tuần hoàn hóa học).",
-            "🎨 **Phong cách:** Cổ điển. **Tông màu:** Nâu Vintage & Vàng nhạt. Tạo cảm giác hoài cổ, cực kỳ hợp cho các bài phân tích văn học dân gian.",
-            "🎨 **Phong cách:** Thanh bình. **Tông màu:** Xanh lá Pastel & Xám. Gợi sự bình tĩnh, dễ nhìn khi làm slide thuyết trình dài."
-        ]
-        await interaction.response.send_message(random.choice(ideas))
 
     @app_commands.command(name="timer", description="Đồng hồ đếm ngược học tập")
     async def timer(self, interaction: discord.Interaction, minutes: int):

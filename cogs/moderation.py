@@ -1,0 +1,130 @@
+import datetime
+
+import discord
+from discord.ext import commands
+from discord import app_commands
+import asyncpg
+
+
+class Moderation(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.db: asyncpg.Pool = bot.db
+        self.banned_words_cache: set[str] = set()
+
+    async def cog_load(self):
+        rows = await self.db.fetch("SELECT word FROM banned_words")
+        self.banned_words_cache = {row["word"] for row in rows}
+
+    def log_channel(self, guild: discord.Guild) -> discord.TextChannel | None:
+        return discord.utils.get(guild.text_channels, name="lưu-trữ-logs")
+
+    # ---------------- Warn system ----------------
+    @app_commands.command(name="warn", description="Cảnh cáo một thành viên (Chỉ Admin)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def warn(self, interaction: discord.Interaction, member: discord.Member, reason: str):
+        await self.db.execute(
+            "INSERT INTO warnings (user_id, moderator_id, reason) VALUES ($1, $2, $3)",
+            member.id, interaction.user.id, reason
+        )
+        await interaction.response.send_message(f"⚠️ Đã cảnh cáo {member.mention}. Lý do: {reason}")
+
+        log_channel = self.log_channel(interaction.guild)
+        if log_channel:
+            await log_channel.send(f"⚠️ {interaction.user.mention} đã cảnh cáo {member.mention}. Lý do: {reason}")
+
+    @app_commands.command(name="warnings", description="Xem danh sách cảnh cáo của một thành viên")
+    async def warnings(self, interaction: discord.Interaction, member: discord.Member = None):
+        user = member or interaction.user
+        rows = await self.db.fetch(
+            "SELECT reason, created_at FROM warnings WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10",
+            user.id
+        )
+        if not rows:
+            await interaction.response.send_message(f"✅ {user.mention} chưa có cảnh cáo nào.", ephemeral=True)
+            return
+        embed = discord.Embed(title=f"⚠️ Cảnh cáo của {user.display_name}", color=discord.Color.orange())
+        for row in rows:
+            embed.add_field(name=row["created_at"].strftime("%d/%m/%Y %H:%M"), value=row["reason"], inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    # ---------------- Mute / Unmute ----------------
+    @app_commands.command(name="mute", description="Cấm chat tạm thời một thành viên (Chỉ Admin)")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def mute(self, interaction: discord.Interaction, member: discord.Member, minutes: int, reason: str = "Không rõ lý do"):
+        duration = datetime.timedelta(minutes=minutes)
+        await member.timeout(duration, reason=reason)
+        await interaction.response.send_message(f"🔇 Đã cấm chat {member.mention} trong {minutes} phút. Lý do: {reason}")
+
+        log_channel = self.log_channel(interaction.guild)
+        if log_channel:
+            await log_channel.send(f"🔇 {interaction.user.mention} đã mute {member.mention} ({minutes} phút). Lý do: {reason}")
+
+    @app_commands.command(name="unmute", description="Gỡ cấm chat cho một thành viên (Chỉ Admin)")
+    @app_commands.checks.has_permissions(moderate_members=True)
+    async def unmute(self, interaction: discord.Interaction, member: discord.Member):
+        await member.timeout(None)
+        await interaction.response.send_message(f"🔊 Đã gỡ cấm chat cho {member.mention}.")
+
+    # ---------------- Banned words ----------------
+    @app_commands.command(name="addbadword", description="Thêm từ cấm vào bộ lọc tự động (Chỉ Admin)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def addbadword(self, interaction: discord.Interaction, word: str):
+        word = word.lower().strip()
+        await self.db.execute("INSERT INTO banned_words (word) VALUES ($1) ON CONFLICT DO NOTHING", word)
+        self.banned_words_cache.add(word)
+        await interaction.response.send_message(f"✅ Đã thêm từ cấm vào bộ lọc.", ephemeral=True)
+
+    @app_commands.command(name="removebadword", description="Gỡ một từ cấm khỏi bộ lọc (Chỉ Admin)")
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def removebadword(self, interaction: discord.Interaction, word: str):
+        word = word.lower().strip()
+        await self.db.execute("DELETE FROM banned_words WHERE word = $1", word)
+        self.banned_words_cache.discard(word)
+        await interaction.response.send_message(f"✅ Đã gỡ từ cấm khỏi bộ lọc.", ephemeral=True)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or not message.guild or not self.banned_words_cache:
+            return
+
+        content_lower = message.content.lower()
+        if any(word in content_lower for word in self.banned_words_cache):
+            await message.delete()
+            await self.db.execute(
+                "INSERT INTO warnings (user_id, moderator_id, reason) VALUES ($1, $2, $3)",
+                message.author.id, self.bot.user.id, "Vi phạm bộ lọc từ cấm (tự động)"
+            )
+            try:
+                await message.author.send("⚠️ Tin nhắn của bạn đã bị xóa vì chứa từ ngữ không phù hợp.")
+            except discord.Forbidden:
+                pass
+
+            log_channel = self.log_channel(message.guild)
+            if log_channel:
+                await log_channel.send(f"🚫 Tự động xóa tin nhắn của {message.author.mention} (chứa từ cấm).")
+
+    # ---------------- Mod log ----------------
+    @commands.Cog.listener()
+    async def on_message_delete(self, message: discord.Message):
+        if message.author.bot or not message.guild:
+            return
+        log_channel = self.log_channel(message.guild)
+        if log_channel:
+            await log_channel.send(f"🗑️ Tin nhắn của {message.author.mention} tại {message.channel.mention} đã bị xóa:\n> {message.content}")
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        log_channel = self.log_channel(member.guild)
+        if log_channel:
+            await log_channel.send(f"📥 {member.mention} vừa tham gia server.")
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        log_channel = self.log_channel(member.guild)
+        if log_channel:
+            await log_channel.send(f"📤 {member.mention} vừa rời server.")
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(Moderation(bot))
