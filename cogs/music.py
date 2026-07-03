@@ -62,16 +62,31 @@ class Music(commands.Cog):
 
         voice_channel = interaction.user.voice.channel
         voice_client = interaction.guild.voice_client
-        if voice_client is None:
-            voice_client = await voice_channel.connect()
-        elif voice_client.channel != voice_channel:
-            await voice_client.move_to(voice_channel)
 
+        print(f"[music] /play: bắt đầu kết nối voice channel {voice_channel.name}...")
         try:
-            title, stream_url = await self.extract_track(url)
-        except Exception:
+            if voice_client is None:
+                voice_client = await asyncio.wait_for(voice_channel.connect(), timeout=15)
+            elif voice_client.channel != voice_channel:
+                await asyncio.wait_for(voice_client.move_to(voice_channel), timeout=15)
+        except asyncio.TimeoutError:
+            print("[music] /play: TIMEOUT khi kết nối voice channel (nghi ngờ UDP bị chặn trên host).")
+            await interaction.followup.send("❌ Không kết nối được vào kênh Voice (timeout). Có thể do hạ tầng máy chủ chặn UDP.")
+            return
+        print("[music] /play: đã kết nối voice channel thành công.")
+
+        print(f"[music] /play: bắt đầu trích xuất audio từ URL: {url}")
+        try:
+            title, stream_url = await asyncio.wait_for(self.extract_track(url), timeout=20)
+        except asyncio.TimeoutError:
+            print("[music] /play: TIMEOUT khi trích xuất audio qua yt-dlp.")
+            await interaction.followup.send("❌ Không tải được nguồn nhạc từ URL này (timeout khi trích xuất).")
+            return
+        except Exception as e:
+            print(f"[music] /play: LỖI trích xuất audio: {e}")
             await interaction.followup.send("❌ Không tải được nguồn nhạc từ URL này.")
             return
+        print(f"[music] /play: trích xuất audio thành công: {title}")
 
         queue = self.get_queue(interaction.guild.id)
         queue.append((title, stream_url))
