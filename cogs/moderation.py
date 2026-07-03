@@ -87,6 +87,32 @@ class Moderation(commands.Cog):
         if log_channel:
             await log_channel.send(f"🔨 {interaction.user.mention} đã ban {member.mention}. Lý do: {reason}")
 
+    @app_commands.command(name="unban", description="Gỡ ban cho một người dùng theo User ID (Chỉ Admin)")
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def unban(self, interaction: discord.Interaction, user_id: str):
+        try:
+            uid = int(user_id)
+        except ValueError:
+            await interaction.response.send_message("❌ User ID phải là một dãy số. Bật Developer Mode để copy ID.", ephemeral=True)
+            return
+
+        try:
+            user = await self.bot.fetch_user(uid)
+        except discord.NotFound:
+            await interaction.response.send_message("❌ Không tìm thấy người dùng với ID này.", ephemeral=True)
+            return
+
+        try:
+            await interaction.guild.unban(user)
+        except discord.NotFound:
+            await interaction.response.send_message(f"❌ {user} không nằm trong danh sách bị ban.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(f"✅ Đã gỡ ban cho **{user}**.")
+        log_channel = self.log_channel(interaction.guild)
+        if log_channel:
+            await log_channel.send(f"♻️ {interaction.user.mention} đã gỡ ban cho {user} (ID: {uid}).")
+
     # ---------------- Slowmode ----------------
     @app_commands.command(name="slowmode", description="Đặt chế độ chat chậm cho kênh hiện tại (giây, 0 để tắt) (Chỉ Admin)")
     @app_commands.checks.has_permissions(manage_channels=True)

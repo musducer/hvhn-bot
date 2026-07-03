@@ -4,7 +4,8 @@ from discord import app_commands
 
 ADMIN_ONLY_COMMANDS = {
     "giverole", "removerole", "clear", "lock", "unlock", "answer", "questions", "setup",
-    "warn", "mute", "unmute", "kick", "ban", "slowmode", "addbadword", "removebadword",
+    "warn", "mute", "unmute", "kick", "ban", "unban", "slowmode", "addbadword", "removebadword",
+    "announce",
 }
 
 

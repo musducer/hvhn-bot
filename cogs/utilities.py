@@ -24,9 +24,12 @@ class Utilities(commands.Cog):
         await member.remove_roles(role)
         await interaction.response.send_message(f"✅ Đã thu hồi role **{role.name}** từ {member.mention}.", ephemeral=True)
 
-    @app_commands.command(name="clear", description="Xóa hàng loạt tin nhắn (Chỉ Admin)")
+    @app_commands.command(name="clear", description="Xóa hàng loạt tin nhắn (1-100) (Chỉ Admin)")
     @app_commands.checks.has_permissions(manage_messages=True)
     async def clear(self, interaction: discord.Interaction, amount: int):
+        if amount < 1 or amount > 100:
+            await interaction.response.send_message("❌ Chỉ xóa được từ 1 đến 100 tin nhắn mỗi lần.", ephemeral=True)
+            return
         await interaction.response.defer(ephemeral=True)
         deleted = await interaction.channel.purge(limit=amount)
         await interaction.followup.send(f"✅ Đã dọn dẹp {len(deleted)} tin nhắn rác.")
@@ -52,11 +55,19 @@ class Utilities(commands.Cog):
         ]
         await interaction.response.send_message(f"☕ **Đã đến giờ nghỉ ngơi:**\n{random.choice(activities)}")
 
-    @app_commands.command(name="timer", description="Đồng hồ đếm ngược học tập")
+    @app_commands.command(name="timer", description="Đồng hồ đếm ngược học tập (1-180 phút)")
     async def timer(self, interaction: discord.Interaction, minutes: int):
+        if minutes < 1 or minutes > 180:
+            await interaction.response.send_message("❌ Thời gian phải từ 1 đến 180 phút.", ephemeral=True)
+            return
+        channel = interaction.channel
         await interaction.response.send_message(f"⏳ Bắt đầu bộ đếm {minutes} phút. Tắt mọi thông báo và tập trung nhé!")
         await asyncio.sleep(minutes * 60)
-        await interaction.followup.send(f"⏰ Reng reng! Đã hết {minutes} phút tập trung. Nghỉ giải lao một chút đi {interaction.user.mention}!")
+        # Dùng channel.send thay vì followup: token interaction hết hạn sau 15 phút
+        try:
+            await channel.send(f"⏰ Reng reng! Đã hết {minutes} phút tập trung. Nghỉ giải lao một chút đi {interaction.user.mention}!")
+        except discord.HTTPException:
+            pass
 
     @app_commands.command(name="ask", description="Gửi câu hỏi ẩn danh")
     async def ask(self, interaction: discord.Interaction, question: str):
@@ -151,6 +162,18 @@ class Utilities(commands.Cog):
         roles = [r.mention for r in user.roles if r.name != "@everyone"]
         embed.add_field(name=f"Vai trò ({len(roles)})", value=" ".join(roles) if roles else "Không có", inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="announce", description="Đăng thông báo vào kênh bảng-tin-thông-báo (Chỉ Admin)")
+    @app_commands.checks.has_permissions(manage_messages=True)
+    async def announce(self, interaction: discord.Interaction, title: str, content: str):
+        channel = discord.utils.get(interaction.guild.text_channels, name="bảng-tin-thông-báo")
+        if not channel:
+            await interaction.response.send_message("❌ Không tìm thấy kênh bảng-tin-thông-báo.", ephemeral=True)
+            return
+        embed = discord.Embed(title=f"📢 {title}", description=content, color=discord.Color.gold())
+        embed.set_footer(text=f"Thông báo từ {interaction.user.display_name}")
+        await channel.send(embed=embed)
+        await interaction.response.send_message(f"✅ Đã đăng thông báo vào {channel.mention}.", ephemeral=True)
 
     @app_commands.command(name="serverinfo", description="Xem thông tin và thống kê server")
     async def serverinfo(self, interaction: discord.Interaction):

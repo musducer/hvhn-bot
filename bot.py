@@ -18,6 +18,7 @@ INITIAL_EXTENSIONS = [
     "cogs.study",
     "cogs.moderation",
     "cogs.fun",
+    "cogs.ai",
     "cogs.help",
 ]
 
