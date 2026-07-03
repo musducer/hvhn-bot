@@ -102,6 +102,34 @@ class Study(commands.Cog):
         for i in range(len(choices)):
             await message.add_reaction(number_emojis[i])
 
+    # ---------------- Essay outline ----------------
+    @app_commands.command(name="essay_outline", description="Sinh dàn ý khung cho bài nghị luận theo chủ đề bạn nhập")
+    async def essay_outline(self, interaction: discord.Interaction, topic: str):
+        embed = discord.Embed(title=f"📝 Dàn ý nghị luận: {topic}", color=discord.Color.purple())
+        embed.add_field(
+            name="I. Mở bài",
+            value="Dẫn dắt vào vấn đề, giới thiệu khái quát chủ đề, nêu luận điểm chính sẽ triển khai.",
+            inline=False
+        )
+        embed.add_field(
+            name="II. Thân bài",
+            value=(
+                "1. Giải thích khái niệm/vấn đề liên quan đến chủ đề.\n"
+                "2. Luận điểm 1 + dẫn chứng, phân tích.\n"
+                "3. Luận điểm 2 + dẫn chứng, phân tích.\n"
+                "4. Bàn luận mở rộng: phản đề hoặc góc nhìn khác.\n"
+                "5. Liên hệ thực tế/bản thân."
+            ),
+            inline=False
+        )
+        embed.add_field(
+            name="III. Kết bài",
+            value="Khẳng định lại luận điểm, rút ra bài học hoặc thông điệp.",
+            inline=False
+        )
+        embed.set_footer(text="Đây là khung dàn ý tổng quát — cần tự điền dẫn chứng/luận điểm cụ thể phù hợp đề bài.")
+        await interaction.response.send_message(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(Study(bot))

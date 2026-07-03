@@ -17,6 +17,9 @@ INITIAL_EXTENSIONS = [
     "cogs.utilities",
     "cogs.study",
     "cogs.moderation",
+    "cogs.music",
+    "cogs.fun",
+    "cogs.help",
 ]
 
 SCHEMA = """

@@ -2,3 +2,5 @@ discord.py
 python-dotenv
 asyncpg
 flask
+PyNaCl
+yt-dlp

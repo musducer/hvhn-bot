@@ -66,6 +66,37 @@ class Moderation(commands.Cog):
         await member.timeout(None)
         await interaction.response.send_message(f"🔊 Đã gỡ cấm chat cho {member.mention}.")
 
+    # ---------------- Kick / Ban ----------------
+    @app_commands.command(name="kick", description="Kick một thành viên khỏi server (Chỉ Admin)")
+    @app_commands.checks.has_permissions(kick_members=True)
+    async def kick(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Không rõ lý do"):
+        await member.kick(reason=reason)
+        await interaction.response.send_message(f"👢 Đã kick {member.mention}. Lý do: {reason}")
+
+        log_channel = self.log_channel(interaction.guild)
+        if log_channel:
+            await log_channel.send(f"👢 {interaction.user.mention} đã kick {member.mention}. Lý do: {reason}")
+
+    @app_commands.command(name="ban", description="Ban một thành viên khỏi server (Chỉ Admin)")
+    @app_commands.checks.has_permissions(ban_members=True)
+    async def ban(self, interaction: discord.Interaction, member: discord.Member, reason: str = "Không rõ lý do"):
+        await member.ban(reason=reason)
+        await interaction.response.send_message(f"🔨 Đã ban {member.mention}. Lý do: {reason}")
+
+        log_channel = self.log_channel(interaction.guild)
+        if log_channel:
+            await log_channel.send(f"🔨 {interaction.user.mention} đã ban {member.mention}. Lý do: {reason}")
+
+    # ---------------- Slowmode ----------------
+    @app_commands.command(name="slowmode", description="Đặt chế độ chat chậm cho kênh hiện tại (giây, 0 để tắt) (Chỉ Admin)")
+    @app_commands.checks.has_permissions(manage_channels=True)
+    async def slowmode(self, interaction: discord.Interaction, seconds: int):
+        await interaction.channel.edit(slowmode_delay=seconds)
+        if seconds == 0:
+            await interaction.response.send_message("✅ Đã tắt chế độ chat chậm.")
+        else:
+            await interaction.response.send_message(f"🐢 Đã đặt chat chậm {seconds} giây cho kênh này.")
+
     # ---------------- Banned words ----------------
     @app_commands.command(name="addbadword", description="Thêm từ cấm vào bộ lọc tự động (Chỉ Admin)")
     @app_commands.checks.has_permissions(manage_guild=True)
