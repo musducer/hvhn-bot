@@ -305,6 +305,7 @@ function phanPhoi() {
 
       try {
         const destFolder = getOrCreateFolder(destRoot, name);
+        _ensureOnlyViewer(destFolder, email);
 
         // IDEMPOTENT: nếu folder đích đã có file cùng tên -> dùng lại, KHÔNG copy thêm bản mới
         let target;
@@ -321,11 +322,7 @@ function phanPhoi() {
         }
 
         // Chỉ share nếu email CHƯA có quyền -> tránh gửi lại mail thông báo mỗi lần chạy
-        const viewers = target.getViewers().map(u => u.getEmail().toLowerCase());
-        const editors = target.getEditors().map(u => u.getEmail().toLowerCase());
-        if (viewers.indexOf(email.toLowerCase()) < 0 && editors.indexOf(email.toLowerCase()) < 0) {
-          target.addViewer(email);
-        }
+        _ensureOnlyViewer(target, email);
         // Khoá tải/in/copy: nếu Advanced Drive Service chưa bật thì bỏ qua, KHÔNG chặn "Xong"
         try {
           Drive.Files.update({ copyRequiresWriterPermission: true }, target.getId());
@@ -625,10 +622,11 @@ function kiemTraHetHan() {
     const folders = destRoot.getFoldersByName(name);
     if (folders.hasNext()) {
       const folder = folders.next();
+      _removeAccess(folder, email);
       const files = folder.getFiles();
       while (files.hasNext()) {
         const f = files.next();
-        try { f.getViewers().forEach(v => f.removeViewer(v.getEmail())); } catch (e) {}
+        _removeAccess(f, email);
         f.setTrashed(true); // BỎ LUÔN FILE
       }
     }
@@ -909,6 +907,38 @@ function getOrCreateFolder(parent, name) {
   return parent.createFolder(name);
 }
 
+// Cap dung 1 quyen cho khach: viewer tren folder/file, khong editor.
+function _ensureOnlyViewer(item, email) {
+  const lower = String(email || '').trim().toLowerCase();
+  if (!lower) return;
+
+  try {
+    const editors = item.getEditors().map(u => u.getEmail().toLowerCase());
+    if (editors.indexOf(lower) >= 0) item.removeEditor(email);
+  } catch (e) {}
+
+  try {
+    const viewers = item.getViewers().map(u => u.getEmail().toLowerCase());
+    const editors = item.getEditors().map(u => u.getEmail().toLowerCase());
+    if (viewers.indexOf(lower) < 0 && editors.indexOf(lower) < 0) item.addViewer(email);
+  } catch (e) {}
+}
+
+function _removeAccess(item, email) {
+  const lower = String(email || '').trim().toLowerCase();
+  if (!lower) return;
+
+  try {
+    const viewers = item.getViewers().map(u => u.getEmail().toLowerCase());
+    if (viewers.indexOf(lower) >= 0) item.removeViewer(email);
+  } catch (e) {}
+
+  try {
+    const editors = item.getEditors().map(u => u.getEmail().toLowerCase());
+    if (editors.indexOf(lower) >= 0) item.removeEditor(email);
+  } catch (e) {}
+}
+
 // ============ XOÁ KHÁCH ============
 
 // Ghi 1 đơn xoá (email khách / tên tài liệu) vào folder để watcher trên PC cập nhật clients.csv / docs/.
@@ -920,14 +950,15 @@ function _ghiDonXoa(folderName, content) {
 }
 
 // Xoá file phân phối + folder riêng của 1 khách trên Drive.
-function _xoaFolderKhachTrenDrive(destRoot, name) {
+function _xoaFolderKhachTrenDrive(destRoot, name, email) {
   const folders = destRoot.getFoldersByName(name);
   while (folders.hasNext()) {
     const folder = folders.next();
+    _removeAccess(folder, email);
     const files = folder.getFiles();
     while (files.hasNext()) {
       const f = files.next();
-      try { f.getViewers().forEach(v => f.removeViewer(v.getEmail())); } catch (e) {}
+      _removeAccess(f, email);
       f.setTrashed(true);
     }
     folder.setTrashed(true);
@@ -936,7 +967,7 @@ function _xoaFolderKhachTrenDrive(destRoot, name) {
 
 // Xoá hẳn 1 khách: file Drive + folder + tab + dòng registry + báo PC gỡ khỏi clients.csv.
 function _xoaMotKhach(ss, destRoot, name, email) {
-  _xoaFolderKhachTrenDrive(destRoot, name);
+  _xoaFolderKhachTrenDrive(destRoot, name, email);
   const tab = ss.getSheetByName(name);
   if (tab) ss.deleteSheet(tab);
   if (email) _ghiDonXoa(XOA_KHACH_NAME, email);
