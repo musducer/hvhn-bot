@@ -1,0 +1,1024 @@
+// Dán vào: Google Sheet > Extensions > Apps Script
+// Trước khi chạy: Services (+) > thêm "Drive API" (Advanced Google service)
+// Mỗi tab khách có header: TenNguoiNhan | Email | TenFile | TrangThai
+
+const SOURCE_FOLDER_ID = '15Ipn2p7b3_J-_pszxSh05vSMET2rf9Dl';
+const DEST_ROOT_FOLDER_ID = '1Afa6oP-vRcpjA1ooSpjXJDRdhiZbCQhB';
+
+const DASHBOARD_NAME = 'Dashboard';
+const STAGING_NAME = 'Nhập mới';
+const REGISTRY_NAME = 'Khách hàng';   // tab quản lý gói/hạn dùng
+const DOCS_NAME = 'Tài liệu';         // tab danh sách tài liệu
+const LOG_NAME = 'Nhật ký';           // tab lịch sử thao tác
+const SEARCH_CELL = 'B1';
+
+const SUB_DAYS = 30;   // 1 gói = 30 ngày
+const WARN_DAYS = 3;   // cảnh báo "sắp hết" khi còn <= 3 ngày
+const RENEW_COL = 7;   // cột G ở tab Khách hàng: ô tick "Gia hạn +1 tháng"
+const DEL_COL = 8;     // cột H ở tab Khách hàng: ô tick "Xóa khách"
+
+const HVHN_PARENT_FOLDER_ID_EARLY = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs';
+const XOA_KHACH_NAME = '_don_xoa_khach';
+const XOA_TAILIEU_NAME = '_don_xoa_tai_lieu';
+
+// Tab không phải dữ liệu khách -> luôn bỏ qua khi quét
+function isSystemTab(name) {
+  return name === DASHBOARD_NAME || name === STAGING_NAME || name === REGISTRY_NAME
+      || name === DOCS_NAME || name === LOG_NAME;
+}
+
+// Ghi 1 dòng nhật ký: thời gian | hành động | chi tiết. Không làm hỏng flow nếu lỗi.
+function ghiLog(action, detail) {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    let log = ss.getSheetByName(LOG_NAME);
+    if (!log) {
+      log = ss.insertSheet(LOG_NAME);
+      log.getRange(1, 1, 1, 3).setValues([['Thời gian', 'Hành động', 'Chi tiết']]);
+      log.getRange(1, 1, 1, 3).setBackground('#5f6368').setFontColor('#fff').setFontWeight('bold');
+      log.setFrozenRows(1);
+      log.setColumnWidth(1, 150); log.setColumnWidth(2, 160); log.setColumnWidth(3, 400);
+    }
+    log.insertRowAfter(1);
+    log.getRange(2, 1, 1, 3).setValues([[new Date(), action, detail]]);
+    log.getRange(2, 1).setNumberFormat('dd/mm/yyyy HH:mm:ss');
+  } catch (e) {}
+}
+
+// ============ MENU + KHỞI TẠO TỰ ĐỘNG ============
+
+function onOpen() {
+  ensureDashboard();
+  ensureStaging();
+  ensureRegistry();
+  SpreadsheetApp.getUi()
+    .createMenu('HVHN')
+    .addItem('1. Tách theo khách (chạy 1 lần đầu)', 'tachTheoKhach')
+    .addItem('2. Quét file new_rows.csv trên Drive + Phân phối', 'tuDongXuLyFileMoi')
+    .addItem('3. Nhập mới thủ công (tab "Nhập mới") + Phân phối', 'themMoiVaPhanPhoi')
+    .addItem('4. Phân phối lại (quét toàn bộ)', 'phanPhoi')
+    .addItem('5. Cập nhật Dashboard', 'capNhatDashboard')
+    .addSeparator()
+    .addItem('📅 Đồng bộ danh sách khách + hạn dùng', 'dongBoKhachHang')
+    .addItem('⏰ Kiểm tra & gỡ quyền khách hết hạn (ngay)', 'kiemTraHetHan')
+    .addItem('♻️ Xử lý gia hạn (các ô đã tích)', 'xuLyGiaHan')
+    .addSeparator()
+    .addItem('📄 Cập nhật danh sách Tài liệu', 'capNhatTaiLieu')
+    .addItem('🗑️ Xóa TÀI LIỆU đã tích', 'xoaTaiLieuDaTich')
+    .addItem('🗑️ Xóa KHÁCH đã tích (cột H)', 'xoaKhachDaTich')
+    .addItem('🗑️ Xóa TẤT CẢ khách', 'xoaTatCaKhach')
+    .addSeparator()
+    .addItem('📱 Tạo Google Form cho điện thoại (1 lần)', 'caiDatForm')
+    .addItem('📱 Tạo lại RIÊNG Form thêm khách', 'taoLaiFormKhach')
+    .addItem('Dọn file trùng trên Drive', 'donFileTrung')
+    .addItem('Trang trí lại tất cả', 'trangTriTatCa')
+    .addToUi();
+}
+
+// Tự chạy khi người dùng sửa ô: tìm kiếm Dashboard, hoặc tick ô Gia hạn ở tab Khách hàng.
+function onEdit(e) {
+  const sheet = e.range.getSheet();
+  const name = sheet.getName();
+  if (name === DASHBOARD_NAME && e.range.getA1Notation() === SEARCH_CELL) {
+    capNhatDashboard();
+  } else if (name === REGISTRY_NAME && e.range.getColumn() === RENEW_COL
+             && e.range.getRow() > 1 && e.value === 'TRUE') {
+    // onEdit là simple trigger -> KHÔNG được gọi DriveApp. runNow=false: chỉ sửa sheet,
+    // để trigger 5 phút (tuDongXuLyFileMoi->phanPhoi) tự phân phối lại nếu cần.
+    giaHanMotDong(sheet, e.range.getRow(), false);
+  }
+}
+
+function ensureDashboard() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let dash = ss.getSheetByName(DASHBOARD_NAME);
+  if (!dash) {
+    dash = ss.insertSheet(DASHBOARD_NAME, 0);
+    capNhatDashboard();
+  }
+  if (ss.getSheets()[0].getName() !== DASHBOARD_NAME) {
+    ss.setActiveSheet(dash);
+    ss.moveActiveSheet(1);
+  }
+}
+
+function ensureStaging() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let staging = ss.getSheetByName(STAGING_NAME);
+  if (!staging) {
+    staging = ss.insertSheet(STAGING_NAME, 1);
+    staging.getRange(1, 1, 1, 4).setValues([['TenNguoiNhan', 'Email', 'TenFile', 'TrangThai']]);
+    decorateSheet(staging);
+  }
+}
+
+// ============ TÁCH TAB GỘP BAN ĐẦU ============
+
+// Chạy 1 lần để tách tab gộp (cột A=TenNguoiNhan) thành 1 tab riêng/khách.
+// Sau khi chạy xong, tự xoá tab gộp gốc đi (chuột phải tab > Delete).
+function tachTheoKhach() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const master = ss.getSheets().find(s => !isSystemTab(s.getName()));
+  if (!master) return;
+  const data = master.getDataRange().getValues();
+  const header = data[0];
+  const groups = {};
+
+  for (let i = 1; i < data.length; i++) {
+    const name = data[i][0];
+    if (!name) continue;
+    if (!groups[name]) groups[name] = [header];
+    groups[name].push(data[i]);
+  }
+
+  Object.keys(groups).forEach(name => {
+    let sheet = ss.getSheetByName(name);
+    if (!sheet) sheet = ss.insertSheet(name);
+    sheet.clearContents();
+    sheet.getRange(1, 1, groups[name].length, header.length).setValues(groups[name]);
+    decorateSheet(sheet);
+  });
+
+  capNhatDashboard();
+}
+
+// ============ THÊM MỚI (tài liệu mới HOẶC khách mới) ============
+
+// Dùng chung: gộp mảng dữ liệu [[TenNguoiNhan, Email, TenFile], ...] (có/không header đều được)
+// vào đúng tab khách tương ứng, tự tạo tab nếu khách mới, tự bỏ qua dòng trùng file đã có.
+// Trả về số dòng thực sự đã thêm.
+function mergeRowsIntoClientTabs(ss, rows) {
+  let added = 0;
+  rows.forEach(row => {
+    const [name, email, fileName] = row;
+    if (!name || !email || !fileName || name === 'TenNguoiNhan') return; // bỏ qua header/dòng rỗng
+
+    let sheet = ss.getSheetByName(name);
+    if (!sheet) {
+      sheet = ss.insertSheet(name);
+      sheet.getRange(1, 1, 1, 4).setValues([['TenNguoiNhan', 'Email', 'TenFile', 'TrangThai']]);
+    }
+
+    const lastRow = sheet.getLastRow();
+    const existing = lastRow > 1
+      ? sheet.getRange(2, 3, lastRow - 1, 1).getValues().flat()
+      : [];
+    if (existing.includes(fileName)) return; // đã có rồi, khỏi thêm trùng
+
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, 3).setValues([[name, email, fileName]]);
+    added++;
+  });
+  return added;
+}
+
+// TỰ ĐỘNG HOÀN TOÀN: quét folder Source trên Drive tìm mọi file tên "new_rows.csv"
+// (Claude hoặc app khác có thể tự tạo file này lên Drive không cần đụng vào Sheet),
+// đọc nội dung, gộp vào đúng tab khách, xoá file đã xử lý, rồi phân phối + cập nhật Dashboard.
+// Gắn hàm này vào 1 Trigger chạy theo giờ (Triggers > Add Trigger > Time-driven) để tự chạy định kỳ,
+// khỏi cần mở Sheet lên bấm gì cả.
+function tuDongXuLyFileMoi() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
+  // Quét mọi file tên bắt đầu bằng "new_rows" và đuôi .csv (watcher ghi new_rows_<timestamp>.csv)
+  const all = sourceFolder.getFiles();
+  let mergedAny = false;
+  let totalAdded = 0;
+
+  while (all.hasNext()) {
+    const file = all.next();
+    if (!/^new_rows.*\.csv$/i.test(file.getName())) continue;
+    const csvText = file.getBlob().getDataAsString('UTF-8');
+    const rows = Utilities.parseCsv(csvText);
+    totalAdded += mergeRowsIntoClientTabs(ss, rows);
+    file.setTrashed(true); // xử lý xong thì dọn, khỏi lặp lại lần sau
+    mergedAny = true;
+  }
+
+  if (mergedAny) Logger.log(`Đã gộp ${totalAdded} dòng mới từ new_rows*.csv`);
+  // LUÔN chạy phanPhoi: dòng "Xong" tự bỏ qua; dòng "Không thấy file" (do PDF upload chưa
+  // kịp lần trước) sẽ được thử lại ở lần trigger sau — tự chữa lành, không kẹt.
+  phanPhoi();
+}
+
+// Gộp các dòng đang nằm ở tab "Nhập mới" (đường tay dự phòng, khi không dùng new_rows.csv)
+// vào đúng tab khách tương ứng, rồi TỰ ĐỘNG chạy phân phối + cập nhật Dashboard luôn.
+function themMoiVaPhanPhoi() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const staging = ss.getSheetByName(STAGING_NAME);
+  if (!staging) { SpreadsheetApp.getUi().alert('Không tìm thấy tab "' + STAGING_NAME + '"'); return; }
+
+  const rows = staging.getDataRange().getValues();
+  const added = mergeRowsIntoClientTabs(ss, rows);
+
+  const lastStagingRow = staging.getLastRow();
+  if (lastStagingRow > 1) staging.getRange(2, 1, lastStagingRow - 1, staging.getLastColumn()).clearContent();
+
+  SpreadsheetApp.getActiveSpreadsheet().toast(`Đã thêm ${added} dòng mới, đang phân phối...`);
+  phanPhoi();
+}
+
+// ============ PHÂN PHỐI ============
+
+// Xử lý MỌI tab có header đúng định dạng (TenNguoiNhan | Email | TenFile | TrangThai),
+// trừ Dashboard và tab "Nhập mới". Chạy lại vô hại: dòng đã "Xong" sẽ được bỏ qua.
+function phanPhoi() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+
+  ss.getSheets().forEach(sheet => {
+    if (isSystemTab(sheet.getName())) return;
+
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
+
+    const seen = {}; // chống trùng dòng trong cùng 1 tab
+    for (let i = 1; i < data.length; i++) {
+      const [name, email, fileName, status] = data[i];
+      if (!name || !email || !fileName || status === 'Xong') continue;
+      if (seen[fileName]) {         // dòng lặp trong tab -> đánh dấu, không xử lý lại
+        sheet.getRange(i + 1, 4).setValue('Trùng (bỏ qua)');
+        continue;
+      }
+      seen[fileName] = true;
+
+      try {
+        const destFolder = getOrCreateFolder(destRoot, name);
+
+        // IDEMPOTENT: nếu folder đích đã có file cùng tên -> dùng lại, KHÔNG copy thêm bản mới
+        let target;
+        const existingDest = destFolder.getFilesByName(fileName);
+        if (existingDest.hasNext()) {
+          target = existingDest.next();
+        } else {
+          const srcFiles = sourceFolder.getFilesByName(fileName);
+          if (!srcFiles.hasNext()) {
+            sheet.getRange(i + 1, 4).setValue('Không thấy file: ' + fileName);
+            continue;
+          }
+          target = srcFiles.next().makeCopy(fileName, destFolder);
+        }
+
+        // Chỉ share nếu email CHƯA có quyền -> tránh gửi lại mail thông báo mỗi lần chạy
+        const viewers = target.getViewers().map(u => u.getEmail().toLowerCase());
+        const editors = target.getEditors().map(u => u.getEmail().toLowerCase());
+        if (viewers.indexOf(email.toLowerCase()) < 0 && editors.indexOf(email.toLowerCase()) < 0) {
+          target.addViewer(email);
+        }
+        // Khoá tải/in/copy: nếu Advanced Drive Service chưa bật thì bỏ qua, KHÔNG chặn "Xong"
+        try {
+          Drive.Files.update({ copyRequiresWriterPermission: true }, target.getId());
+        } catch (e2) { /* thiếu Drive service - vẫn share được, chỉ là chưa khoá tải */ }
+
+        sheet.getRange(i + 1, 4).setValue('Xong: ' + target.getUrl());
+      } catch (e) {
+        sheet.getRange(i + 1, 4).setValue('Lỗi: ' + e.message);
+      }
+    }
+    decorateSheet(sheet);
+  });
+
+  dongBoKhachHang();   // cập nhật danh sách khách + set ngày cấp/hết hạn cho khách mới
+  capNhatDashboard();
+}
+
+// ============ DASHBOARD (tổng quan + tìm kiếm) ============
+
+function capNhatDashboard() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let dash = ss.getSheetByName(DASHBOARD_NAME);
+  if (!dash) dash = ss.insertSheet(DASHBOARD_NAME, 0);
+
+  const searchTerm = (dash.getRange(SEARCH_CELL).getValue() || '').toString().trim().toLowerCase();
+  dash.getRange('A4:Z999').clearContent();
+
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  const rows = [];
+
+  ss.getSheets().forEach(sheet => {
+    const name = sheet.getName();
+    if (isSystemTab(name)) return;
+
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
+
+    const body = data.slice(1).filter(r => r[0]);
+    if (!body.length) return;
+
+    const email = body[0][1];
+    const total = body.length;
+    const done = body.filter(r => (r[3] || '').toString().startsWith('Xong')).length;
+    const error = body.filter(r =>
+      (r[3] || '').toString().startsWith('Lỗi') || (r[3] || '').toString().startsWith('Không thấy')
+    ).length;
+    const pending = total - done - error;
+
+    let folderUrl = '';
+    const foundFolders = destRoot.getFoldersByName(name);
+    if (foundFolders.hasNext()) folderUrl = foundFolders.next().getUrl();
+
+    rows.push({ name, email, total, done, error, pending, sheetId: sheet.getSheetId(), folderUrl });
+  });
+
+  const filtered = searchTerm
+    ? rows.filter(r => r.name.toLowerCase().includes(searchTerm) || r.email.toLowerCase().includes(searchTerm))
+    : rows;
+
+  dash.getRange('A1').setValue('🔎 Tìm khách (tên hoặc email):');
+  dash.getRange('D1').setValue('Tổng số khách:');
+  dash.getRange('E1').setValue(rows.length);
+  dash.getRange('F1').setValue('Tổng lỗi/thiếu file:');
+  dash.getRange('G1').setValue(rows.reduce((s, r) => s + r.error, 0));
+
+  const header = ['Tên khách', 'Email', 'Tổng tài liệu', 'Đã xong', 'Lỗi/Thiếu file', 'Chưa chạy', 'Mở tab', 'Folder Drive riêng'];
+  dash.getRange(3, 1, 1, header.length).setValues([header]);
+
+  const ssUrl = ss.getUrl();
+  const tableRows = filtered.map(r => [
+    r.name, r.email, r.total, r.done, r.error, r.pending,
+    `=HYPERLINK("${ssUrl}#gid=${r.sheetId}","Mở tab")`,
+    r.folderUrl ? `=HYPERLINK("${r.folderUrl}","Mở folder")` : '',
+  ]);
+  if (tableRows.length) {
+    dash.getRange(4, 1, tableRows.length, header.length).setValues(tableRows);
+  }
+
+  decorateDashboard(dash, header.length);
+}
+
+function decorateDashboard(dash, numCols) {
+  dash.getRange('A1:H1').setFontWeight('bold').setBackground('#e8eaed');
+  dash.getRange('B1').setBackground('#ffffff').setFontWeight('normal').setBorder(true, true, true, true, null, null);
+  dash.getRange('D1:G1').setFontWeight('bold');
+
+  const header = dash.getRange(3, 1, 1, numCols);
+  header.setBackground('#1a73e8').setFontColor('#ffffff').setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle');
+  dash.setFrozenRows(3);
+  dash.setRowHeight(3, 30);
+
+  dash.autoResizeColumns(1, numCols);
+  dash.setColumnWidth(1, 220);
+  dash.setColumnWidth(2, 220);
+
+  const lastRow = dash.getLastRow();
+  if (lastRow > 3) {
+    const body = dash.getRange(4, 1, lastRow - 3, numCols);
+    body.setVerticalAlignment('middle').setFontSize(10)
+      .setBorder(true, true, true, true, true, true, '#d9d9d9', SpreadsheetApp.BorderStyle.SOLID);
+    dash.getBandings().forEach(b => b.remove());
+    body.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, true, false);
+
+    const errorRange = dash.getRange(4, 5, lastRow - 3, 1);
+    dash.setConditionalFormatRules([
+      SpreadsheetApp.newConditionalFormatRule()
+        .whenNumberGreaterThan(0).setBackground('#f4cccc').setFontColor('#990000')
+        .setRanges([errorRange]).build(),
+    ]);
+  }
+
+  dash.setTabColor('#0b8043');
+}
+
+// ============ TRANG TRÍ TAB KHÁCH ============
+
+function trangTriTatCa() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ss.getSheets().forEach(sheet => {
+    if (isSystemTab(sheet.getName())) return;
+    const data = sheet.getDataRange().getValues();
+    if (data.length && data[0][0] === 'TenNguoiNhan') decorateSheet(sheet);
+  });
+  capNhatDashboard();
+}
+
+// ============ QUẢN LÝ GÓI / HẠN DÙNG ============
+
+function ensureRegistry() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let reg = ss.getSheetByName(REGISTRY_NAME);
+  const isNew = !reg;
+  if (isNew) reg = ss.insertSheet(REGISTRY_NAME, 2);
+  // LUÔN ghi lại header 8 cột (nâng cấp tab cũ 7 cột -> có cột "Xóa khách")
+  reg.getRange(1, 1, 1, 8).setValues([[
+    'Tên khách', 'Email', 'Ngày cấp quyền', 'Ngày hết hạn',
+    'Còn lại (ngày)', 'Trạng thái', 'Gia hạn +1 tháng', 'Xóa khách',
+  ]]);
+  if (isNew) decorateRegistry(reg);
+  return reg;
+}
+
+function _today() {
+  const d = new Date();
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function _addDays(date, days) {
+  const d = new Date(date);
+  d.setDate(d.getDate() + days);
+  return d;
+}
+
+function _daysBetween(a, b) {
+  return Math.round((b.getTime() - a.getTime()) / 86400000);
+}
+
+// Quét các tab khách -> đảm bảo mỗi khách có 1 dòng trong tab "Khách hàng".
+// Khách MỚI (chưa có dòng): set Ngày cấp = hôm nay, Ngày hết hạn = hôm nay + SUB_DAYS.
+// Khách cũ: giữ nguyên ngày, chỉ tính lại "còn lại" + trạng thái.
+function dongBoKhachHang() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const reg = ensureRegistry();
+
+  // đọc registry hiện có -> map theo tên
+  const regData = reg.getDataRange().getValues();
+  const existing = {}; // name -> {rowIndex, email, grant, expiry, status}
+  for (let i = 1; i < regData.length; i++) {
+    const nm = regData[i][0];
+    if (nm) existing[nm] = { rowIndex: i + 1 };
+  }
+
+  // gom khách từ các tab dữ liệu
+  const clients = {}; // name -> email
+  ss.getSheets().forEach(sheet => {
+    if (isSystemTab(sheet.getName())) return;
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] && data[i][1]) clients[data[i][0]] = data[i][1];
+    }
+  });
+
+  const today = _today();
+  Object.keys(clients).forEach(name => {
+    if (existing[name]) return; // đã có -> giữ nguyên ngày
+    const grant = today;
+    const expiry = _addDays(today, SUB_DAYS);
+    reg.appendRow([name, clients[name], grant, expiry, '', 'Còn hạn', false, false]);
+    ghiLog('Thêm khách vào danh sách', name + ' - ' + clients[name]);
+  });
+
+  capNhatTrangThaiHan(reg);
+  decorateRegistry(reg);
+}
+
+// Tính lại cột "Còn lại" + "Trạng thái" cho mọi dòng (không đụng 'Đã gỡ quyền').
+function capNhatTrangThaiHan(reg) {
+  const last = reg.getLastRow();
+  if (last < 2) return;
+  const today = _today();
+  const rng = reg.getRange(2, 1, last - 1, 7);
+  const vals = rng.getValues();
+
+  vals.forEach(row => {
+    const expiry = row[3] ? new Date(row[3]) : null;
+    if (!expiry) { row[4] = ''; return; }
+    const left = _daysBetween(today, new Date(expiry.getFullYear(), expiry.getMonth(), expiry.getDate()));
+    row[4] = left;
+    if (row[5] === 'Đã gỡ quyền') return; // đã gỡ -> chờ gia hạn, không tự đổi
+    if (left < 0) row[5] = 'Hết hạn - chờ gỡ';
+    else if (left <= WARN_DAYS) row[5] = 'Sắp hết';
+    else row[5] = 'Còn hạn';
+  });
+  rng.setValues(vals);
+}
+
+// TRIGGER HẰNG NGÀY: khách quá hạn -> XOÁ file phân phối (bỏ file) + gỡ chia sẻ, đánh 'Đã gỡ quyền'.
+function kiemTraHetHan() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const reg = ensureRegistry();
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  const last = reg.getLastRow();
+  if (last < 2) { capNhatDashboard(); return; }
+
+  const today = _today();
+  const vals = reg.getRange(2, 1, last - 1, 7).getValues();
+  let revoked = 0;
+
+  for (let i = 0; i < vals.length; i++) {
+    const [name, email, grant, expiry, , status] = vals[i];
+    if (!name || !expiry || status === 'Đã gỡ quyền') continue;
+    const exp = new Date(expiry);
+    const expDay = new Date(exp.getFullYear(), exp.getMonth(), exp.getDate());
+    if (_daysBetween(today, expDay) >= 0) continue; // còn hạn
+
+    // Quá hạn: xoá toàn bộ file trong folder khách + reset trạng thái các dòng của khách ở tab
+    const folders = destRoot.getFoldersByName(name);
+    if (folders.hasNext()) {
+      const folder = folders.next();
+      const files = folder.getFiles();
+      while (files.hasNext()) {
+        const f = files.next();
+        try { f.getViewers().forEach(v => f.removeViewer(v.getEmail())); } catch (e) {}
+        f.setTrashed(true); // BỎ LUÔN FILE
+      }
+    }
+    // reset cột trạng thái ở tab khách -> để khi gia hạn sẽ phân phối lại
+    const tab = ss.getSheetByName(name);
+    if (tab) {
+      const tData = tab.getDataRange().getValues();
+      for (let r = 1; r < tData.length; r++) {
+        if (tData[r][0]) tab.getRange(r + 1, 4).setValue('Đã gỡ (hết hạn)');
+      }
+    }
+    vals[i][5] = 'Đã gỡ quyền';
+    ghiLog('Hết hạn - gỡ quyền + xoá file', name + ' - ' + email);
+    revoked++;
+  }
+
+  reg.getRange(2, 1, vals.length, 7).setValues(vals);
+  capNhatTrangThaiHan(reg);
+  decorateRegistry(reg);
+  Logger.log(`Đã gỡ quyền ${revoked} khách hết hạn.`);
+  capNhatDashboard();
+}
+
+// Gia hạn 1 dòng. Cộng thêm SUB_DAYS; nếu đã gỡ -> chuẩn bị phân phối lại.
+// runNow=true (từ menu, đủ quyền): chạy phanPhoi ngay. runNow=false (từ onEdit): để trigger lo.
+function giaHanMotDong(reg, rowIndex, runNow) {
+  const row = reg.getRange(rowIndex, 1, 1, 7).getValues()[0];
+  const [name, email, grant, expiry, , status] = row;
+  if (!name) return;
+
+  const today = _today();
+  const curExp = expiry ? new Date(expiry) : today;
+  const base = curExp.getTime() > today.getTime() ? curExp : today; // còn hạn: nối tiếp; hết hạn: từ hôm nay
+  const newExp = _addDays(base, SUB_DAYS);
+
+  reg.getRange(rowIndex, 4).setValue(newExp);
+  reg.getRange(rowIndex, RENEW_COL).setValue(false); // bỏ tick
+  reg.getRange(rowIndex, 6).setValue('Còn hạn');
+  ghiLog('Gia hạn +' + SUB_DAYS + ' ngày', name + ' -> ' + newExp.toLocaleDateString());
+
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  if (status === 'Đã gỡ quyền') {
+    // đã xoá file -> cần phân phối lại: xoá trạng thái các dòng của khách để phanPhoi copy lại
+    const tab = ss.getSheetByName(name);
+    if (tab) {
+      const tData = tab.getDataRange().getValues();
+      for (let r = 1; r < tData.length; r++) {
+        if (tData[r][0]) tab.getRange(r + 1, 4).setValue('');
+      }
+    }
+    if (runNow) {
+      phanPhoi(); // menu: phân phối lại ngay
+      ss.toast(`Đã gia hạn + phân phối lại cho ${name}. Hết hạn: ${newExp.toLocaleDateString()}`);
+    } else {
+      ss.toast(`Đã gia hạn ${name}. Tài liệu sẽ được gửi lại trong ít phút.`);
+    }
+  } else {
+    ss.toast(`Đã gia hạn ${name}. Hết hạn mới: ${newExp.toLocaleDateString()}`);
+  }
+}
+
+// Quét toàn bộ ô Gia hạn đã tick (dùng khi tick nhiều dòng rồi chạy 1 lần qua menu).
+function xuLyGiaHan() {
+  const reg = ensureRegistry();
+  const last = reg.getLastRow();
+  if (last < 2) return;
+  const checks = reg.getRange(2, RENEW_COL, last - 1, 1).getValues();
+  for (let i = checks.length - 1; i >= 0; i--) {
+    if (checks[i][0] === true) giaHanMotDong(reg, i + 2, true); // menu -> chạy ngay
+  }
+  capNhatTrangThaiHan(reg);
+  decorateRegistry(reg);
+}
+
+function decorateRegistry(reg) {
+  const lastCol = 8;
+  const lastRow = reg.getLastRow();
+  const header = reg.getRange(1, 1, 1, lastCol);
+  header.setBackground('#0b8043').setFontColor('#ffffff').setFontWeight('bold')
+    .setHorizontalAlignment('center').setVerticalAlignment('middle');
+  reg.getRange(1, DEL_COL).setBackground('#990000'); // ô "Xóa khách" đỏ cảnh báo
+  reg.setFrozenRows(1);
+  reg.setRowHeight(1, 32);
+  reg.setColumnWidth(1, 200);
+  reg.setColumnWidth(2, 220);
+  reg.setColumnWidth(3, 120);
+  reg.setColumnWidth(4, 120);
+  reg.setColumnWidth(5, 110);
+  reg.setColumnWidth(6, 130);
+  reg.setColumnWidth(7, 130);
+  reg.setColumnWidth(8, 100);
+
+  if (lastRow > 1) {
+    const n = lastRow - 1;
+    reg.getRange(2, 3, n, 2).setNumberFormat('dd/mm/yyyy');   // cột ngày
+    reg.getRange(2, RENEW_COL, n, 1).insertCheckboxes();      // ô gia hạn
+    reg.getRange(2, DEL_COL, n, 1).insertCheckboxes();        // ô xóa khách
+
+    const body = reg.getRange(2, 1, n, lastCol);
+    body.setVerticalAlignment('middle').setFontSize(10)
+      .setBorder(true, true, true, true, true, true, '#d9d9d9', SpreadsheetApp.BorderStyle.SOLID);
+    reg.getBandings().forEach(b => b.remove());
+    body.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, true, false);
+
+    const statusRange = reg.getRange(2, 6, n, 1);
+    reg.setConditionalFormatRules([
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Còn hạn')
+        .setBackground('#d9ead3').setFontColor('#274e13').setRanges([statusRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Sắp hết')
+        .setBackground('#fff2cc').setFontColor('#7f6000').setRanges([statusRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextStartsWith('Hết hạn')
+        .setBackground('#fce5cd').setFontColor('#b45f06').setRanges([statusRange]).build(),
+      SpreadsheetApp.newConditionalFormatRule().whenTextEqualTo('Đã gỡ quyền')
+        .setBackground('#f4cccc').setFontColor('#990000').setRanges([statusRange]).build(),
+    ]);
+  }
+  reg.setTabColor('#0b8043');
+}
+
+function decorateSheet(sheet) {
+  const lastCol = sheet.getLastColumn();
+  const lastRow = sheet.getLastRow();
+  if (lastRow < 1) return;
+
+  const header = sheet.getRange(1, 1, 1, lastCol);
+  header.setBackground('#1a73e8').setFontColor('#ffffff').setFontWeight('bold')
+    .setFontSize(11).setHorizontalAlignment('center').setVerticalAlignment('middle');
+  sheet.setFrozenRows(1);
+  sheet.setRowHeight(1, 32);
+
+  sheet.autoResizeColumns(1, lastCol);
+  if (lastCol >= 3) sheet.setColumnWidth(3, 380);
+  if (lastCol >= 4) sheet.setColumnWidth(4, 320);
+
+  if (lastRow > 1) {
+    const body = sheet.getRange(2, 1, lastRow - 1, lastCol);
+    body.setVerticalAlignment('middle').setFontSize(10)
+      .setBorder(true, true, true, true, true, true, '#d9d9d9', SpreadsheetApp.BorderStyle.SOLID);
+
+    sheet.getBandings().forEach(b => b.remove());
+    body.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, true, false);
+
+    if (lastCol >= 4) {
+      const statusRange = sheet.getRange(2, 4, lastRow - 1, 1);
+      sheet.setConditionalFormatRules([
+        SpreadsheetApp.newConditionalFormatRule()
+          .whenTextStartsWith('Xong').setBackground('#d9ead3').setFontColor('#274e13')
+          .setRanges([statusRange]).build(),
+        SpreadsheetApp.newConditionalFormatRule()
+          .whenTextStartsWith('Lỗi').setBackground('#f4cccc').setFontColor('#990000')
+          .setRanges([statusRange]).build(),
+        SpreadsheetApp.newConditionalFormatRule()
+          .whenTextStartsWith('Không thấy').setBackground('#fff2cc').setFontColor('#7f6000')
+          .setRanges([statusRange]).build(),
+      ]);
+    }
+  }
+
+  sheet.setTabColor('#1a73e8');
+}
+
+// Dọn file trùng đã lỡ tạo trong các folder khách (giữ bản CŨ nhất, xoá phần dư).
+// Chạy 1 lần qua menu HVHN > "Dọn file trùng trên Drive".
+function donFileTrung() {
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  const clientFolders = destRoot.getFolders();
+  let removed = 0;
+
+  while (clientFolders.hasNext()) {
+    const folder = clientFolders.next();
+    const byName = {};
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      const f = files.next();
+      let n = f.getName();
+      // Bản Drive tự đổi tên khi trùng: "... (1).pdf" -> gom về tên gốc để coi là trùng
+      const m = n.match(/^(.*?) \(\d+\)(\.pdf)$/i);
+      if (m) n = m[1] + m[2];
+      (byName[n] = byName[n] || []).push(f);
+    }
+    Object.keys(byName).forEach(n => {
+      const arr = byName[n];
+      if (arr.length <= 1) return;
+      // giữ bản có tên "sạch" (không có đuôi (N)) và tạo sớm nhất; xoá còn lại
+      arr.sort((a, b) => {
+        const ca = /\(\d+\)\.pdf$/i.test(a.getName()) ? 1 : 0;
+        const cb = /\(\d+\)\.pdf$/i.test(b.getName()) ? 1 : 0;
+        if (ca !== cb) return ca - cb;                    // tên sạch lên đầu
+        return a.getDateCreated() - b.getDateCreated();   // rồi tới bản cũ nhất
+      });
+      for (let i = 1; i < arr.length; i++) { arr[i].setTrashed(true); removed++; }
+    });
+  }
+
+  SpreadsheetApp.getActiveSpreadsheet().toast(`Đã xoá ${removed} file trùng.`);
+  capNhatDashboard();
+}
+
+function getOrCreateFolder(parent, name) {
+  const it = parent.getFoldersByName(name);
+  if (it.hasNext()) return it.next();
+  return parent.createFolder(name);
+}
+
+// ============ XOÁ KHÁCH ============
+
+// Ghi 1 đơn xoá (email khách / tên tài liệu) vào folder để watcher trên PC cập nhật clients.csv / docs/.
+function _ghiDonXoa(folderName, content) {
+  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID_EARLY);
+  const folder = getOrCreateFolder(parent, folderName);
+  folder.createFile('xoa_' + Date.now() + '_' + Math.floor(Math.random() * 1000) + '.txt',
+    content, MimeType.PLAIN_TEXT);
+}
+
+// Xoá file phân phối + folder riêng của 1 khách trên Drive.
+function _xoaFolderKhachTrenDrive(destRoot, name) {
+  const folders = destRoot.getFoldersByName(name);
+  while (folders.hasNext()) {
+    const folder = folders.next();
+    const files = folder.getFiles();
+    while (files.hasNext()) {
+      const f = files.next();
+      try { f.getViewers().forEach(v => f.removeViewer(v.getEmail())); } catch (e) {}
+      f.setTrashed(true);
+    }
+    folder.setTrashed(true);
+  }
+}
+
+// Xoá hẳn 1 khách: file Drive + folder + tab + dòng registry + báo PC gỡ khỏi clients.csv.
+function _xoaMotKhach(ss, destRoot, name, email) {
+  _xoaFolderKhachTrenDrive(destRoot, name);
+  const tab = ss.getSheetByName(name);
+  if (tab) ss.deleteSheet(tab);
+  if (email) _ghiDonXoa(XOA_KHACH_NAME, email);
+  ghiLog('XÓA khách', name + ' - ' + email);
+}
+
+// Menu: xoá các khách đã tick ô "Xóa khách" (cột H) ở tab Khách hàng.
+function xoaKhachDaTich() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const reg = ensureRegistry();
+  const last = reg.getLastRow();
+  if (last < 2) { ui.alert('Chưa có khách nào.'); return; }
+
+  const vals = reg.getRange(2, 1, last - 1, DEL_COL).getValues();
+  const targets = [];
+  vals.forEach((r, i) => { if (r[DEL_COL - 1] === true) targets.push({ row: i + 2, name: r[0], email: r[1] }); });
+  if (!targets.length) { ui.alert('Chưa tích ô "Xóa khách" nào ở cột H.'); return; }
+
+  const resp = ui.alert('Xoá ' + targets.length + ' khách?\n\n' + targets.map(t => '• ' + t.name).join('\n')
+    + '\n\nSẽ xoá file + gỡ quyền + xoá tab của họ. Không hoàn tác được.',
+    ui.ButtonSet.YES_NO);
+  if (resp !== ui.Button.YES) return;
+
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  // xoá tab trước sẽ làm dịch dòng registry -> xoá registry theo thứ tự giảm dần, xử Drive/tab luôn
+  targets.sort((a, b) => b.row - a.row);
+  targets.forEach(t => {
+    _xoaMotKhach(ss, destRoot, t.name, t.email);
+    reg.deleteRow(t.row);
+  });
+  decorateRegistry(reg);
+  capNhatDashboard();
+  ui.alert('Đã xoá ' + targets.length + ' khách.');
+}
+
+// Menu: xoá TẤT CẢ khách (dọn sạch để bắt đầu lại). Xác nhận 2 lớp.
+function xoaTatCaKhach() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const r1 = ui.alert('XÓA TẤT CẢ KHÁCH?', 'Xoá toàn bộ file phân phối, folder, tab của MỌI khách. Không hoàn tác.', ui.ButtonSet.YES_NO);
+  if (r1 !== ui.Button.YES) return;
+  const r2 = ui.prompt('Xác nhận lần 2', 'Gõ đúng chữ XOA rồi bấm OK để tiếp tục:', ui.ButtonSet.OK_CANCEL);
+  if (r2.getSelectedButton() !== ui.Button.OK || r2.getResponseText().trim().toUpperCase() !== 'XOA') return;
+
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  const reg = ensureRegistry();
+  const last = reg.getLastRow();
+  const vals = last >= 2 ? reg.getRange(2, 1, last - 1, 2).getValues() : [];
+  vals.forEach(row => { if (row[0]) _xoaMotKhach(ss, destRoot, row[0], row[1]); });
+  if (last >= 2) reg.deleteRows(2, last - 1);
+  decorateRegistry(reg);
+  capNhatDashboard();
+  ui.alert('Đã xoá toàn bộ khách.');
+}
+
+// ============ TAB DANH SÁCH TÀI LIỆU + XOÁ TÀI LIỆU ============
+
+// Lấy tên tài liệu gốc từ tên file "{tenKhach}__{tenTaiLieu}.pdf"
+function _docBaseFromFileName(fileName) {
+  const idx = fileName.indexOf('__');
+  let base = idx >= 0 ? fileName.substring(idx + 2) : fileName;
+  return base.replace(/\.pdf$/i, '');
+}
+
+// Menu/nút: dựng tab "Tài liệu" — mỗi tài liệu 1 dòng, kèm số khách đang có + ô tick Xóa.
+function capNhatTaiLieu() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(DOCS_NAME);
+  if (!sh) sh = ss.insertSheet(DOCS_NAME);
+
+  const count = {}; // docBase -> số khách
+  ss.getSheets().forEach(sheet => {
+    if (isSystemTab(sheet.getName())) return;
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
+    const seen = {};
+    for (let i = 1; i < data.length; i++) {
+      const fn = data[i][2];
+      if (!fn) continue;
+      const b = _docBaseFromFileName(String(fn));
+      if (seen[b]) continue; // 1 khách tính 1 lần / tài liệu
+      seen[b] = true;
+      count[b] = (count[b] || 0) + 1;
+    }
+  });
+
+  sh.clear();
+  sh.getRange(1, 1, 1, 3).setValues([['Tên tài liệu', 'Số khách đang có', 'Xóa tài liệu']]);
+  const names = Object.keys(count).sort();
+  if (names.length) {
+    sh.getRange(2, 1, names.length, 2).setValues(names.map(n => [n, count[n]]));
+    sh.getRange(2, 3, names.length, 1).insertCheckboxes();
+  }
+
+  // trang trí
+  sh.getRange(1, 1, 1, 3).setBackground('#1a73e8').setFontColor('#fff').setFontWeight('bold')
+    .setHorizontalAlignment('center');
+  sh.getRange(1, 3).setBackground('#990000');
+  sh.setFrozenRows(1);
+  sh.setColumnWidth(1, 420); sh.setColumnWidth(2, 140); sh.setColumnWidth(3, 120);
+  if (names.length) {
+    const body = sh.getRange(2, 1, names.length, 3);
+    body.setBorder(true, true, true, true, true, true, '#d9d9d9', SpreadsheetApp.BorderStyle.SOLID);
+    sh.getBandings().forEach(b => b.remove());
+    body.applyRowBanding(SpreadsheetApp.BandingTheme.LIGHT_GREY, true, false);
+  }
+  sh.setTabColor('#1a73e8');
+  SpreadsheetApp.getActiveSpreadsheet().toast('Đã cập nhật danh sách tài liệu (' + names.length + ').');
+}
+
+// Xoá 1 tài liệu khỏi MỌI khách: dòng ở tab khách + file phân phối + file gốc watermark + báo PC gỡ docs/.
+function _xoaMotTaiLieu(ss, sourceFolder, destRoot, docBase) {
+  ss.getSheets().forEach(sheet => {
+    if (isSystemTab(sheet.getName())) return;
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
+    const clientName = data[1] ? data[1][0] : sheet.getName();
+    // xoá dòng khớp tài liệu (từ dưới lên)
+    for (let i = data.length - 1; i >= 1; i--) {
+      const fn = data[i][2];
+      if (fn && _docBaseFromFileName(String(fn)) === docBase) {
+        // xoá file phân phối trong folder khách
+        const folders = destRoot.getFoldersByName(sheet.getName());
+        if (folders.hasNext()) {
+          const df = folders.next().getFilesByName(String(fn));
+          while (df.hasNext()) df.next().setTrashed(true);
+        }
+        sheet.deleteRow(i + 1);
+      }
+    }
+  });
+  // xoá file gốc watermark trong folder Source (mọi khách): "*__{docBase}.pdf"
+  const sf = sourceFolder.getFiles();
+  while (sf.hasNext()) {
+    const f = sf.next();
+    if (_docBaseFromFileName(f.getName()) === docBase && /\.pdf$/i.test(f.getName())) f.setTrashed(true);
+  }
+  _ghiDonXoa(XOA_TAILIEU_NAME, docBase); // báo PC xoá docs/{docBase}.pdf
+  ghiLog('XÓA tài liệu', docBase);
+}
+
+// Menu: xoá các tài liệu đã tick ở tab "Tài liệu".
+function xoaTaiLieuDaTich() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(DOCS_NAME);
+  if (!sh || sh.getLastRow() < 2) { ui.alert('Chưa có tài liệu. Chạy "Cập nhật danh sách Tài liệu" trước.'); return; }
+
+  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues();
+  const targets = vals.filter(r => r[2] === true).map(r => r[0]);
+  if (!targets.length) { ui.alert('Chưa tích ô "Xóa tài liệu" nào.'); return; }
+
+  const resp = ui.alert('Xoá ' + targets.length + ' tài liệu khỏi TẤT CẢ khách?\n\n'
+    + targets.map(t => '• ' + t).join('\n') + '\n\nKhông hoàn tác được.', ui.ButtonSet.YES_NO);
+  if (resp !== ui.Button.YES) return;
+
+  const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  targets.forEach(docBase => _xoaMotTaiLieu(ss, sourceFolder, destRoot, docBase));
+  capNhatTaiLieu();
+  capNhatDashboard();
+  ui.alert('Đã xoá ' + targets.length + ' tài liệu.');
+}
+
+// ============ GOOGLE FORM CHO ĐIỆN THOẠI ============
+// Chạy caiDatForm() 1 LẦN qua menu để tạo 2 Form + folder đơn hàng + trigger nhận đơn.
+// Sau đó gửi 2 link Form cho 3 quản lý — họ điền từ điện thoại là xong.
+
+const HVHN_PARENT_FOLDER_ID = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs'; // folder cha "TÀI LIỆU ĐỘC QUYỀN HVHN"
+const JOBS_KHACH_NAME = '_don_them_khach';      // nơi ghi đơn thêm khách (watcher PC đọc)
+const INCOMING_DOCS_NAME = '_don_them_tai_lieu'; // nơi chứa PDF tài liệu mới (watcher PC đọc)
+
+// Mở form theo ID nếu form còn sống (không bị xoá/thùng rác); ngược lại trả null.
+function _openFormIfAlive(id) {
+  if (!id) return null;
+  try {
+    const form = FormApp.openById(id);
+    if (DriveApp.getFileById(id).isTrashed()) return null; // đã xoá -> coi như không có
+    return form;
+  } catch (e) { return null; }
+}
+
+// Tạo mới form THÊM KHÁCH + gắn trigger + lưu ID. Trả về form.
+function _taoFormKhach(props) {
+  const form = FormApp.create('HVHN — Thêm khách mới');
+  form.setDescription('Nhập họ tên và email học viên để cấp tài liệu (gói 1 tháng). Hệ thống tự đóng dấu + gửi tài liệu.');
+  form.addTextItem().setTitle('Họ và tên học viên').setRequired(true);
+  form.addTextItem().setTitle('Email (Gmail) học viên').setRequired(true);
+  form.setConfirmationMessage('Đã nhận! Tài liệu sẽ được gửi sau khi hệ thống xử lý.');
+  form.setAcceptingResponses(true);
+  ScriptApp.newTrigger('xuLyFormKhach').forForm(form).onFormSubmit().create();
+  props.setProperty('FORM_KHACH_ID', form.getId());
+  return form;
+}
+
+// Menu: tạo lại RIÊNG form thêm khách (khi lỡ xoá/hỏng), không đụng form tài liệu.
+function taoLaiFormKhach() {
+  const props = PropertiesService.getScriptProperties();
+  const form = _taoFormKhach(props);
+  const msg = 'Đã tạo lại Form THÊM KHÁCH. Gửi link này cho quản lý:\n\n' + form.getPublishedUrl();
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+}
+
+function caiDatForm() {
+  const ui = SpreadsheetApp.getUi();
+  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
+  const jobsFolder = getOrCreateFolder(parent, JOBS_KHACH_NAME);
+  const incomingFolder = getOrCreateFolder(parent, INCOMING_DOCS_NAME);
+
+  const props = PropertiesService.getScriptProperties();
+
+  // --- Form 1: THÊM KHÁCH ---
+  let formKhach = _openFormIfAlive(props.getProperty('FORM_KHACH_ID'));
+  if (!formKhach) formKhach = _taoFormKhach(props);
+
+  // --- Form 2: THÊM TÀI LIỆU ---
+  let formTL = _openFormIfAlive(props.getProperty('FORM_TL_ID'));
+  if (!formTL) {
+    formTL = FormApp.create('HVHN — Thêm tài liệu mới');
+    formTL.setDescription('Tải lên file PDF tài liệu mới. Hệ thống tự đóng dấu tên từng khách + gửi cho TẤT CẢ khách đang còn hạn.');
+    formTL.addTextItem().setTitle('Tên tài liệu (tuỳ chọn, để trống sẽ dùng tên file)');
+    // LƯU Ý: Apps Script KHÔNG tạo được câu hỏi upload file bằng code -> phải thêm tay 1 lần.
+    formTL.setConfirmationMessage('Đã nhận file! Hệ thống sẽ đóng dấu và phân phối.');
+    formTL.setAcceptingResponses(true);
+    ScriptApp.newTrigger('xuLyFormTaiLieu').forForm(formTL).onFormSubmit().create();
+    props.setProperty('FORM_TL_ID', formTL.getId());
+  }
+
+  props.setProperty('JOBS_KHACH_ID', jobsFolder.getId());
+  props.setProperty('INCOMING_DOCS_ID', incomingFolder.getId());
+
+  const msg = 'ĐÃ TẠO XONG.\n\n'
+    + '① Form THÊM KHÁCH (gửi quản lý ngay được):\n' + formKhach.getPublishedUrl() + '\n\n'
+    + '② Form THÊM TÀI LIỆU — CẦN THÊM TAY 1 CÂU UPLOAD:\n'
+    + 'Mở link SỬA form dưới đây → bấm (+) thêm câu hỏi → chọn kiểu "Tải tệp lên" (File upload) '
+    + '→ đặt tên "File PDF tài liệu" → bật Bắt buộc. Xong mới gửi link cho quản lý.\n'
+    + 'Link SỬA: ' + formTL.getEditUrl() + '\n'
+    + 'Link GỬI quản lý (sau khi thêm câu upload): ' + formTL.getPublishedUrl();
+  Logger.log(msg);
+  ui.alert(msg);
+}
+
+// Handler khi có người submit Form "Thêm khách": ghi 1 file đơn .txt vào folder _don_them_khach.
+function xuLyFormKhach(e) {
+  const props = PropertiesService.getScriptProperties();
+  const jobsFolder = DriveApp.getFolderById(props.getProperty('JOBS_KHACH_ID'));
+  let name = '', email = '';
+  e.response.getItemResponses().forEach(it => {
+    const t = it.getItem().getTitle().toLowerCase();
+    if (t.indexOf('tên') >= 0) name = String(it.getResponse()).trim();
+    else if (t.indexOf('email') >= 0) email = String(it.getResponse()).trim();
+  });
+  if (!name || !email) return;
+  jobsFolder.createFile('khach_' + Date.now() + '.txt', name + '\t' + email, MimeType.PLAIN_TEXT);
+}
+
+// Handler khi có người submit Form "Thêm tài liệu": copy file PDF vào folder _don_them_tai_lieu.
+function xuLyFormTaiLieu(e) {
+  const props = PropertiesService.getScriptProperties();
+  const incoming = DriveApp.getFolderById(props.getProperty('INCOMING_DOCS_ID'));
+  let tenTL = '';
+  let fileIds = [];
+  e.response.getItemResponses().forEach(it => {
+    const type = it.getItem().getType();
+    if (type === FormApp.ItemType.FILE_UPLOAD) {
+      fileIds = fileIds.concat(it.getResponse());
+    } else if (type === FormApp.ItemType.TEXT) {
+      tenTL = String(it.getResponse()).trim();
+    }
+  });
+  fileIds.forEach(id => {
+    const f = DriveApp.getFileById(id);
+    let newName = f.getName();
+    if (tenTL) newName = tenTL.replace(/[\\\/:*?"<>|]/g, '').trim() + '.pdf';
+    if (!/\.pdf$/i.test(newName)) newName += '.pdf';
+    f.makeCopy(newName, incoming);
+  });
+}

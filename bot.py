@@ -19,6 +19,7 @@ INITIAL_EXTENSIONS = [
     "cogs.moderation",
     "cogs.fun",
     "cogs.ai",
+    "cogs.doc_storage",
     "cogs.help",
 ]
 
@@ -65,6 +66,19 @@ CREATE TABLE IF NOT EXISTS questions (
     asker_id BIGINT NOT NULL,
     answered BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_doc_jobs (
+    id SERIAL PRIMARY KEY,
+    job_type TEXT NOT NULL,
+    text_payload TEXT,
+    file_name TEXT,
+    file_data BYTEA,
+    requested_by BIGINT,
+    status TEXT NOT NULL DEFAULT 'pending',
+    error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processed_at TIMESTAMPTZ
 );
 """
 
