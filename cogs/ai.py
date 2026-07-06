@@ -2,37 +2,39 @@ import os
 
 import aiohttp
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GEMINI_MODEL = "gemini-2.0-flash"
+MAX_DISCORD_LEN = 1900
 
 SYSTEM_PROMPT = (
-    "Bạn là trợ giảng môn Ngữ Văn cho một cộng đồng học sinh Việt Nam tên là Nhóm học tập HVHN. "
-    "Nhiệm vụ của bạn là giải đáp thắc mắc, gợi ý cách làm bài, gợi ý hướng phân tích tác phẩm, "
-    "giải thích khái niệm văn học và tiếng Việt. "
-    "Hãy trả lời bằng tiếng Việt, rõ ràng, có trọng tâm. "
-    "Với câu hỏi làm bài, hãy gợi ý hướng đi và luận điểm để học sinh tự phát triển, "
-    "không viết hộ toàn bộ bài văn. "
-    "Nếu không chắc chắn về một dẫn chứng hay chi tiết tác phẩm, hãy nói rõ là cần kiểm chứng lại, "
-    "không bịa đặt thông tin. Câu trả lời gọn trong khoảng 1500 ký tự."
+    "Ban la tro giang mon Ngu Van cho cong dong HVHN. Tra loi bang tieng Viet, "
+    "ro trong tam, uu tien giup hoc sinh tu suy nghi. Tuyet doi khong bia thong tin. "
+    "Neu khong du can cu, phai noi ro khong du du lieu thay vi doan bua."
 )
 
 THEN_SYSTEM_PROMPT = (
-    "Bạn là Then, trợ giảng Ngữ Văn của Hồn Văn - Hồn Người. "
-    "Giọng văn: sắc, ấm, có chiều sâu, tránh sáo rỗng, không bịa dẫn chứng. "
-    "Ưu tiên giúp học sinh tự nghĩ tốt hơn: chỉ ra hướng, cấu trúc, lỗi, cách nâng cấp. "
-    "Nếu có tri thức HVHN được cung cấp, hãy dùng nó làm nền; nếu thiếu dữ kiện, nói rõ cần kiểm chứng. "
-    "Không viết thay toàn bộ bài trừ khi người dùng yêu cầu một đoạn mẫu ngắn."
+    "Ban la Then, tro giang Ngu Van cua Hon Van - Hon Nguoi.\n"
+    "LUAT BAT BUOC:\n"
+    "1. Khong duoc bia tac gia, tac pham, nhan vat, nam sang tac, hoan canh sang tac, "
+    "trich dan, nhan dinh phe binh, so lieu, hay noi dung bai hoc.\n"
+    "2. Khong dat trong dau ngoac kep bat ky cau nao neu cau do khong xuat hien trong "
+    "van ban nguoi dung gui hoac TRI THUC HVHN LIEN QUAN.\n"
+    "3. Neu cau hoi can chi tiet van ban/tac pham ma khong co du lieu xac thuc, hay noi "
+    "'khong du du lieu de khang dinh' va dua cach kiem chung/huong lam an toan.\n"
+    "4. Khi cham/sua bai, chi nhan xet dua tren van ban nguoi dung dua vao; khong suy dien "
+    "hoc sinh da viet nhung y khong co trong bai.\n"
+    "5. Moi cau tra loi phai co muc 'Muc can cu' va 'Can kiem chung'.\n"
+    "Giong van: sac, am, co chieu sau, tranh sao rong. Khong viet thay toan bo bai tru khi "
+    "nguoi dung yeu cau mot doan mau ngan."
 )
 
-MAX_DISCORD_LEN = 1900
 
-
-class FeedbackModal(discord.ui.Modal, title="Sửa câu trả lời cho Then"):
+class FeedbackModal(discord.ui.Modal, title="Sua cau tra loi cho Then"):
     correction = discord.ui.TextInput(
-        label="Câu sửa / góp ý của giáo viên",
+        label="Cau sua / gop y cua giao vien",
         style=discord.TextStyle.paragraph,
         required=True,
         max_length=1800,
@@ -55,7 +57,10 @@ class FeedbackModal(discord.ui.Modal, title="Sửa câu trả lời cho Then"):
             self.answer,
             str(self.correction),
         )
-        await interaction.response.send_message("Đã lưu góp ý. Then sẽ dùng dữ liệu này để mài prompt/kho tri thức.", ephemeral=True)
+        await interaction.response.send_message(
+            "Da luu gop y. Then se dung du lieu nay de mai prompt/kho tri thuc.",
+            ephemeral=True,
+        )
 
 
 class FeedbackView(discord.ui.View):
@@ -65,7 +70,7 @@ class FeedbackView(discord.ui.View):
         self.prompt = prompt
         self.answer = answer
 
-    @discord.ui.button(label="Đúng", style=discord.ButtonStyle.success)
+    @discord.ui.button(label="Dung", style=discord.ButtonStyle.success)
     async def good(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.bot.db.execute(
             """
@@ -76,9 +81,9 @@ class FeedbackView(discord.ui.View):
             self.prompt,
             self.answer,
         )
-        await interaction.response.send_message("Đã lưu đánh giá tốt.", ephemeral=True)
+        await interaction.response.send_message("Da luu danh gia tot.", ephemeral=True)
 
-    @discord.ui.button(label="Cần sửa", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Can sua", style=discord.ButtonStyle.danger)
     async def needs_fix(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(FeedbackModal(self.bot, self.prompt, self.answer))
 
@@ -89,8 +94,14 @@ class AI(commands.Cog):
         self.groq_keys = [k.strip() for k in os.getenv("GROQ_API_KEYS", "").split(",") if k.strip()]
         self.gemini_keys = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
 
-    async def ask_groq(self, session: aiohttp.ClientSession, key: str, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> tuple[bool, str]:
-        """Trả về (thành_công, nội_dung_hoặc_lý_do). thành_công=False + 'RATE_LIMIT' để báo xoay key."""
+    async def ask_groq(
+        self,
+        session: aiohttp.ClientSession,
+        key: str,
+        prompt: str,
+        system_prompt: str = SYSTEM_PROMPT,
+        temperature: float = 0.2,
+    ) -> tuple[bool, str]:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
@@ -99,7 +110,8 @@ class AI(commands.Cog):
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
             ],
-            "temperature": 0.7,
+            "temperature": temperature,
+            "top_p": 0.4,
         }
         async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
             if resp.status == 429:
@@ -109,11 +121,19 @@ class AI(commands.Cog):
             data = await resp.json()
             return True, data["choices"][0]["message"]["content"].strip()
 
-    async def ask_gemini(self, session: aiohttp.ClientSession, key: str, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> tuple[bool, str]:
+    async def ask_gemini(
+        self,
+        session: aiohttp.ClientSession,
+        key: str,
+        prompt: str,
+        system_prompt: str = SYSTEM_PROMPT,
+        temperature: float = 0.2,
+    ) -> tuple[bool, str]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}"
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": temperature, "topP": 0.4},
         }
         async with session.post(url, json=payload, timeout=60) as resp:
             if resp.status == 429:
@@ -126,27 +146,32 @@ class AI(commands.Cog):
             except (KeyError, IndexError):
                 return False, "EMPTY"
 
-    async def generate(self, prompt: str, system_prompt: str = SYSTEM_PROMPT) -> str | None:
+    async def generate(
+        self,
+        prompt: str,
+        system_prompt: str = SYSTEM_PROMPT,
+        temperature: float = 0.2,
+    ) -> str | None:
         async with aiohttp.ClientSession() as session:
             for key in self.groq_keys:
                 try:
-                    ok, content = await self.ask_groq(session, key, prompt, system_prompt)
+                    ok, content = await self.ask_groq(session, key, prompt, system_prompt, temperature)
                     if ok:
                         return content
                     if content != "RATE_LIMIT":
-                        print(f"[ai] Groq lỗi: {content}")
-                except Exception as e:
-                    print(f"[ai] Groq exception: {e}")
+                        print(f"[ai] Groq error: {content}")
+                except Exception as exc:
+                    print(f"[ai] Groq exception: {exc}")
 
             for key in self.gemini_keys:
                 try:
-                    ok, content = await self.ask_gemini(session, key, prompt, system_prompt)
+                    ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature)
                     if ok:
                         return content
                     if content != "RATE_LIMIT":
-                        print(f"[ai] Gemini lỗi: {content}")
-                except Exception as e:
-                    print(f"[ai] Gemini exception: {e}")
+                        print(f"[ai] Gemini error: {content}")
+                except Exception as exc:
+                    print(f"[ai] Gemini exception: {exc}")
         return None
 
     def _has_ai(self) -> bool:
@@ -166,123 +191,156 @@ class AI(commands.Cog):
                 limit,
             )
         else:
-            pattern = "%" + "%".join(terms[:3]) + "%"
+            patterns = [f"%{term}%" for term in terms[:5]]
             rows = await self.bot.db.fetch(
                 """
                 SELECT category, title, content
                 FROM ai_knowledge
                 WHERE approved = TRUE
-                  AND (lower(title) LIKE $1 OR lower(content) LIKE $1 OR lower(category) LIKE $1)
+                  AND (
+                    lower(title) LIKE ANY($1::text[])
+                    OR lower(content) LIKE ANY($1::text[])
+                    OR lower(category) LIKE ANY($1::text[])
+                  )
                 ORDER BY created_at DESC
                 LIMIT $2
                 """,
-                pattern,
+                patterns,
                 limit,
             )
         if not rows:
             return ""
+
         chunks = []
-        for r in rows:
-            content = r["content"]
+        for index, row in enumerate(rows, start=1):
+            content = row["content"]
             if len(content) > 900:
                 content = content[:900] + "..."
-            chunks.append(f"[{r['category']}] {r['title']}\n{content}")
+            chunks.append(f"[S{index}] [{row['category']}] {row['title']}\n{content}")
         return "\n\n".join(chunks)
 
-    async def _then_answer(self, interaction: discord.Interaction, title: str, user_prompt: str, prompt: str):
+    @staticmethod
+    def _guarded_prompt(prompt: str, knowledge: str, mode: str) -> str:
+        source_block = knowledge or "KHONG CO TRI THUC HVHN PHU HOP DUOC NAP."
+        return (
+            "DAY LA LENH CAN TRA LOI AN TOAN, CHONG HALLUCINATION.\n"
+            f"CHE DO: {mode}\n\n"
+            "TRI THUC HVHN LIEN QUAN:\n"
+            f"{source_block}\n\n"
+            "QUY TAC TRA LOI BAT BUOC:\n"
+            "- Chi dua chi tiet/su kien/trich dan khi no co trong TRI THUC HVHN hoac van ban nguoi dung da dua.\n"
+            "- Kien thuc pho thong chi duoc dung cho khai niem/huong lam bai chung; khong dung de khang dinh "
+            "chi tiet tac pham, trich dan, nam thang, hoan canh sang tac, nhan vat, hay nhan dinh phe binh.\n"
+            "- Khong trich dan nguyen van neu khong co nguon trong prompt.\n"
+            "- Neu cau hoi yeu cau mot thong tin ma du lieu khong co, hay noi khong du du lieu.\n"
+            "- Cuoi cau tra loi bat buoc co 2 dong:\n"
+            "  Muc can cu: <Van ban nguoi dung / Tri thuc HVHN / Kien thuc pho thong can kiem chung / Khong du du lieu>\n"
+            "  Can kiem chung: <khong co / liet ke cac diem can kiem chung>\n\n"
+            "YEU CAU NGUOI DUNG:\n"
+            f"{prompt}"
+        )
+
+    @staticmethod
+    def _has_grounding_footer(answer: str) -> bool:
+        lowered = answer.lower()
+        return "muc can cu:" in lowered and "can kiem chung:" in lowered
+
+    async def _safe_generate(self, prompt: str, knowledge: str, mode: str) -> tuple[str | None, str]:
+        full_prompt = self._guarded_prompt(prompt, knowledge, mode)
+        answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.15)
+        if answer and not self._has_grounding_footer(answer):
+            repair_prompt = (
+                "Sua cau tra loi sau de tuan thu quy tac chong hallucination. "
+                "Khong them thong tin moi. Bat buoc them 'Muc can cu' va 'Can kiem chung'.\n\n"
+                f"CAU TRA LOI CAN SUA:\n{answer}"
+            )
+            repaired = await self.generate(
+                self._guarded_prompt(repair_prompt, knowledge, "repair"),
+                THEN_SYSTEM_PROMPT,
+                temperature=0.0,
+            )
+            if repaired:
+                answer = repaired
+        return answer, full_prompt
+
+    async def _then_answer(self, interaction: discord.Interaction, title: str, user_prompt: str, prompt: str, mode: str):
         if not self._has_ai():
-            await interaction.response.send_message("Tính năng AI chưa cấu hình API key.", ephemeral=True)
+            await interaction.response.send_message("Tinh nang AI chua cau hinh API key.", ephemeral=True)
             return
+
         await interaction.response.defer(thinking=True)
         knowledge = await self._knowledge_context(user_prompt)
-        full_prompt = prompt
-        if knowledge:
-            full_prompt = "TRI THỨC HVHN LIÊN QUAN:\n" + knowledge + "\n\nYÊU CẦU:\n" + prompt
-        answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT)
+        answer, full_prompt = await self._safe_generate(prompt, knowledge, mode)
         if answer is None:
-            await interaction.followup.send("AI đang quá tải hoặc lỗi API. Thử lại sau ít phút.")
+            await interaction.followup.send("AI dang qua tai hoac loi API. Thu lai sau it phut.")
             return
+
         if len(answer) > MAX_DISCORD_LEN:
-            answer = answer[:MAX_DISCORD_LEN] + "\n\n*(đã rút gọn để vừa Discord)*"
+            answer = answer[:MAX_DISCORD_LEN] + "\n\n*(da rut gon de vua Discord)*"
+
         embed = discord.Embed(title=title, description=answer, color=discord.Color.green())
-        embed.set_footer(text=f"Then trả lời cho {interaction.user.display_name}. Hãy bấm feedback để mài AI.")
+        embed.set_footer(text=f"Then tra loi cho {interaction.user.display_name}. Bam feedback neu can sua.")
         await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
 
-    @app_commands.command(name="ai", description="Hỏi trợ giảng AI: giải đáp, gợi ý làm bài, gợi ý phân tích tác phẩm")
+    @app_commands.command(name="ai", description="Hoi tro giang AI: giai dap, goi y lam bai, phan tich tac pham")
     async def ai(self, interaction: discord.Interaction, question: str):
-        if not self.groq_keys and not self.gemini_keys:
-            await interaction.response.send_message(
-                "❌ Tính năng AI chưa được cấu hình (thiếu API key). Liên hệ quản trị viên.", ephemeral=True
-            )
-            return
-
-        await interaction.response.defer(thinking=True)
-        answer = await self.generate(question)
-
-        if answer is None:
-            await interaction.followup.send("❌ Xin lỗi, hiện AI đang quá tải hoặc gặp lỗi. Thử lại sau ít phút nhé.")
-            return
-
-        if len(answer) > MAX_DISCORD_LEN:
-            answer = answer[:MAX_DISCORD_LEN] + "\n\n*(câu trả lời đã được rút gọn)*"
-
-        embed = discord.Embed(
-            title="🤖 Trợ giảng AI - HVHN",
-            description=answer,
-            color=discord.Color.green()
+        prompt = (
+            "Tra loi cau hoi sau. Neu cau hoi can thong tin van ban/tac pham/trich dan ma khong co nguon, "
+            "khong duoc bia; hay dua cach kiem chung.\n"
+            f"Cau hoi: {question}"
         )
-        embed.add_field(name="❓ Câu hỏi", value=question[:1000], inline=False)
-        embed.set_footer(text=f"Hỏi bởi {interaction.user.display_name} • AI có thể sai, hãy kiểm chứng lại.")
-        await interaction.followup.send(embed=embed)
+        await self._then_answer(interaction, "Tro giang AI - HVHN", question, prompt, "general_safe")
 
-    @app_commands.command(name="van_hoi", description="Hỏi Then về bài Văn, tác phẩm, luận điểm, dẫn chứng")
+    @app_commands.command(name="van_hoi", description="Hoi Then ve bai Van, tac pham, luan diem, dan chung")
     async def van_hoi(self, interaction: discord.Interaction, cau_hoi: str):
         prompt = (
-            "Trả lời câu hỏi Ngữ Văn sau theo phong cách HVHN: rõ trọng tâm, có chiều sâu, không sáo.\n"
-            f"Câu hỏi: {cau_hoi}"
+            "Tra loi cau hoi Ngu Van sau theo phong cach HVHN: ro trong tam, co chieu sau, khong sao rong. "
+            "Neu hoi ve trich dan/chi tiet tac pham ma khong co trong nguon, hay tu choi khang dinh va noi can kiem chung.\n"
+            f"Cau hoi: {cau_hoi}"
         )
-        await self._then_answer(interaction, "Then - Hỏi Văn", cau_hoi, prompt)
+        await self._then_answer(interaction, "Then - Hoi Van", cau_hoi, prompt, "literature_qa")
 
-    @app_commands.command(name="cham_bai", description="Then chấm và góp ý một bài/đoạn văn")
+    @app_commands.command(name="cham_bai", description="Then cham va gop y mot bai/doan van")
     async def cham_bai(self, interaction: discord.Interaction, bai_lam: str):
         prompt = (
-            "Chấm bài/đoạn văn sau theo rubric HVHN. Trả về các mục: Nhận xét chung, Điểm mạnh, "
-            "Lỗi lớn nhất, Cách sửa theo thứ tự ưu tiên, Điểm dự kiến /10. Không khen sáo.\n\n"
-            f"Bài làm:\n{bai_lam}"
+            "Cham bai/doan van sau. Chi dua vao bai lam duoc cung cap, khong suy dien y hoc sinh chua viet. "
+            "Tra ve: Nhan xet chung, Diem manh, Loi lon nhat, Cach sua uu tien, Diem du kien /10.\n\n"
+            f"Bai lam:\n{bai_lam}"
         )
-        await self._then_answer(interaction, "Then - Chấm Bài", bai_lam, prompt)
+        await self._then_answer(interaction, "Then - Cham Bai", bai_lam, prompt, "user_text_only")
 
-    @app_commands.command(name="sua_doan", description="Then sửa một đoạn văn cho sắc hơn nhưng giữ ý của học sinh")
+    @app_commands.command(name="sua_doan", description="Then sua mot doan van cho sac hon nhung giu y cua hoc sinh")
     async def sua_doan(self, interaction: discord.Interaction, doan_van: str):
         prompt = (
-            "Sửa đoạn văn sau cho mạch lạc, giàu lực phân tích hơn nhưng không biến thành văn mẫu xa lạ. "
-            "Trả về: Bản sửa, Vì sao sửa như vậy, 3 lưu ý cho học sinh.\n\n"
-            f"Đoạn văn:\n{doan_van}"
+            "Sua doan van sau cho mach lac va co luc phan tich hon. Chi sua dua tren noi dung da co; "
+            "khong them dan chung/tac pham/nhan dinh moi neu nguoi dung khong dua. "
+            "Tra ve: Ban sua, Vi sao sua nhu vay, 3 luu y.\n\n"
+            f"Doan van:\n{doan_van}"
         )
-        await self._then_answer(interaction, "Then - Sửa Đoạn", doan_van, prompt)
+        await self._then_answer(interaction, "Then - Sua Doan", doan_van, prompt, "user_text_only")
 
-    @app_commands.command(name="goi_y_mo_bai", description="Gợi ý mở bài theo đề Văn")
-    async def goi_y_mo_bai(self, interaction: discord.Interaction, de_bai: str, phong_cach: str = "sâu sắc, không sáo"):
+    @app_commands.command(name="goi_y_mo_bai", description="Goi y mo bai theo de Van")
+    async def goi_y_mo_bai(self, interaction: discord.Interaction, de_bai: str, phong_cach: str = "sau sac, khong sao"):
         prompt = (
-            "Gợi ý 3 hướng mở bài cho đề sau. Mỗi hướng gồm: ý tưởng, mở bài mẫu ngắn 5-7 câu, "
-            "khi nào nên dùng. Tránh công thức đại trà.\n"
-            f"Phong cách mong muốn: {phong_cach}\nĐề bài: {de_bai}"
+            "Goi y 3 huong mo bai cho de sau. Khong dua trich dan/nhan dinh phe binh neu khong co nguon. "
+            "Moi huong gom: y tuong, mo bai mau ngan 5-7 cau, khi nao nen dung.\n"
+            f"Phong cach mong muon: {phong_cach}\nDe bai: {de_bai}"
         )
-        await self._then_answer(interaction, "Then - Gợi Ý Mở Bài", de_bai, prompt)
+        await self._then_answer(interaction, "Then - Goi Y Mo Bai", de_bai, prompt, "writing_suggestion")
 
-    @app_commands.command(name="luyen_de_hom_nay", description="Then giao một bài luyện Văn hôm nay")
-    async def luyen_de_hom_nay(self, interaction: discord.Interaction, chu_de: str = "nghị luận văn học"):
+    @app_commands.command(name="luyen_de_hom_nay", description="Then giao mot bai luyen Van hom nay")
+    async def luyen_de_hom_nay(self, interaction: discord.Interaction, chu_de: str = "nghi luan van hoc"):
         prompt = (
-            "Tạo một nhiệm vụ luyện Văn hôm nay. Gồm: đề bài, mục tiêu kỹ năng, dàn ý gợi mở, "
-            "tiêu chí tự kiểm, bài tập nhỏ 10 phút. Không cần lời mở đầu dài.\n"
-            f"Chủ đề: {chu_de}"
+            "Tao mot nhiem vu luyen Van hom nay. Neu chu de can tac pham cu the ma khong co nguon, hay de o muc mo "
+            "hoac noi can thay co xac nhan. Gom: de bai, muc tieu ky nang, dan y goi mo, tieu chi tu kiem, bai tap 10 phut.\n"
+            f"Chu de: {chu_de}"
         )
-        await self._then_answer(interaction, "Then - Luyện Đề Hôm Nay", chu_de, prompt)
+        await self._then_answer(interaction, "Then - Luyen De Hom Nay", chu_de, prompt, "practice_task")
 
-    @app_commands.command(name="ai_kienthuc_them", description="Thêm tri thức HVHN cho Then (Admin)")
+    @app_commands.command(name="ai_kienthuc_them", description="Them tri thuc HVHN cho Then (Admin)")
     async def add_knowledge(self, interaction: discord.Interaction, category: str, title: str, content: str, source: str = ""):
         if not self._is_admin(interaction):
-            await interaction.response.send_message("Bạn cần role HVHN Admin hoặc quyền Manage Server.", ephemeral=True)
+            await interaction.response.send_message("Ban can role HVHN Admin hoac quyen Manage Server.", ephemeral=True)
             return
         await self.bot.db.execute(
             """
@@ -295,9 +353,9 @@ class AI(commands.Cog):
             source.strip() or None,
             interaction.user.id,
         )
-        await interaction.response.send_message("Đã thêm tri thức cho Then.", ephemeral=True)
+        await interaction.response.send_message("Da them tri thuc cho Then.", ephemeral=True)
 
-    @app_commands.command(name="ai_kienthuc_tim", description="Tìm tri thức đã nạp cho Then")
+    @app_commands.command(name="ai_kienthuc_tim", description="Tim tri thuc da nap cho Then")
     async def search_knowledge(self, interaction: discord.Interaction, tu_khoa: str):
         rows = await self.bot.db.fetch(
             """
@@ -311,23 +369,23 @@ class AI(commands.Cog):
             f"%{tu_khoa.lower()}%",
         )
         if not rows:
-            await interaction.response.send_message("Chưa thấy tri thức phù hợp.", ephemeral=True)
+            await interaction.response.send_message("Chua thay tri thuc phu hop.", ephemeral=True)
             return
-        embed = discord.Embed(title="Tri thức Then", color=discord.Color.blue())
-        for r in rows:
-            content = r["content"][:250] + ("..." if len(r["content"]) > 250 else "")
-            embed.add_field(name=f"#{r['id']} [{r['category']}] {r['title']}", value=content, inline=False)
+        embed = discord.Embed(title="Tri thuc Then", color=discord.Color.blue())
+        for row in rows:
+            content = row["content"][:250] + ("..." if len(row["content"]) > 250 else "")
+            embed.add_field(name=f"#{row['id']} [{row['category']}] {row['title']}", value=content, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="ai_feedback_stats", description="Xem thống kê feedback AI (Admin)")
+    @app_commands.command(name="ai_feedback_stats", description="Xem thong ke feedback AI (Admin)")
     async def feedback_stats(self, interaction: discord.Interaction):
         if not self._is_admin(interaction):
-            await interaction.response.send_message("Bạn cần role HVHN Admin hoặc quyền Manage Server.", ephemeral=True)
+            await interaction.response.send_message("Ban can role HVHN Admin hoac quyen Manage Server.", ephemeral=True)
             return
         rows = await self.bot.db.fetch("SELECT rating, count(*) AS n FROM ai_feedback GROUP BY rating ORDER BY rating")
         total_k = await self.bot.db.fetchval("SELECT count(*) FROM ai_knowledge WHERE approved = TRUE")
-        text = "\n".join(f"`{r['rating']}`: {r['n']}" for r in rows) or "Chưa có feedback."
-        await interaction.response.send_message(f"Tri thức đã duyệt: `{total_k}`\nFeedback:\n{text}", ephemeral=True)
+        text = "\n".join(f"`{row['rating']}`: {row['n']}" for row in rows) or "Chua co feedback."
+        await interaction.response.send_message(f"Tri thuc da duyet: `{total_k}`\nFeedback:\n{text}", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
