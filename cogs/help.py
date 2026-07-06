@@ -33,13 +33,13 @@ class Help(commands.Cog):
             commands_list.append(cmd)
         return sorted(commands_list, key=lambda c: c.name)
 
-    @app_commands.command(name="help", description="Xem danh sach toan bo lenh ban co the dung")
+    @app_commands.command(name="help", description="Xem danh sách toàn bộ lệnh bạn có thể dùng")
     async def help_command(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         commands_list = self._visible_commands(interaction)
         if not commands_list:
-            await interaction.followup.send("Chua co lenh nao de hien thi.", ephemeral=True)
+            await interaction.followup.send("Chưa có lệnh nào để hiển thị.", ephemeral=True)
             return
 
         chunks = [
@@ -49,14 +49,14 @@ class Help(commands.Cog):
         embeds = []
         for index, chunk in enumerate(chunks, start=1):
             embed = discord.Embed(
-                title=f"Danh sach lenh HVHN ({index}/{len(chunks)})",
-                description="Cac lenh ban co the dung trong server nay.",
+                title=f"Danh sách lệnh HVHN ({index}/{len(chunks)})",
+                description="Các lệnh bạn có thể dùng trong server này.",
                 color=discord.Color.blurple(),
             )
             for cmd in chunk:
                 embed.add_field(
                     name=f"/{cmd.name}",
-                    value=cmd.description or "Khong co mo ta.",
+                    value=cmd.description or "Không có mô tả.",
                     inline=False,
                 )
             embeds.append(embed)
