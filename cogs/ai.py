@@ -1,4 +1,7 @@
 import os
+import re
+from html import unescape
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiohttp
 import discord
@@ -8,6 +11,18 @@ from discord.ext import commands
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GEMINI_MODEL = "gemini-2.0-flash"
 MAX_DISCORD_LEN = 1900
+WEB_RESULT_LIMIT = 5
+TRUSTED_SOURCE_HINTS = (
+    ".gov.vn",
+    ".edu.vn",
+    "moet.gov.vn",
+    "chinhphu.vn",
+    "quochoi.vn",
+    "thuvienphapluat.vn",
+    "nxb",
+    "thivien.net",
+    "wikipedia.org",
+)
 
 SYSTEM_PROMPT = (
     "Ban la tro giang mon Ngu Van cho cong dong HVHN. Tra loi bang tieng Viet, "
@@ -93,6 +108,8 @@ class AI(commands.Cog):
         self.bot = bot
         self.groq_keys = [k.strip() for k in os.getenv("GROQ_API_KEYS", "").split(",") if k.strip()]
         self.gemini_keys = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
+        self.serper_key = os.getenv("SERPER_API_KEY", "").strip()
+        self.tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
 
     async def ask_groq(
         self,
@@ -220,21 +237,139 @@ class AI(commands.Cog):
         return "\n\n".join(chunks)
 
     @staticmethod
-    def _guarded_prompt(prompt: str, knowledge: str, mode: str) -> str:
+    def _clean_text(text: str) -> str:
+        text = unescape(text or "")
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = re.sub(r"\s+", " ", text)
+        return text.strip()
+
+    @staticmethod
+    def _source_score(url: str) -> int:
+        lowered = url.lower()
+        return sum(1 for hint in TRUSTED_SOURCE_HINTS if hint in lowered)
+
+    @staticmethod
+    def _unwrap_ddg_url(url: str) -> str:
+        parsed = urlparse(unescape(url))
+        if parsed.netloc.endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+            target = parse_qs(parsed.query).get("uddg", [""])[0]
+            if target:
+                return unquote(target)
+        return unescape(url)
+
+    async def _search_serper(self, session: aiohttp.ClientSession, query: str) -> list[dict[str, str]]:
+        if not self.serper_key:
+            return []
+        headers = {"X-API-KEY": self.serper_key, "Content-Type": "application/json"}
+        payload = {"q": query, "gl": "vn", "hl": "vi", "num": WEB_RESULT_LIMIT}
+        async with session.post("https://google.serper.dev/search", headers=headers, json=payload, timeout=12) as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+        results = []
+        for item in data.get("organic", [])[:WEB_RESULT_LIMIT]:
+            link = item.get("link") or ""
+            title = self._clean_text(item.get("title") or "")
+            snippet = self._clean_text(item.get("snippet") or "")
+            if link and title:
+                results.append({"title": title, "url": link, "snippet": snippet})
+        return results
+
+    async def _search_tavily(self, session: aiohttp.ClientSession, query: str) -> list[dict[str, str]]:
+        if not self.tavily_key:
+            return []
+        payload = {
+            "api_key": self.tavily_key,
+            "query": query,
+            "search_depth": "basic",
+            "max_results": WEB_RESULT_LIMIT,
+            "include_answer": False,
+        }
+        async with session.post("https://api.tavily.com/search", json=payload, timeout=15) as resp:
+            if resp.status != 200:
+                return []
+            data = await resp.json()
+        results = []
+        for item in data.get("results", [])[:WEB_RESULT_LIMIT]:
+            link = item.get("url") or ""
+            title = self._clean_text(item.get("title") or "")
+            snippet = self._clean_text(item.get("content") or "")
+            if link and title:
+                results.append({"title": title, "url": link, "snippet": snippet[:450]})
+        return results
+
+    async def _search_duckduckgo(self, session: aiohttp.ClientSession, query: str) -> list[dict[str, str]]:
+        params = {"q": query, "kl": "vn-vi"}
+        headers = {"User-Agent": "Mozilla/5.0"}
+        async with session.get("https://duckduckgo.com/html/", params=params, headers=headers, timeout=15) as resp:
+            if resp.status != 200:
+                return []
+            html = await resp.text()
+
+        results = []
+        pattern = re.compile(
+            r'<a[^>]+class="result__a"[^>]+href="(?P<url>[^"]+)"[^>]*>(?P<title>.*?)</a>.*?'
+            r'<a[^>]+class="result__snippet"[^>]*>(?P<snippet>.*?)</a>',
+            re.S,
+        )
+        for match in pattern.finditer(html):
+            url = self._unwrap_ddg_url(match.group("url"))
+            title = self._clean_text(match.group("title"))
+            snippet = self._clean_text(match.group("snippet"))
+            if url and title:
+                results.append({"title": title, "url": url, "snippet": snippet})
+            if len(results) >= WEB_RESULT_LIMIT:
+                break
+        return results
+
+    async def _web_context(self, query: str, mode: str) -> str:
+        if mode == "user_text_only":
+            return ""
+
+        async with aiohttp.ClientSession() as session:
+            try:
+                results = await self._search_serper(session, query)
+                if not results:
+                    results = await self._search_tavily(session, query)
+                if not results:
+                    results = await self._search_duckduckgo(session, query)
+            except Exception as exc:
+                print(f"[ai] Web search exception: {exc}")
+                return ""
+
+        deduped = {}
+        for item in results:
+            deduped.setdefault(item["url"], item)
+        results = sorted(deduped.values(), key=lambda item: self._source_score(item["url"]), reverse=True)
+
+        chunks = []
+        for index, item in enumerate(results[:WEB_RESULT_LIMIT], start=1):
+            snippet = item["snippet"][:600]
+            trust = "uu tien" if self._source_score(item["url"]) else "can kiem chung"
+            chunks.append(f"[W{index}] {item['title']}\nURL: {item['url']}\nDo tin cay: {trust}\nTom tat: {snippet}")
+        return "\n\n".join(chunks)
+
+    @staticmethod
+    def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str) -> str:
         source_block = knowledge or "KHONG CO TRI THUC HVHN PHU HOP DUOC NAP."
+        web_block = web_context or "KHONG CO NGUON WEB DUOC TRUY XUAT."
         return (
             "DAY LA LENH CAN TRA LOI AN TOAN, CHONG HALLUCINATION.\n"
             f"CHE DO: {mode}\n\n"
             "TRI THUC HVHN LIEN QUAN:\n"
             f"{source_block}\n\n"
+            "NGUON WEB VUA TRA CUU:\n"
+            f"{web_block}\n\n"
             "QUY TAC TRA LOI BAT BUOC:\n"
-            "- Chi dua chi tiet/su kien/trich dan khi no co trong TRI THUC HVHN hoac van ban nguoi dung da dua.\n"
+            "- Chi dua chi tiet/su kien khi no co trong TRI THUC HVHN, NGUON WEB, hoac van ban nguoi dung da dua.\n"
+            "- Moi khang dinh lay tu web phai gan nhan nguon dang [W1], [W2]...\n"
+            "- Neu nguon web chi la snippet/tom tat, khong trich dan nguyen van va khong khang dinh qua muc.\n"
             "- Kien thuc pho thong chi duoc dung cho khai niem/huong lam bai chung; khong dung de khang dinh "
-            "chi tiet tac pham, trich dan, nam thang, hoan canh sang tac, nhan vat, hay nhan dinh phe binh.\n"
+            "chi tiet tac pham, trich dan, nam thang, hoan canh sang tac, nhan vat, hay nhan dinh phe binh neu khong co nguon.\n"
             "- Khong trich dan nguyen van neu khong co nguon trong prompt.\n"
             "- Neu cau hoi yeu cau mot thong tin ma du lieu khong co, hay noi khong du du lieu.\n"
             "- Cuoi cau tra loi bat buoc co 2 dong:\n"
-            "  Muc can cu: <Van ban nguoi dung / Tri thuc HVHN / Kien thuc pho thong can kiem chung / Khong du du lieu>\n"
+            "  Muc can cu: <Van ban nguoi dung / Tri thuc HVHN / Nguon web [W...] / Kien thuc pho thong can kiem chung / Khong du du lieu>\n"
             "  Can kiem chung: <khong co / liet ke cac diem can kiem chung>\n\n"
             "YEU CAU NGUOI DUNG:\n"
             f"{prompt}"
@@ -245,8 +380,8 @@ class AI(commands.Cog):
         lowered = answer.lower()
         return "muc can cu:" in lowered and "can kiem chung:" in lowered
 
-    async def _safe_generate(self, prompt: str, knowledge: str, mode: str) -> tuple[str | None, str]:
-        full_prompt = self._guarded_prompt(prompt, knowledge, mode)
+    async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
+        full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.15)
         if answer and not self._has_grounding_footer(answer):
             repair_prompt = (
@@ -255,7 +390,7 @@ class AI(commands.Cog):
                 f"CAU TRA LOI CAN SUA:\n{answer}"
             )
             repaired = await self.generate(
-                self._guarded_prompt(repair_prompt, knowledge, "repair"),
+                self._guarded_prompt(repair_prompt, knowledge, web_context, "repair"),
                 THEN_SYSTEM_PROMPT,
                 temperature=0.0,
             )
@@ -270,7 +405,8 @@ class AI(commands.Cog):
 
         await interaction.response.defer(thinking=True)
         knowledge = await self._knowledge_context(user_prompt)
-        answer, full_prompt = await self._safe_generate(prompt, knowledge, mode)
+        web_context = await self._web_context(user_prompt, mode)
+        answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode)
         if answer is None:
             await interaction.followup.send("AI dang qua tai hoac loi API. Thu lai sau it phut.")
             return
