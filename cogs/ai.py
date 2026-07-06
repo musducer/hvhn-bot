@@ -12,6 +12,7 @@ GROQ_MODEL = "llama-3.3-70b-versatile"
 GEMINI_MODEL = "gemini-2.0-flash"
 MAX_DISCORD_LEN = 1900
 WEB_RESULT_LIMIT = 5
+WEB_CONTEXT_LIMIT = 7
 TRUSTED_SOURCE_HINTS = (
     ".gov.vn",
     ".edu.vn",
@@ -41,9 +42,11 @@ THEN_SYSTEM_PROMPT = (
     "'không đủ dữ liệu để khẳng định' và đưa cách kiểm chứng/hướng làm an toàn.\n"
     "4. Chỉ nhận xét dựa trên văn bản người dùng đưa vào; không suy diễn "
     "học sinh đã viết những ý không có trong bài.\n"
-    "5. Mọi câu trả lời phải có mục 'Mức căn cứ' và 'Cần kiểm chứng'.\n"
-    "Giọng văn: sắc, ấm, có chiều sâu, tránh sáo rỗng. Không viết thay toàn bộ bài trừ khi "
-    "người dùng yêu cầu một đoạn mẫu ngắn."
+    "5. Luôn trả lời trực tiếp vào câu hỏi trước, rồi mới nói nguồn/căn cứ sau.\n"
+    "6. Không được trả lời kiểu 'có thể tham khảo các nguồn sau' rồi liệt kê link. "
+    "Nguồn web chỉ là căn cứ để tổng hợp thành câu trả lời.\n"
+    "Giọng văn: sắc, ấm, có chiều sâu, tránh sáo rỗng. Câu hỏi đơn giản thì trả lời gọn; "
+    "câu hỏi cần phân tích thì đi sâu có lớp lang."
 )
 
 
@@ -283,13 +286,20 @@ class AI(commands.Cog):
             "query": query,
             "search_depth": "basic",
             "max_results": WEB_RESULT_LIMIT,
-            "include_answer": False,
+            "include_answer": True,
         }
         async with session.post("https://api.tavily.com/search", json=payload, timeout=15) as resp:
             if resp.status != 200:
                 return []
             data = await resp.json()
         results = []
+        answer = self._clean_text(data.get("answer") or "")
+        if answer:
+            results.append({
+                "title": "Tavily tổng hợp nhanh",
+                "url": "https://tavily.com/",
+                "snippet": answer[:700],
+            })
         for item in data.get("results", [])[:WEB_RESULT_LIMIT]:
             link = item.get("url") or ""
             title = self._clean_text(item.get("title") or "")
@@ -328,9 +338,9 @@ class AI(commands.Cog):
 
         async with aiohttp.ClientSession() as session:
             try:
-                results = await self._search_serper(session, query)
-                if not results:
-                    results = await self._search_tavily(session, query)
+                results = []
+                results.extend(await self._search_serper(session, query))
+                results.extend(await self._search_tavily(session, query))
                 if not results:
                     results = await self._search_duckduckgo(session, query)
             except Exception as exc:
@@ -343,8 +353,8 @@ class AI(commands.Cog):
         results = sorted(deduped.values(), key=lambda item: self._source_score(item["url"]), reverse=True)
 
         chunks = []
-        for index, item in enumerate(results[:WEB_RESULT_LIMIT], start=1):
-            snippet = item["snippet"][:600]
+        for index, item in enumerate(results[:WEB_CONTEXT_LIMIT], start=1):
+            snippet = item["snippet"][:850]
             trust = "ưu tiên" if self._source_score(item["url"]) else "cần kiểm chứng"
             chunks.append(f"[W{index}] {item['title']}\nURL: {item['url']}\nĐộ tin cậy: {trust}\nTóm tắt: {snippet}")
         return "\n\n".join(chunks)
@@ -354,23 +364,25 @@ class AI(commands.Cog):
         source_block = knowledge or "KHÔNG CÓ TRI THỨC HVHN PHÙ HỢP ĐƯỢC NẠP."
         web_block = web_context or "KHÔNG CÓ NGUỒN WEB ĐƯỢC TRUY XUẤT."
         return (
-            "ĐÂY LÀ LỆNH CẦN TRẢ LỜI AN TOÀN, CHỐNG HALLUCINATION.\n"
+            "ĐÂY LÀ LỆNH CẦN TRẢ LỜI HAY, ĐÚNG TRỌNG TÂM, CÓ CĂN CỨ.\n"
             f"CHẾ ĐỘ: {mode}\n\n"
             "TRI THỨC HVHN LIÊN QUAN:\n"
             f"{source_block}\n\n"
             "NGUỒN WEB VỪA TRA CỨU:\n"
             f"{web_block}\n\n"
             "QUY TẮC TRẢ LỜI BẮT BUỘC:\n"
-            "- Chỉ đưa chi tiết/sự kiện khi nó có trong TRI THỨC HVHN, NGUỒN WEB, hoặc văn bản người dùng đã đưa.\n"
-            "- Mọi khẳng định lấy từ web phải gắn nhãn nguồn dạng [W1], [W2]...\n"
+            "- Dòng/đoạn đầu tiên phải trả lời thẳng vào câu hỏi của người dùng, không mở bằng 'có thể tham khảo'.\n"
+            "- Không được chỉ liệt kê nguồn. Phải tổng hợp thành câu trả lời có nội dung cụ thể.\n"
+            "- Nếu người dùng hỏi gợi ý/danh sách, hãy đưa danh sách cụ thể kèm lý do ngắn cho từng mục.\n"
+            "- Câu đơn giản: trả lời 3-7 dòng. Câu cần phân tích: trả lời sâu hơn, có luận điểm rõ.\n"
+            "- Mọi khẳng định quan trọng lấy từ web phải gắn nguồn dạng [W1], [W2] ngay sau ý liên quan.\n"
             "- Nếu nguồn web chỉ là snippet/tóm tắt, không trích dẫn nguyên văn và không khẳng định quá mức.\n"
             "- Kiến thức phổ thông chỉ được dùng cho khái niệm/hướng làm bài chung; không dùng để khẳng định "
             "chi tiết tác phẩm, trích dẫn, năm tháng, hoàn cảnh sáng tác, nhân vật, hay nhận định phê bình nếu không có nguồn.\n"
             "- Không trích dẫn nguyên văn nếu không có nguồn trong prompt.\n"
             "- Nếu câu hỏi yêu cầu một thông tin mà dữ liệu không có, hãy nói không đủ dữ liệu.\n"
-            "- Cuối câu trả lời bắt buộc có 2 dòng:\n"
-            "  Mức căn cứ: <Văn bản người dùng / Tri thức HVHN / Nguồn web [W...] / Kiến thức phổ thông cần kiểm chứng / Không đủ dữ liệu>\n"
-            "  Cần kiểm chứng: <không có / liệt kê các điểm cần kiểm chứng>\n\n"
+            "- Cuối câu trả lời chỉ thêm một dòng ngắn: Nguồn: [W1], [W2]... Nếu không có nguồn thì ghi: Nguồn: chưa đủ dữ liệu.\n"
+            "- Không thêm mục 'Mức căn cứ'/'Cần kiểm chứng' trừ khi thật sự cần cảnh báo rủi ro.\n\n"
             "YÊU CẦU NGƯỜI DÙNG:\n"
             f"{prompt}"
         )
@@ -378,17 +390,36 @@ class AI(commands.Cog):
     @staticmethod
     def _has_grounding_footer(answer: str) -> bool:
         lowered = answer.lower()
-        return ("mức căn cứ:" in lowered or "muc can cu:" in lowered) and (
-            "cần kiểm chứng:" in lowered or "can kiem chung:" in lowered
+        return "nguồn:" in lowered or "nguon:" in lowered or "chưa đủ dữ liệu" in lowered or "chua du du lieu" in lowered
+
+    @staticmethod
+    def _looks_like_source_dump(answer: str) -> bool:
+        lowered = answer.lower()
+        source_dump_phrases = (
+            "tham khảo các nguồn",
+            "tham khảo nguồn",
+            "các nguồn thông tin sau",
+            "danh sách nguồn",
+            "sources",
         )
+        has_dump_intro = any(phrase in lowered[:350] for phrase in source_dump_phrases)
+        has_many_source_bullets = len(re.findall(r"^\s*[-•]\s+.*\[(?:w|W)\d+\]", answer, re.M)) >= 3
+        return has_dump_intro or has_many_source_bullets
 
     async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.15)
-        if answer and not self._has_grounding_footer(answer):
+        needs_repair = bool(answer) and (
+            not self._has_grounding_footer(answer)
+            or self._looks_like_source_dump(answer)
+            or (bool(web_context) and "[W" not in answer)
+        )
+        if answer and needs_repair:
             repair_prompt = (
-                "Sửa câu trả lời sau để tuân thủ quy tắc chống hallucination. "
-                "Không thêm thông tin mới. Bắt buộc thêm 'Mức căn cứ' và 'Cần kiểm chứng'.\n\n"
+                "Sửa câu trả lời sau để trả lời đúng trọng tâm, không bịa, không chỉ liệt kê nguồn. "
+                "Không thêm thông tin mới ngoài TRI THỨC HVHN/NGUỒN WEB đã cung cấp. "
+                "Mở đầu bằng câu trả lời trực tiếp. Nếu câu hỏi xin gợi ý/danh sách, đưa mục cụ thể và lý do. "
+                "Gắn [W...] sau ý dùng từ web, rồi thêm dòng cuối 'Nguồn: [W...]'.\n\n"
                 f"CÂU TRẢ LỜI CẦN SỬA:\n{answer}"
             )
             repaired = await self.generate(
@@ -423,8 +454,9 @@ class AI(commands.Cog):
     @app_commands.command(name="ai", description="Hỏi trợ giảng AI: giải đáp, gợi ý làm bài, phân tích tác phẩm")
     async def ai(self, interaction: discord.Interaction, question: str):
         prompt = (
-            "Trả lời câu hỏi sau. Nếu câu hỏi cần thông tin văn bản/tác phẩm/trích dẫn mà không có nguồn, "
-            "không được bịa; hãy đưa cách kiểm chứng.\n"
+            "Trả lời câu hỏi sau thật đúng trọng tâm. Nếu câu hỏi cần tìm Internet, hãy dùng nguồn web đã tra cứu "
+            "để tổng hợp câu trả lời cụ thể, không chỉ liệt kê trang tham khảo. Ngắn khi câu hỏi đơn giản; "
+            "sâu sắc, có luận điểm khi câu hỏi cần phân tích. Không bịa chi tiết không có nguồn.\n"
             f"Câu hỏi: {question}"
         )
         await self._then_answer(interaction, "Trợ giảng AI - HVHN", question, prompt, "general_safe")
@@ -433,6 +465,7 @@ class AI(commands.Cog):
     async def van_hoi(self, interaction: discord.Interaction, cau_hoi: str):
         prompt = (
             "Trả lời câu hỏi Ngữ Văn sau theo phong cách HVHN: rõ trọng tâm, có chiều sâu, không sáo rỗng. "
+            "Dùng nguồn web đã tra cứu để tổng hợp ý cụ thể; không trả lời bằng danh sách nguồn. "
             "Nếu hỏi về trích dẫn/chi tiết tác phẩm mà không có trong nguồn, hãy từ chối khẳng định và nói cần kiểm chứng.\n"
             f"Câu hỏi: {cau_hoi}"
         )
