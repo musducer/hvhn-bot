@@ -1,35 +1,69 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
+from discord.ext import commands
 
 ADMIN_ONLY_COMMANDS = {
     "giverole", "removerole", "clear", "lock", "unlock", "answer", "questions", "setup",
     "warn", "mute", "unmute", "kick", "ban", "unban", "slowmode", "addbadword", "removebadword",
-    "announce",
+    "announce", "hvhn_themkhach", "hvhn_themtailieu", "hvhn_xoakhach", "hvhn_xoatailieu",
+    "hvhn_trangthai", "hvhn_status_full", "hvhn_retry_failed", "hvhn_khach", "hvhn_giahan",
+    "hvhn_baocao", "ai_kienthuc_them", "ai_feedback_stats",
 }
+
+PAGE_SIZE = 20
 
 
 class Help(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @app_commands.command(name="help", description="Xem danh sách toàn bộ lệnh bạn có thể dùng")
+    def _is_admin(self, interaction: discord.Interaction) -> bool:
+        if not isinstance(interaction.user, discord.Member):
+            return False
+        return interaction.user.guild_permissions.manage_guild
+
+    def _visible_commands(self, interaction: discord.Interaction) -> list[app_commands.Command]:
+        is_admin = self._is_admin(interaction)
+        commands_list = []
+        for cmd in self.bot.tree.get_commands():
+            if not isinstance(cmd, app_commands.Command):
+                continue
+            if cmd.name in ADMIN_ONLY_COMMANDS and not is_admin:
+                continue
+            commands_list.append(cmd)
+        return sorted(commands_list, key=lambda c: c.name)
+
+    @app_commands.command(name="help", description="Xem danh sach toan bo lenh ban co the dung")
     async def help_command(self, interaction: discord.Interaction):
-        commands_list = [
-            cmd for cmd in self.bot.tree.get_commands()
-            if isinstance(cmd, app_commands.Command) and cmd.name not in ADMIN_ONLY_COMMANDS
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        commands_list = self._visible_commands(interaction)
+        if not commands_list:
+            await interaction.followup.send("Chua co lenh nao de hien thi.", ephemeral=True)
+            return
+
+        chunks = [
+            commands_list[i:i + PAGE_SIZE]
+            for i in range(0, len(commands_list), PAGE_SIZE)
         ]
-        commands_list.sort(key=lambda c: c.name)
+        embeds = []
+        for index, chunk in enumerate(chunks, start=1):
+            embed = discord.Embed(
+                title=f"Danh sach lenh HVHN ({index}/{len(chunks)})",
+                description="Cac lenh ban co the dung trong server nay.",
+                color=discord.Color.blurple(),
+            )
+            for cmd in chunk:
+                embed.add_field(
+                    name=f"/{cmd.name}",
+                    value=cmd.description or "Khong co mo ta.",
+                    inline=False,
+                )
+            embeds.append(embed)
 
-        embed = discord.Embed(
-            title="📖 DANH SÁCH LỆNH - NHÓM HỌC TẬP HVHN",
-            description="Dưới đây là các lệnh bạn có thể sử dụng.",
-            color=discord.Color.blurple()
-        )
-        for cmd in commands_list:
-            embed.add_field(name=f"/{cmd.name}", value=cmd.description or "Không có mô tả.", inline=False)
-
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        await interaction.followup.send(embed=embeds[0], ephemeral=True)
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):
