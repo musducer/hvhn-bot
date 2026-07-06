@@ -87,6 +87,14 @@ class DocumentStorage(commands.Cog):
             requested_by,
         )
 
+    async def _status_map(self) -> dict[str, str]:
+        rows = await self.bot.db.fetch("SELECT key, value FROM hvhn_runtime_status")
+        return {row["key"]: row["value"] for row in rows}
+
+    @staticmethod
+    def _clean_email(email: str) -> str:
+        return email.strip().lower()
+
     @app_commands.command(name="hvhn_themkhach", description="Thêm khách vào hệ thống tài liệu HVHN")
     async def add_client(self, interaction: discord.Interaction, ten: str, email: str):
         if not await self._require_admin(interaction):
@@ -189,6 +197,199 @@ class DocumentStorage(commands.Cog):
         ]
         lines.extend(f"{name}: {'OK' if path.exists() else 'thiếu'} - {path}" for name, path in folders.items())
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="hvhn_status_full", description="Xem trạng thái đầy đủ của hệ HVHN")
+    async def status_full(self, interaction: discord.Interaction):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        status = await self._status_map()
+        pending = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'pending'")
+        processing = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'processing'")
+        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'error'")
+        sheet_clients = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients")
+        sheet_docs = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_docs")
+        failed_rows = await self.bot.db.fetch(
+            """
+            SELECT id, job_type, coalesce(error, '') AS error
+            FROM hvhn_doc_jobs
+            WHERE status = 'error'
+            ORDER BY id DESC
+            LIMIT 5
+            """
+        )
+
+        embed = discord.Embed(title="HVHN - Trạng thái hệ thống", color=discord.Color.blue())
+        embed.add_field(
+            name="Watcher",
+            value=(
+                f"Heartbeat: `{status.get('watcher_heartbeat', 'chưa có')}`\n"
+                f"Mirror: `{status.get('mirror_ready', 'unknown')}`\n"
+                f"Sheet snapshot: `{status.get('sheet_status_exported_at', 'chưa có')}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Dữ liệu",
+            value=(
+                f"Local clients/docs: `{status.get('clients_count', '0')}` / `{status.get('docs_count', '0')}`\n"
+                f"Sheet clients/docs: `{sheet_clients}` / `{sheet_docs}`"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Queue DB",
+            value=f"Chờ: `{pending}` | Đang xử lý: `{processing}` | Lỗi: `{failed}`",
+            inline=False,
+        )
+        local_queue = [
+            f"thêm khách `{status.get('queue_add_client', '0')}`",
+            f"thêm tài liệu `{status.get('queue_add_document', '0')}`",
+            f"xóa khách `{status.get('queue_remove_client', '0')}`",
+            f"xóa tài liệu `{status.get('queue_remove_document', '0')}`",
+            f"sheet xóa khách `{status.get('queue_sheet_remove_client', '0')}`",
+            f"sheet xóa tài liệu `{status.get('queue_sheet_remove_document', '0')}`",
+            f"sheet gia hạn `{status.get('queue_sheet_renew_client', '0')}`",
+        ]
+        embed.add_field(name="Queue local", value=" | ".join(local_queue), inline=False)
+        if failed_rows:
+            embed.add_field(
+                name="Lỗi gần nhất",
+                value="\n".join(f"#{r['id']} `{r['job_type']}` - {r['error'][:80]}" for r in failed_rows),
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="hvhn_retry_failed", description="Cho chạy lại các đơn HVHN bị lỗi")
+    async def retry_failed(self, interaction: discord.Interaction, limit: int = 20):
+        if not await self._require_admin(interaction):
+            return
+        limit = max(1, min(limit, 100))
+        rows = await self.bot.db.fetch(
+            """
+            SELECT id FROM hvhn_doc_jobs
+            WHERE status = 'error'
+            ORDER BY id ASC
+            LIMIT $1
+            """,
+            limit,
+        )
+        ids = [r["id"] for r in rows]
+        if ids:
+            await self.bot.db.execute(
+                """
+                UPDATE hvhn_doc_jobs
+                SET status = 'pending', error = NULL, processed_at = NULL
+                WHERE id = ANY($1::int[])
+                """,
+                ids,
+            )
+        await interaction.response.send_message(f"Đã đưa `{len(ids)}` đơn lỗi về hàng chờ.", ephemeral=True)
+
+    @app_commands.command(name="hvhn_khach", description="Xem trạng thái một khách theo email")
+    async def client_status(self, interaction: discord.Interaction, email: str):
+        if not await self._require_admin(interaction):
+            return
+        email = self._clean_email(email)
+        row = await self.bot.db.fetchrow(
+            "SELECT * FROM hvhn_sheet_clients WHERE email = $1",
+            email,
+        )
+        local = await self.bot.db.fetchrow(
+            "SELECT * FROM hvhn_clients_cache WHERE email = $1",
+            email,
+        )
+        jobs = await self.bot.db.fetch(
+            """
+            SELECT id, job_type, status, created_at, coalesce(error, '') AS error
+            FROM hvhn_doc_jobs
+            WHERE lower(coalesce(text_payload, '')) LIKE $1
+            ORDER BY id DESC
+            LIMIT 5
+            """,
+            f"%{email}%",
+        )
+        if not row and not local:
+            await interaction.response.send_message("Không thấy khách này trong cache. Kiểm tra email hoặc đợi watcher sync.", ephemeral=True)
+            return
+
+        title_name = (row and row["name"]) or (local and local["name"]) or email
+        embed = discord.Embed(title=f"Khách HVHN - {title_name}", color=discord.Color.green())
+        embed.add_field(name="Email", value=email, inline=False)
+        if row:
+            embed.add_field(
+                name="Sheet",
+                value=(
+                    f"Ngày cấp: `{row['grant_date'] or 'trống'}`\n"
+                    f"Hết hạn: `{row['expiry_date'] or 'trống'}`\n"
+                    f"Còn lại: `{row['days_left'] if row['days_left'] is not None else 'trống'}` ngày\n"
+                    f"Trạng thái: `{row['status'] or 'trống'}`\n"
+                    f"Số tài liệu: `{row['doc_count']}`"
+                ),
+                inline=False,
+            )
+        if local:
+            embed.add_field(name="PC render", value=f"Có trong `clients.csv`; kho hiện có `{local['doc_count']}` tài liệu.", inline=False)
+        if jobs:
+            embed.add_field(
+                name="Đơn gần đây",
+                value="\n".join(f"#{j['id']} `{j['job_type']}` - `{j['status']}`" for j in jobs),
+                inline=False,
+            )
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="hvhn_giahan", description="Gia hạn khách từ Discord")
+    async def renew_client(self, interaction: discord.Interaction, email: str, so_ngay: int = 30):
+        if not await self._require_admin(interaction):
+            return
+        email = self._clean_email(email)
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            await interaction.response.send_message("Email không hợp lệ.", ephemeral=True)
+            return
+        so_ngay = max(1, min(so_ngay, 365))
+        job_id = await self._enqueue("renew_client", text_payload=f"{email}\t{so_ngay}", requested_by=interaction.user.id)
+        await interaction.response.send_message(
+            f"Đã xếp hàng đơn #{job_id}: gia hạn `{email}` thêm `{so_ngay}` ngày.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="hvhn_baocao", description="Báo cáo nhanh hệ thống HVHN")
+    async def report(self, interaction: discord.Interaction):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True)
+        total_clients = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients")
+        active = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients WHERE coalesce(status, '') = 'Còn hạn'")
+        warning = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients WHERE coalesce(status, '') = 'Sắp hết'")
+        expired = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients WHERE coalesce(status, '') LIKE 'Hết hạn%' OR coalesce(status, '') = 'Đã gỡ quyền'")
+        docs = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_docs")
+        pending = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'pending'")
+        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'error'")
+        soon = await self.bot.db.fetch(
+            """
+            SELECT name, email, days_left
+            FROM hvhn_sheet_clients
+            WHERE days_left IS NOT NULL AND days_left <= 3
+            ORDER BY days_left ASC
+            LIMIT 8
+            """
+        )
+
+        embed = discord.Embed(title="Báo cáo HVHN", color=discord.Color.gold())
+        embed.add_field(
+            name="Khách",
+            value=f"Tổng `{total_clients}` | Còn hạn `{active}` | Sắp hết `{warning}` | Hết/gỡ `{expired}`",
+            inline=False,
+        )
+        embed.add_field(name="Tài liệu", value=f"`{docs}` tài liệu trong Sheet", inline=False)
+        embed.add_field(name="Đơn hệ thống", value=f"Chờ `{pending}` | Lỗi `{failed}`", inline=False)
+        if soon:
+            embed.add_field(
+                name="Cần chú ý",
+                value="\n".join(f"{r['name']} - `{r['days_left']}` ngày - {r['email']}" for r in soon),
+                inline=False,
+            )
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

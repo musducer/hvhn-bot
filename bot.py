@@ -80,6 +80,62 @@ CREATE TABLE IF NOT EXISTS hvhn_doc_jobs (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     processed_at TIMESTAMPTZ
 );
+
+CREATE TABLE IF NOT EXISTS hvhn_runtime_status (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_clients_cache (
+    email TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_docs_cache (
+    doc_name TEXT PRIMARY KEY,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_sheet_clients (
+    email TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    grant_date TEXT,
+    expiry_date TEXT,
+    days_left INTEGER,
+    status TEXT,
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_sheet_docs (
+    doc_name TEXT PRIMARY KEY,
+    client_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ai_knowledge (
+    id SERIAL PRIMARY KEY,
+    category TEXT NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source TEXT,
+    approved BOOLEAN NOT NULL DEFAULT TRUE,
+    created_by BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS ai_feedback (
+    id SERIAL PRIMARY KEY,
+    user_id BIGINT NOT NULL,
+    prompt TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    rating TEXT NOT NULL,
+    correction TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 

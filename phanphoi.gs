@@ -22,6 +22,9 @@ const XOA_KHACH_NAME = '_don_xoa_khach';
 const XOA_TAILIEU_NAME = '_don_xoa_tai_lieu';
 const SHEET_XOA_KHACH_NAME = '_don_sheet_xoa_khach';
 const SHEET_XOA_TAILIEU_NAME = '_don_sheet_xoa_tai_lieu';
+const SHEET_GIAHAN_KHACH_NAME = '_don_sheet_giahan_khach';
+const SHEET_STATUS_NAME = '_sheet_status';
+const SHEET_STATUS_FILE = 'sheet_status.json';
 
 // Tab không phải dữ liệu khách -> luôn bỏ qua khi quét
 function isSystemTab(name) {
@@ -211,6 +214,7 @@ function hvhnTuDongHoa() {
   try {
     tuDongXuLyFileMoi();      // kéo new_rows*.csv + phân phối + sync khách/dashboard
     xuLyGiaHanTuDong();       // tick Gia hạn -> tự gia hạn, nếu cần thì phân phối lại
+    xuLyLenhGiaHanDiscordTuDong(); // lệnh gia hạn từ Discord
     kiemTraHetHan();          // quá hạn -> tự gỡ quyền/xoá file
     xuLyLenhDiscordTuDong();  // lệnh xoá từ Discord -> xoá Sheet/Drive thật
     xoaKhachDaTichTuDong();   // tick Xóa khách -> tự xoá, không cần bấm menu
@@ -401,6 +405,64 @@ function capNhatDashboard() {
   }
 
   decorateDashboard(dash, header.length);
+  xuatTrangThaiSheet();
+}
+
+function _fmtDate(value) {
+  if (!value) return '';
+  const d = new Date(value);
+  if (isNaN(d.getTime())) return '';
+  return Utilities.formatDate(d, Session.getScriptTimeZone(), 'yyyy-MM-dd');
+}
+
+function xuatTrangThaiSheet() {
+  try {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const reg = ensureRegistry();
+    const docsSheet = ss.getSheetByName(DOCS_NAME);
+    const clients = [];
+    const docs = [];
+
+    const regLast = reg.getLastRow();
+    if (regLast >= 2) {
+      const rows = reg.getRange(2, 1, regLast - 1, 6).getValues();
+      rows.forEach(r => {
+        if (!r[0] || !r[1]) return;
+        const tab = ss.getSheetByName(r[0]);
+        const docCount = tab && tab.getLastRow() > 1 ? tab.getLastRow() - 1 : 0;
+        clients.push({
+          name: String(r[0]),
+          email: String(r[1]).toLowerCase(),
+          grant_date: _fmtDate(r[2]),
+          expiry_date: _fmtDate(r[3]),
+          days_left: r[4] === '' ? null : Number(r[4]),
+          status: String(r[5] || ''),
+          doc_count: docCount,
+        });
+      });
+    }
+
+    if (docsSheet && docsSheet.getLastRow() >= 2) {
+      const rows = docsSheet.getRange(2, 1, docsSheet.getLastRow() - 1, 2).getValues();
+      rows.forEach(r => {
+        if (!r[0]) return;
+        docs.push({ doc_name: String(r[0]), client_count: Number(r[1] || 0) });
+      });
+    }
+
+    const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID_EARLY);
+    const folder = getOrCreateFolder(parent, SHEET_STATUS_NAME);
+    const payload = JSON.stringify({
+      exported_at: new Date().toISOString(),
+      clients,
+      docs,
+    });
+    const files = folder.getFilesByName(SHEET_STATUS_FILE);
+    if (files.hasNext()) files.next().setContent(payload);
+    else folder.createFile(SHEET_STATUS_FILE, payload, MimeType.PLAIN_TEXT);
+  } catch (e) {
+    ghiLog('LỖI xuất trạng thái Sheet', e.message || String(e));
+  }
 }
 
 function decorateDashboard(dash, numCols) {
@@ -659,6 +721,61 @@ function xuLyGiaHanTuDong() {
     decorateRegistry(reg);
     phanPhoi();
     ghiLog('Tự động gia hạn', changed + ' khách');
+  }
+}
+
+// Discord -> watcher -> _don_sheet_giahan_khach: mỗi file chứa "email<TAB>số_ngày".
+function xuLyLenhGiaHanDiscordTuDong() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const reg = ensureRegistry();
+  let changed = 0;
+
+  _readTextFiles(SHEET_GIAHAN_KHACH_NAME).forEach(job => {
+    try {
+      const parts = job.text.replace(',', '\t').split('\t');
+      const email = String(parts[0] || '').trim().toLowerCase();
+      const days = Math.max(1, parseInt(parts[1] || SUB_DAYS, 10) || SUB_DAYS);
+      const found = _timKhachTheoEmail(ss, email);
+      if (!found) {
+        ghiLog('Discord gia hạn - không tìm thấy', email);
+        job.file.setTrashed(true);
+        return;
+      }
+
+      let rowIndex = found.registryRow;
+      if (!rowIndex) {
+        reg.appendRow([found.name, found.email || email, _today(), _addDays(_today(), days), '', 'Còn hạn', false, false]);
+        rowIndex = reg.getLastRow();
+      }
+
+      const row = reg.getRange(rowIndex, 1, 1, 7).getValues()[0];
+      const currentExpiry = row[3] ? new Date(row[3]) : _today();
+      const base = currentExpiry.getTime() > _today().getTime() ? currentExpiry : _today();
+      const newExpiry = _addDays(base, days);
+      reg.getRange(rowIndex, 4).setValue(newExpiry);
+      reg.getRange(rowIndex, 6).setValue('Còn hạn');
+      reg.getRange(rowIndex, RENEW_COL).setValue(false);
+
+      const tab = ss.getSheetByName(found.name);
+      if (tab && row[5] === 'Đã gỡ quyền') {
+        const data = tab.getDataRange().getValues();
+        for (let r = 1; r < data.length; r++) {
+          if (data[r][0]) tab.getRange(r + 1, 4).setValue('');
+        }
+      }
+
+      ghiLog('Discord gia hạn +' + days + ' ngày', found.name + ' - ' + (found.email || email));
+      job.file.setTrashed(true);
+      changed++;
+    } catch (e) {
+      ghiLog('LỖI Discord gia hạn', job.text + ' -> ' + (e.message || String(e)));
+    }
+  });
+
+  if (changed) {
+    capNhatTrangThaiHan(reg);
+    decorateRegistry(reg);
+    phanPhoi();
   }
 }
 

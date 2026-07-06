@@ -8,6 +8,7 @@ import time
 import shutil
 import traceback
 import asyncio
+import json
 from pathlib import Path
 
 import asyncpg
@@ -27,6 +28,8 @@ XOA_KHACH = os.path.join(MIRROR_PARENT, "_don_xoa_khach")           # đơn xoá
 XOA_TAILIEU = os.path.join(MIRROR_PARENT, "_don_xoa_tai_lieu")      # đơn xoá tài liệu (tên gốc)
 SHEET_XOA_KHACH = os.path.join(MIRROR_PARENT, "_don_sheet_xoa_khach")       # Discord -> Apps Script xoá Sheet/Drive
 SHEET_XOA_TAILIEU = os.path.join(MIRROR_PARENT, "_don_sheet_xoa_tai_lieu")  # Discord -> Apps Script xoá Sheet/Drive
+SHEET_GIAHAN_KHACH = os.path.join(MIRROR_PARENT, "_don_sheet_giahan_khach") # Discord -> Apps Script gia hạn
+SHEET_STATUS_FILE = os.path.join(MIRROR_PARENT, "_sheet_status", "sheet_status.json")
 
 POLL_SECONDS = 30
 
@@ -45,6 +48,41 @@ CREATE TABLE IF NOT EXISTS hvhn_doc_jobs (
     error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     processed_at TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_runtime_status (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_clients_cache (
+    email TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_docs_cache (
+    doc_name TEXT PRIMARY KEY,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_sheet_clients (
+    email TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    grant_date TEXT,
+    expiry_date TEXT,
+    days_left INTEGER,
+    status TEXT,
+    doc_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS hvhn_sheet_docs (
+    doc_name TEXT PRIMARY KEY,
+    client_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
 
@@ -155,6 +193,10 @@ def _materialize_discord_job(job):
         doc_base = os.path.splitext((job["text_payload"] or "").strip())[0]
         _write_atomic(os.path.join(SHEET_XOA_TAILIEU, _job_name("discord_sheet_xoa_tailieu", doc_base, ".txt")), doc_base.encode("utf-8"))
         _write_atomic(os.path.join(XOA_TAILIEU, _job_name("discord_xoa_tailieu", doc_base, ".txt")), doc_base.encode("utf-8"))
+    elif job_type == "renew_client":
+        payload = (job["text_payload"] or "").strip()
+        label = payload.split("\t")[0] if payload else str(job["id"])
+        _write_atomic(os.path.join(SHEET_GIAHAN_KHACH, _job_name("discord_giahan_khach", label, ".txt")), payload.encode("utf-8"))
     else:
         raise ValueError(f"Loại đơn không hỗ trợ: {job_type}")
 
@@ -169,6 +211,135 @@ async def _xu_ly_don_discord():
         except Exception as exc:
             await _mark_discord_job(job["id"], "error", str(exc))
             print(f"[DISCORD] LỖI đơn #{job['id']}: {exc}")
+
+
+def _count_files(folder, suffix=None):
+    if not os.path.isdir(folder):
+        return 0
+    return sum(
+        1 for name in os.listdir(folder)
+        if suffix is None or name.lower().endswith(suffix)
+    )
+
+
+async def _sync_runtime_status():
+    if not DATABASE_URL:
+        return
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(DOC_JOB_SCHEMA)
+        clients = load_clients()
+        docs = [os.path.splitext(os.path.basename(p))[0] for p in list_docs()]
+        doc_count = len(docs)
+        status = {
+            "watcher_heartbeat": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "mirror_parent": MIRROR_PARENT,
+            "mirror_ready": str(os.path.isdir(MIRROR_SOURCE)),
+            "clients_count": str(len(clients)),
+            "docs_count": str(doc_count),
+            "queue_add_client": str(_count_files(JOBS_KHACH, ".txt")),
+            "queue_add_document": str(_count_files(INCOMING_DOCS, ".pdf")),
+            "queue_remove_client": str(_count_files(XOA_KHACH, ".txt")),
+            "queue_remove_document": str(_count_files(XOA_TAILIEU, ".txt")),
+            "queue_sheet_remove_client": str(_count_files(SHEET_XOA_KHACH, ".txt")),
+            "queue_sheet_remove_document": str(_count_files(SHEET_XOA_TAILIEU, ".txt")),
+            "queue_sheet_renew_client": str(_count_files(SHEET_GIAHAN_KHACH, ".txt")),
+        }
+        for key, value in status.items():
+            await conn.execute(
+                """
+                INSERT INTO hvhn_runtime_status (key, value, updated_at)
+                VALUES ($1, $2, now())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                """,
+                key,
+                value,
+            )
+
+        await conn.execute("TRUNCATE hvhn_clients_cache")
+        if clients:
+            await conn.executemany(
+                """
+                INSERT INTO hvhn_clients_cache (email, name, doc_count, updated_at)
+                VALUES ($1, $2, $3, now())
+                ON CONFLICT (email) DO UPDATE
+                SET name = EXCLUDED.name, doc_count = EXCLUDED.doc_count, updated_at = now()
+                """,
+                [(c["email"].lower(), c["name"], doc_count) for c in clients],
+            )
+
+        await conn.execute("TRUNCATE hvhn_docs_cache")
+        if docs:
+            await conn.executemany(
+                """
+                INSERT INTO hvhn_docs_cache (doc_name, updated_at)
+                VALUES ($1, now())
+                ON CONFLICT (doc_name) DO UPDATE SET updated_at = now()
+                """,
+                [(d,) for d in docs],
+            )
+
+        if os.path.isfile(SHEET_STATUS_FILE):
+            with open(SHEET_STATUS_FILE, encoding="utf-8") as f:
+                snapshot = json.load(f)
+            sheet_clients = snapshot.get("clients") or []
+            sheet_docs = snapshot.get("docs") or []
+
+            await conn.execute("TRUNCATE hvhn_sheet_clients")
+            if sheet_clients:
+                await conn.executemany(
+                    """
+                    INSERT INTO hvhn_sheet_clients
+                        (email, name, grant_date, expiry_date, days_left, status, doc_count, updated_at)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                    ON CONFLICT (email) DO UPDATE
+                    SET name = EXCLUDED.name,
+                        grant_date = EXCLUDED.grant_date,
+                        expiry_date = EXCLUDED.expiry_date,
+                        days_left = EXCLUDED.days_left,
+                        status = EXCLUDED.status,
+                        doc_count = EXCLUDED.doc_count,
+                        updated_at = now()
+                    """,
+                    [
+                        (
+                            str(c.get("email", "")).lower(),
+                            c.get("name") or "",
+                            c.get("grant_date") or "",
+                            c.get("expiry_date") or "",
+                            c.get("days_left"),
+                            c.get("status") or "",
+                            int(c.get("doc_count") or 0),
+                        )
+                        for c in sheet_clients
+                        if c.get("email") and c.get("name")
+                    ],
+                )
+
+            await conn.execute("TRUNCATE hvhn_sheet_docs")
+            if sheet_docs:
+                await conn.executemany(
+                    """
+                    INSERT INTO hvhn_sheet_docs (doc_name, client_count, updated_at)
+                    VALUES ($1, $2, now())
+                    ON CONFLICT (doc_name) DO UPDATE
+                    SET client_count = EXCLUDED.client_count, updated_at = now()
+                    """,
+                    [(d.get("doc_name") or "", int(d.get("client_count") or 0)) for d in sheet_docs if d.get("doc_name")],
+                )
+            await conn.execute(
+                """
+                INSERT INTO hvhn_runtime_status (key, value, updated_at)
+                VALUES ('sheet_status_exported_at', $1, now())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                """,
+                str(snapshot.get("exported_at") or ""),
+            )
+    except Exception:
+        print("  LỖI đồng bộ trạng thái watcher:")
+        traceback.print_exc()
+    finally:
+        await conn.close()
 
 
 def xu_ly_don_them_khach():
@@ -273,6 +444,7 @@ def main():
             xu_ly_don_them_tai_lieu()
             xu_ly_don_xoa_khach()
             xu_ly_don_xoa_tai_lieu()
+            asyncio.run(_sync_runtime_status())
         except Exception:
             traceback.print_exc()
         time.sleep(POLL_SECONDS)
