@@ -436,25 +436,6 @@ class AI(commands.Cog):
         )
         await self._then_answer(interaction, "Then - Hoi Van", cau_hoi, prompt, "literature_qa")
 
-    @app_commands.command(name="cham_bai", description="Then cham va gop y mot bai/doan van")
-    async def cham_bai(self, interaction: discord.Interaction, bai_lam: str):
-        prompt = (
-            "Cham bai/doan van sau. Chi dua vao bai lam duoc cung cap, khong suy dien y hoc sinh chua viet. "
-            "Tra ve: Nhan xet chung, Diem manh, Loi lon nhat, Cach sua uu tien, Diem du kien /10.\n\n"
-            f"Bai lam:\n{bai_lam}"
-        )
-        await self._then_answer(interaction, "Then - Cham Bai", bai_lam, prompt, "user_text_only")
-
-    @app_commands.command(name="sua_doan", description="Then sua mot doan van cho sac hon nhung giu y cua hoc sinh")
-    async def sua_doan(self, interaction: discord.Interaction, doan_van: str):
-        prompt = (
-            "Sua doan van sau cho mach lac va co luc phan tich hon. Chi sua dua tren noi dung da co; "
-            "khong them dan chung/tac pham/nhan dinh moi neu nguoi dung khong dua. "
-            "Tra ve: Ban sua, Vi sao sua nhu vay, 3 luu y.\n\n"
-            f"Doan van:\n{doan_van}"
-        )
-        await self._then_answer(interaction, "Then - Sua Doan", doan_van, prompt, "user_text_only")
-
     @app_commands.command(name="goi_y_mo_bai", description="Goi y mo bai theo de Van")
     async def goi_y_mo_bai(self, interaction: discord.Interaction, de_bai: str, phong_cach: str = "sau sac, khong sao"):
         prompt = (
