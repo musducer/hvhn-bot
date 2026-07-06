@@ -73,6 +73,7 @@ function onOpen() {
     .addItem('🗑️ Xóa TÀI LIỆU đã tích', 'xoaTaiLieuDaTich')
     .addItem('🗑️ Xóa KHÁCH đã tích (cột H)', 'xoaKhachDaTich')
     .addItem('🗑️ Xóa TẤT CẢ khách', 'xoaTatCaKhach')
+    .addItem('Cấp quyền xem folder cho khách', 'capQuyenFolderKhachHang')
     .addSeparator()
     .addItem('📱 Tạo Google Form cho điện thoại (1 lần)', 'caiDatForm')
     .addItem('📱 Tạo lại RIÊNG Form thêm khách', 'taoLaiFormKhach')
@@ -337,6 +338,7 @@ function phanPhoi() {
   });
 
   dongBoKhachHang();   // cập nhật danh sách khách + set ngày cấp/hết hạn cho khách mới
+  capQuyenFolderKhachHangTuDong();
   capNhatDashboard();
 }
 
@@ -506,6 +508,37 @@ function trangTriTatCa() {
     if (data.length && data[0][0] === 'TenNguoiNhan') decorateSheet(sheet);
   });
   capNhatDashboard();
+}
+
+function capQuyenFolderKhachHangTuDong() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  const granted = {};
+
+  ss.getSheets().forEach(sheet => {
+    if (isSystemTab(sheet.getName())) return;
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
+
+    for (let i = 1; i < data.length; i++) {
+      const name = data[i][0] || sheet.getName();
+      const email = data[i][1];
+      if (!name || !email) continue;
+
+      const key = String(name) + '|' + String(email).toLowerCase();
+      if (granted[key]) continue;
+      granted[key] = true;
+
+      const folders = destRoot.getFoldersByName(name);
+      if (folders.hasNext()) _ensureOnlyViewer(folders.next(), email);
+      break;
+    }
+  });
+}
+
+function capQuyenFolderKhachHang() {
+  capQuyenFolderKhachHangTuDong();
+  SpreadsheetApp.getActiveSpreadsheet().toast('Đã cấp quyền xem folder cho các khách đang có folder Drive.');
 }
 
 // ============ QUẢN LÝ GÓI / HẠN DÙNG ============
