@@ -55,6 +55,7 @@ function onOpen() {
     .createMenu('HVHN')
     .addItem('1. Tách theo khách (chạy 1 lần đầu)', 'tachTheoKhach')
     .addItem('2. Quét file new_rows.csv trên Drive + Phân phối', 'tuDongXuLyFileMoi')
+    .addItem('2B. Cài tự động hoá toàn bộ (chạy 1 lần)', 'caiDatTuDongHoa')
     .addItem('3. Nhập mới thủ công (tab "Nhập mới") + Phân phối', 'themMoiVaPhanPhoi')
     .addItem('4. Phân phối lại (quét toàn bộ)', 'phanPhoi')
     .addItem('5. Cập nhật Dashboard', 'capNhatDashboard')
@@ -198,6 +199,59 @@ function tuDongXuLyFileMoi() {
   // LUÔN chạy phanPhoi: dòng "Xong" tự bỏ qua; dòng "Không thấy file" (do PDF upload chưa
   // kịp lần trước) sẽ được thử lại ở lần trigger sau — tự chữa lành, không kẹt.
   phanPhoi();
+}
+
+// TRIGGER 5 PHÚT: gom toàn bộ việc cần tự động hoá vào 1 hàm duy nhất.
+// Chạy vô hại nhiều lần: dòng đã Xong bỏ qua, tick đã xử lý thì tự mất/xoá dòng.
+function hvhnTuDongHoa() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    tuDongXuLyFileMoi();      // kéo new_rows*.csv + phân phối + sync khách/dashboard
+    xuLyGiaHanTuDong();       // tick Gia hạn -> tự gia hạn, nếu cần thì phân phối lại
+    kiemTraHetHan();          // quá hạn -> tự gỡ quyền/xoá file
+    xoaKhachDaTichTuDong();   // tick Xóa khách -> tự xoá, không cần bấm menu
+    xoaTaiLieuDaTichTuDong(); // tick Xóa tài liệu -> tự xoá, không cần bấm menu
+    capNhatTaiLieu();         // tab Tài liệu luôn mới
+    capNhatDashboard();       // dashboard luôn mới
+  } catch (e) {
+    ghiLog('LỖI tự động hoá', e.message || String(e));
+    throw e;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Chạy 1 lần sau khi dán code: tạo đủ trigger tự động, xoá trigger cũ trùng để tránh chạy lặp.
+function caiDatTuDongHoa() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const keepHandlers = {
+    hvhnTuDongHoa: true,
+    tuDongXuLyFileMoi: true,
+    kiemTraHetHan: true,
+  };
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (keepHandlers[t.getHandlerFunction()]) ScriptApp.deleteTrigger(t);
+  });
+
+  ScriptApp.newTrigger('hvhnTuDongHoa')
+    .timeBased()
+    .everyMinutes(5)
+    .create();
+
+  ScriptApp.newTrigger('kiemTraHetHan')
+    .timeBased()
+    .atHour(1)
+    .everyDays(1)
+    .create();
+
+  ensureDashboard();
+  ensureStaging();
+  ensureRegistry();
+  capNhatTaiLieu();
+  capNhatDashboard();
+  ghiLog('Cài tự động hoá', 'hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h');
+  ss.toast('Đã cài tự động hoá. Từ giờ không cần bấm menu để cập nhật sheet.');
 }
 
 // Gộp các dòng đang nằm ở tab "Nhập mới" (đường tay dự phòng, khi không dùng new_rows.csv)
@@ -584,6 +638,27 @@ function xuLyGiaHan() {
   decorateRegistry(reg);
 }
 
+// Bản tự động: xử lý mọi ô Gia hạn đã tick, không gọi UI/menu.
+function xuLyGiaHanTuDong() {
+  const reg = ensureRegistry();
+  const last = reg.getLastRow();
+  if (last < 2) return;
+  const checks = reg.getRange(2, RENEW_COL, last - 1, 1).getValues();
+  let changed = 0;
+  for (let i = checks.length - 1; i >= 0; i--) {
+    if (checks[i][0] === true) {
+      giaHanMotDong(reg, i + 2, false);
+      changed++;
+    }
+  }
+  if (changed) {
+    capNhatTrangThaiHan(reg);
+    decorateRegistry(reg);
+    phanPhoi();
+    ghiLog('Tự động gia hạn', changed + ' khách');
+  }
+}
+
 function decorateRegistry(reg) {
   const lastCol = 8;
   const lastRow = reg.getLastRow();
@@ -778,6 +853,29 @@ function xoaKhachDaTich() {
   ui.alert('Đã xoá ' + targets.length + ' khách.');
 }
 
+// Bản tự động: tick cột H là xoá trong vòng chạy trigger kế tiếp, không cần bấm menu.
+function xoaKhachDaTichTuDong() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const reg = ensureRegistry();
+  const last = reg.getLastRow();
+  if (last < 2) return;
+
+  const vals = reg.getRange(2, 1, last - 1, DEL_COL).getValues();
+  const targets = [];
+  vals.forEach((r, i) => { if (r[DEL_COL - 1] === true) targets.push({ row: i + 2, name: r[0], email: r[1] }); });
+  if (!targets.length) return;
+
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  targets.sort((a, b) => b.row - a.row);
+  targets.forEach(t => {
+    _xoaMotKhach(ss, destRoot, t.name, t.email);
+    reg.deleteRow(t.row);
+  });
+  decorateRegistry(reg);
+  capNhatDashboard();
+  ghiLog('Tự động xoá khách đã tick', targets.length + ' khách');
+}
+
 // Menu: xoá TẤT CẢ khách (dọn sạch để bắt đầu lại). Xác nhận 2 lớp.
 function xoaTatCaKhach() {
   const ui = SpreadsheetApp.getUi();
@@ -905,6 +1003,24 @@ function xoaTaiLieuDaTich() {
   capNhatTaiLieu();
   capNhatDashboard();
   ui.alert('Đã xoá ' + targets.length + ' tài liệu.');
+}
+
+// Bản tự động: tick cột "Xóa tài liệu" là xoá trong vòng chạy trigger kế tiếp.
+function xoaTaiLieuDaTichTuDong() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sh = ss.getSheetByName(DOCS_NAME);
+  if (!sh || sh.getLastRow() < 2) return;
+
+  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues();
+  const targets = vals.filter(r => r[2] === true).map(r => r[0]);
+  if (!targets.length) return;
+
+  const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  targets.forEach(docBase => _xoaMotTaiLieu(ss, sourceFolder, destRoot, docBase));
+  capNhatTaiLieu();
+  capNhatDashboard();
+  ghiLog('Tự động xoá tài liệu đã tick', targets.length + ' tài liệu');
 }
 
 // ============ GOOGLE FORM CHO ĐIỆN THOẠI ============
