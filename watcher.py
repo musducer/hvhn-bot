@@ -25,6 +25,8 @@ INCOMING_DOCS = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu")
 PROCESSED_DOCS = os.path.join(MIRROR_PARENT, "_da_xu_ly_tai_lieu")  # lưu trữ PDF gốc đã xử lý
 XOA_KHACH = os.path.join(MIRROR_PARENT, "_don_xoa_khach")           # đơn xoá khách (email)
 XOA_TAILIEU = os.path.join(MIRROR_PARENT, "_don_xoa_tai_lieu")      # đơn xoá tài liệu (tên gốc)
+SHEET_XOA_KHACH = os.path.join(MIRROR_PARENT, "_don_sheet_xoa_khach")       # Discord -> Apps Script xoá Sheet/Drive
+SHEET_XOA_TAILIEU = os.path.join(MIRROR_PARENT, "_don_sheet_xoa_tai_lieu")  # Discord -> Apps Script xoá Sheet/Drive
 
 POLL_SECONDS = 30
 
@@ -147,9 +149,11 @@ def _materialize_discord_job(job):
         _write_atomic(target, bytes(job["file_data"] or b""))
     elif job_type == "remove_client":
         email = (job["text_payload"] or "").strip()
+        _write_atomic(os.path.join(SHEET_XOA_KHACH, _job_name("discord_sheet_xoa_khach", email, ".txt")), email.encode("utf-8"))
         _write_atomic(os.path.join(XOA_KHACH, _job_name("discord_xoa_khach", email, ".txt")), email.encode("utf-8"))
     elif job_type == "remove_document":
         doc_base = os.path.splitext((job["text_payload"] or "").strip())[0]
+        _write_atomic(os.path.join(SHEET_XOA_TAILIEU, _job_name("discord_sheet_xoa_tailieu", doc_base, ".txt")), doc_base.encode("utf-8"))
         _write_atomic(os.path.join(XOA_TAILIEU, _job_name("discord_xoa_tailieu", doc_base, ".txt")), doc_base.encode("utf-8"))
     else:
         raise ValueError(f"Loại đơn không hỗ trợ: {job_type}")

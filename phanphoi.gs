@@ -20,6 +20,8 @@ const DEL_COL = 8;     // cột H ở tab Khách hàng: ô tick "Xóa khách"
 const HVHN_PARENT_FOLDER_ID_EARLY = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs';
 const XOA_KHACH_NAME = '_don_xoa_khach';
 const XOA_TAILIEU_NAME = '_don_xoa_tai_lieu';
+const SHEET_XOA_KHACH_NAME = '_don_sheet_xoa_khach';
+const SHEET_XOA_TAILIEU_NAME = '_don_sheet_xoa_tai_lieu';
 
 // Tab không phải dữ liệu khách -> luôn bỏ qua khi quét
 function isSystemTab(name) {
@@ -210,6 +212,7 @@ function hvhnTuDongHoa() {
     tuDongXuLyFileMoi();      // kéo new_rows*.csv + phân phối + sync khách/dashboard
     xuLyGiaHanTuDong();       // tick Gia hạn -> tự gia hạn, nếu cần thì phân phối lại
     kiemTraHetHan();          // quá hạn -> tự gỡ quyền/xoá file
+    xuLyLenhDiscordTuDong();  // lệnh xoá từ Discord -> xoá Sheet/Drive thật
     xoaKhachDaTichTuDong();   // tick Xóa khách -> tự xoá, không cần bấm menu
     xoaTaiLieuDaTichTuDong(); // tick Xóa tài liệu -> tự xoá, không cần bấm menu
     capNhatTaiLieu();         // tab Tài liệu luôn mới
@@ -821,6 +824,98 @@ function _xoaMotKhach(ss, destRoot, name, email) {
   if (tab) ss.deleteSheet(tab);
   if (email) _ghiDonXoa(XOA_KHACH_NAME, email);
   ghiLog('XÓA khách', name + ' - ' + email);
+}
+
+function _timKhachTheoEmail(ss, email) {
+  const needle = String(email || '').trim().toLowerCase();
+  if (!needle) return null;
+
+  const reg = ensureRegistry();
+  const regLast = reg.getLastRow();
+  if (regLast >= 2) {
+    const rows = reg.getRange(2, 1, regLast - 1, 2).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      if (String(rows[i][1] || '').trim().toLowerCase() === needle) {
+        return { name: rows[i][0], email: rows[i][1], registryRow: i + 2 };
+      }
+    }
+  }
+
+  const sheets = ss.getSheets();
+  for (let s = 0; s < sheets.length; s++) {
+    const sheet = sheets[s];
+    if (isSystemTab(sheet.getName())) continue;
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') continue;
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][1] || '').trim().toLowerCase() === needle) {
+        return { name: data[i][0] || sheet.getName(), email: data[i][1], registryRow: null };
+      }
+    }
+  }
+  return null;
+}
+
+function _readTextFiles(folderName) {
+  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID_EARLY);
+  const folder = getOrCreateFolder(parent, folderName);
+  const files = folder.getFiles();
+  const jobs = [];
+  while (files.hasNext()) {
+    const file = files.next();
+    if (!/\.txt$/i.test(file.getName())) continue;
+    jobs.push({ file, text: file.getBlob().getDataAsString('UTF-8').trim() });
+  }
+  return jobs;
+}
+
+// Discord -> watcher -> folder Drive mirror -> Apps Script:
+// xoá thật trên Sheet/Drive, không cần bấm menu.
+function xuLyLenhDiscordTuDong() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
+  let changed = false;
+
+  _readTextFiles(SHEET_XOA_KHACH_NAME).forEach(job => {
+    try {
+      const found = _timKhachTheoEmail(ss, job.text);
+      if (found && found.name) {
+        _xoaMotKhach(ss, destRoot, found.name, found.email || job.text);
+        if (found.registryRow) {
+          const reg = ensureRegistry();
+          if (found.registryRow <= reg.getLastRow()) reg.deleteRow(found.registryRow);
+        }
+        changed = true;
+        ghiLog('Discord xoá khách', found.name + ' - ' + (found.email || job.text));
+      } else {
+        ghiLog('Discord xoá khách - không tìm thấy', job.text);
+      }
+      job.file.setTrashed(true);
+    } catch (e) {
+      ghiLog('LỖI Discord xoá khách', job.text + ' -> ' + (e.message || String(e)));
+    }
+  });
+
+  _readTextFiles(SHEET_XOA_TAILIEU_NAME).forEach(job => {
+    try {
+      const docBase = _docBaseFromFileName(job.text);
+      if (docBase) {
+        _xoaMotTaiLieu(ss, sourceFolder, destRoot, docBase);
+        changed = true;
+        ghiLog('Discord xoá tài liệu', docBase);
+      }
+      job.file.setTrashed(true);
+    } catch (e) {
+      ghiLog('LỖI Discord xoá tài liệu', job.text + ' -> ' + (e.message || String(e)));
+    }
+  });
+
+  if (changed) {
+    decorateRegistry(ensureRegistry());
+    capNhatTaiLieu();
+    capNhatDashboard();
+  }
 }
 
 // Menu: xoá các khách đã tick ô "Xóa khách" (cột H) ở tab Khách hàng.
