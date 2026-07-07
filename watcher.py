@@ -32,6 +32,7 @@ from pdf_knowledge import (
 MIRROR_PARENT = os.path.dirname(MIRROR_SOURCE)
 JOBS_KHACH = os.path.join(MIRROR_PARENT, "_don_them_khach")
 INCOMING_DOCS = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu")
+INCOMING_BOT_DOCS = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu_bot")
 PROCESSED_DOCS = os.path.join(MIRROR_PARENT, "_da_xu_ly_tai_lieu")  # lưu trữ PDF gốc đã xử lý
 XOA_KHACH = os.path.join(MIRROR_PARENT, "_don_xoa_khach")           # đơn xoá khách (email)
 XOA_TAILIEU = os.path.join(MIRROR_PARENT, "_don_xoa_tai_lieu")      # đơn xoá tài liệu (tên gốc)
@@ -343,6 +344,7 @@ async def _sync_runtime_status():
             "bot_docs_count": str(len(bot_docs)),
             "queue_add_client": str(_count_files(JOBS_KHACH, ".txt")),
             "queue_add_document": str(_count_files(INCOMING_DOCS, ".pdf")),
+            "queue_add_bot_document": str(_count_files(INCOMING_BOT_DOCS, ".pdf")),
             "queue_remove_client": str(_count_files(XOA_KHACH, ".txt")),
             "queue_remove_document": str(_count_files(XOA_TAILIEU, ".txt")),
             "queue_sheet_remove_client": str(_count_files(SHEET_XOA_KHACH, ".txt")),
@@ -566,6 +568,26 @@ def xu_ly_don_them_tai_lieu():
             traceback.print_exc()
 
 
+def xu_ly_don_them_tai_lieu_bot():
+    if not os.path.isdir(INCOMING_BOT_DOCS):
+        return
+    os.makedirs(BOT_DOCS_DIR, exist_ok=True)
+    pdfs = [f for f in os.listdir(INCOMING_BOT_DOCS) if f.lower().endswith(".pdf")]
+    for pdf in pdfs:
+        path = os.path.join(INCOMING_BOT_DOCS, pdf)
+        if not _stable(path):
+            continue
+        try:
+            print(f"[TAI LIEU BOT] {pdf}")
+            target = _unique_path(BOT_DOCS_DIR, pdf)
+            shutil.copy2(path, target)
+            asyncio.run(_index_pdf_for_ai(target))
+            os.remove(path)
+        except Exception:
+            print("  LOI xu ly don tai lieu bot:")
+            traceback.print_exc()
+
+
 def xu_ly_don_xoa_khach():
     """Đơn xoá khách: mỗi .txt chứa email -> gỡ khỏi clients.csv (để đừng render lại sau này)."""
     if not os.path.isdir(XOA_KHACH):
@@ -611,11 +633,13 @@ def main():
     print("=== HVHN watcher đang chạy. Nhấn Ctrl+C để dừng. ===")
     print(f"Hộp đơn khách:     {JOBS_KHACH}")
     print(f"Hộp đơn tài liệu:  {INCOMING_DOCS}\n")
+    print(f"Hop don bot:        {INCOMING_BOT_DOCS}\n")
     while True:
         try:
             asyncio.run(_xu_ly_don_discord())
             xu_ly_don_them_khach()
             xu_ly_don_them_tai_lieu()
+            xu_ly_don_them_tai_lieu_bot()
             xu_ly_don_xoa_khach()
             xu_ly_don_xoa_tai_lieu()
             asyncio.run(_sync_runtime_status())

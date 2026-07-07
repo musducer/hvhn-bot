@@ -79,6 +79,7 @@ function onOpen() {
     .addSeparator()
     .addItem('📱 Tạo Google Form cho điện thoại (1 lần)', 'caiDatForm')
     .addItem('📱 Tạo lại RIÊNG Form thêm khách', 'taoLaiFormKhach')
+    .addItem('📱 Tạo lại RIÊNG Form nạp tài liệu cho bot', 'taoLaiFormBot')
     .addItem('Dọn file trùng trên Drive', 'donFileTrung')
     .addItem('Trang trí lại tất cả', 'trangTriTatCa')
     .addToUi();
@@ -1370,6 +1371,7 @@ function xoaTaiLieuDaTichTuDong() {
 const HVHN_PARENT_FOLDER_ID = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs'; // folder cha "TÀI LIỆU ĐỘC QUYỀN HVHN"
 const JOBS_KHACH_NAME = '_don_them_khach';      // nơi ghi đơn thêm khách (watcher PC đọc)
 const INCOMING_DOCS_NAME = '_don_them_tai_lieu'; // nơi chứa PDF tài liệu mới (watcher PC đọc)
+const BOT_DOCS_FORM_NAME = '_don_them_tai_lieu_bot'; // PDF chỉ nạp cho AI/bot, không phân phối khách
 
 // Mở form theo ID nếu form còn sống (không bị xoá/thùng rác); ngược lại trả null.
 function _openFormIfAlive(id) {
@@ -1394,6 +1396,18 @@ function _taoFormKhach(props) {
   return form;
 }
 
+function _taoFormBot(props) {
+  const form = FormApp.create('HVHN — Nạp tài liệu cho bot AI');
+  form.setDescription('Tải lên PDF để bot AI đọc làm căn cứ trả lời. Tài liệu này KHÔNG phân phối cho khách.');
+  form.addTextItem().setTitle('Tên tài liệu (tuỳ chọn, để trống sẽ dùng tên file)');
+  // Apps Script không tạo được câu hỏi upload file bằng code -> thêm tay 1 lần trong link sửa form.
+  form.setConfirmationMessage('Đã nhận file. Bot sẽ đọc sau khi watcher trên PC xử lý.');
+  form.setAcceptingResponses(true);
+  ScriptApp.newTrigger('xuLyFormTaiLieuBot').forForm(form).onFormSubmit().create();
+  props.setProperty('FORM_BOT_TL_ID', form.getId());
+  return form;
+}
+
 // Menu: tạo lại RIÊNG form thêm khách (khi lỡ xoá/hỏng), không đụng form tài liệu.
 function taoLaiFormKhach() {
   const props = PropertiesService.getScriptProperties();
@@ -1403,11 +1417,23 @@ function taoLaiFormKhach() {
   SpreadsheetApp.getUi().alert(msg);
 }
 
+function taoLaiFormBot() {
+  const props = PropertiesService.getScriptProperties();
+  const form = _taoFormBot(props);
+  const msg = 'Đã tạo lại Form NẠP TÀI LIỆU CHO BOT.\n\n'
+    + 'Cần mở link SỬA rồi thêm tay 1 câu "Tải tệp lên" bắt buộc.\n\n'
+    + 'Link SỬA: ' + form.getEditUrl() + '\n\n'
+    + 'Link GỬI quản lý: ' + form.getPublishedUrl();
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+}
+
 function caiDatForm() {
   const ui = SpreadsheetApp.getUi();
   const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
   const jobsFolder = getOrCreateFolder(parent, JOBS_KHACH_NAME);
   const incomingFolder = getOrCreateFolder(parent, INCOMING_DOCS_NAME);
+  const botDocsFolder = getOrCreateFolder(parent, BOT_DOCS_FORM_NAME);
 
   const props = PropertiesService.getScriptProperties();
 
@@ -1428,8 +1454,13 @@ function caiDatForm() {
     props.setProperty('FORM_TL_ID', formTL.getId());
   }
 
+  // --- Form 3: NẠP TÀI LIỆU CHO BOT AI ---
+  let formBotTL = _openFormIfAlive(props.getProperty('FORM_BOT_TL_ID'));
+  if (!formBotTL) formBotTL = _taoFormBot(props);
+
   props.setProperty('JOBS_KHACH_ID', jobsFolder.getId());
   props.setProperty('INCOMING_DOCS_ID', incomingFolder.getId());
+  props.setProperty('BOT_DOCS_FORM_ID', botDocsFolder.getId());
 
   const msg = 'ĐÃ TẠO XONG.\n\n'
     + '① Form THÊM KHÁCH (gửi quản lý ngay được):\n' + formKhach.getPublishedUrl() + '\n\n'
@@ -1437,7 +1468,10 @@ function caiDatForm() {
     + 'Mở link SỬA form dưới đây → bấm (+) thêm câu hỏi → chọn kiểu "Tải tệp lên" (File upload) '
     + '→ đặt tên "File PDF tài liệu" → bật Bắt buộc. Xong mới gửi link cho quản lý.\n'
     + 'Link SỬA: ' + formTL.getEditUrl() + '\n'
-    + 'Link GỬI quản lý (sau khi thêm câu upload): ' + formTL.getPublishedUrl();
+    + 'Link GỬI quản lý (sau khi thêm câu upload): ' + formTL.getPublishedUrl() + '\n\n'
+    + '③ Form NẠP TÀI LIỆU CHO BOT AI — CẦN THÊM TAY 1 CÂU UPLOAD:\n'
+    + 'Link SỬA: ' + formBotTL.getEditUrl() + '\n'
+    + 'Link GỬI quản lý (sau khi thêm câu upload): ' + formBotTL.getPublishedUrl();
   Logger.log(msg);
   ui.alert(msg);
 }
@@ -1460,6 +1494,28 @@ function xuLyFormKhach(e) {
 function xuLyFormTaiLieu(e) {
   const props = PropertiesService.getScriptProperties();
   const incoming = DriveApp.getFolderById(props.getProperty('INCOMING_DOCS_ID'));
+  let tenTL = '';
+  let fileIds = [];
+  e.response.getItemResponses().forEach(it => {
+    const type = it.getItem().getType();
+    if (type === FormApp.ItemType.FILE_UPLOAD) {
+      fileIds = fileIds.concat(it.getResponse());
+    } else if (type === FormApp.ItemType.TEXT) {
+      tenTL = String(it.getResponse()).trim();
+    }
+  });
+  fileIds.forEach(id => {
+    const f = DriveApp.getFileById(id);
+    let newName = f.getName();
+    if (tenTL) newName = tenTL.replace(/[\\\/:*?"<>|]/g, '').trim() + '.pdf';
+    if (!/\.pdf$/i.test(newName)) newName += '.pdf';
+    f.makeCopy(newName, incoming);
+  });
+}
+
+function xuLyFormTaiLieuBot(e) {
+  const props = PropertiesService.getScriptProperties();
+  const incoming = DriveApp.getFolderById(props.getProperty('BOT_DOCS_FORM_ID'));
   let tenTL = '';
   let fileIds = [];
   e.response.getItemResponses().forEach(it => {
