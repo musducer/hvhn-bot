@@ -10,8 +10,10 @@ from pypdf import PdfReader
 
 PDF_CHUNK_SIZE = 1800
 PDF_CHUNK_OVERLAP = 220
-PDF_MAX_CHUNKS_PER_DOC = 500
+PDF_MAX_CHUNKS_PER_DOC = 2200
 OCR_MIN_TEXT_CHARS = 350
+PDF_SEARCH_LIMIT_DEFAULT = 16
+PDF_SEARCH_CANDIDATE_LIMIT = 220
 
 PDF_KNOWLEDGE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_pdf_documents (
@@ -50,6 +52,14 @@ def _safe_key(title: str) -> str:
     return "pdf:" + (stem[:140] or "tai-lieu")
 
 
+def _source_label(source: str, title: str) -> str:
+    source_l = (source or "").lower()
+    bot_dir = os.getenv("HVHN_BOT_DOCS_DIR", str(Path(__file__).resolve().parent / "bot_docs")).lower()
+    if source_l.startswith("bot_only:") or (bot_dir and source_l.startswith(bot_dir)):
+        return f"{title} (kho riêng cho bot)"
+    return f"{title} (kho độc quyền)"
+
+
 def _content_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -74,9 +84,14 @@ def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: in
 
 
 def _extract_native_pdf_text(data: bytes) -> str:
-    reader = PdfReader(io.BytesIO(data))
+    try:
+        reader = PdfReader(io.BytesIO(data))
+    except Exception:
+        return ""
     pages = []
-    for index, page in enumerate(reader.pages, start=1):
+    max_pages = _env_int("HVHN_NATIVE_PDF_MAX_PAGES", 300, minimum=0)
+    page_limit = len(reader.pages) if max_pages == 0 else min(len(reader.pages), max_pages)
+    for index, page in enumerate(reader.pages[:page_limit], start=1):
         try:
             text = page.extract_text() or ""
         except Exception:
@@ -84,6 +99,8 @@ def _extract_native_pdf_text(data: bytes) -> str:
         text = _clean_text(text)
         if text:
             pages.append(f"[Trang {index}]\n{text}")
+    if max_pages and len(reader.pages) > max_pages:
+        pages.append(f"[Ghi chu]\nDa doc {max_pages}/{len(reader.pages)} trang theo gioi han HVHN_NATIVE_PDF_MAX_PAGES.")
     return _clean_text("\n\n".join(pages))
 
 
@@ -107,10 +124,16 @@ def _ocr_pdf_text_from_bytes(data: bytes) -> str:
     if tesseract_cmd:
         pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
 
+    tessdata_dir = os.getenv("HVHN_TESSDATA_DIR") or str(Path(__file__).resolve().parent / "tessdata")
+    ocr_config = "--psm 6"
+    if Path(tessdata_dir).is_dir():
+        os.environ.setdefault("TESSDATA_PREFIX", tessdata_dir)
+        ocr_config = f"--tessdata-dir {tessdata_dir} --psm 6"
+
     lang = os.getenv("HVHN_OCR_LANG", "vie+eng")
     fallback_lang = os.getenv("HVHN_OCR_FALLBACK_LANG", "eng")
     dpi = _env_int("HVHN_OCR_DPI", 220, minimum=120, maximum=350)
-    max_pages = _env_int("HVHN_OCR_MAX_PAGES", 120, minimum=0)
+    max_pages = _env_int("HVHN_OCR_MAX_PAGES", 300, minimum=0)
     zoom = dpi / 72
 
     pages = []
@@ -123,11 +146,11 @@ def _ocr_pdf_text_from_bytes(data: bytes) -> str:
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             image = Image.open(io.BytesIO(pix.tobytes("png")))
             try:
-                text = pytesseract.image_to_string(image, lang=lang, config="--psm 6")
+                text = pytesseract.image_to_string(image, lang=lang, config=ocr_config)
             except Exception as exc:
                 if fallback_lang and fallback_lang != lang:
                     try:
-                        text = pytesseract.image_to_string(image, lang=fallback_lang, config="--psm 6")
+                        text = pytesseract.image_to_string(image, lang=fallback_lang, config=ocr_config)
                     except Exception as fallback_exc:
                         raise RuntimeError(f"Tesseract OCR lỗi ở trang {page_index + 1}: {fallback_exc}") from fallback_exc
                 else:
@@ -136,6 +159,8 @@ def _ocr_pdf_text_from_bytes(data: bytes) -> str:
             text = _clean_text(text)
             if text:
                 pages.append(f"[Trang {page_index + 1} - OCR]\n{text}")
+            image.close()
+            del pix
 
         if max_pages and total_pages > max_pages:
             pages.append(f"[Ghi chú OCR]\nĐã OCR {max_pages}/{total_pages} trang theo giới hạn HVHN_OCR_MAX_PAGES.")
@@ -168,7 +193,8 @@ def build_chunks(text: str) -> list[str]:
 
     chunks = []
     start = 0
-    while start < len(text) and len(chunks) < PDF_MAX_CHUNKS_PER_DOC:
+    max_chunks = _env_int("HVHN_PDF_MAX_CHUNKS_PER_DOC", PDF_MAX_CHUNKS_PER_DOC, minimum=100)
+    while start < len(text) and len(chunks) < max_chunks:
         end = min(start + PDF_CHUNK_SIZE, len(text))
         if end < len(text):
             cut = max(text.rfind("\n\n", start, end), text.rfind(". ", start, end), text.rfind(" ", start, end))
@@ -340,9 +366,10 @@ async def sync_pdf_folder(database_url: str, folder: str | os.PathLike) -> dict:
         await conn.close()
 
 
-async def search_pdf_knowledge(db, query: str, *, limit: int = 10) -> str:
+async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_DEFAULT) -> str:
     await ensure_pdf_knowledge_schema(db)
-    terms = [t.lower() for t in re.findall(r"[\wÀ-ỹ]{3,}", query, flags=re.UNICODE)][:8]
+    limit = max(1, min(limit, _env_int("HVHN_PDF_SEARCH_LIMIT_MAX", 24, minimum=4)))
+    terms = [t.lower() for t in re.findall(r"[\wÀ-ỹA-Za-z0-9]{3,}", query, flags=re.UNICODE)][:12]
     if not terms:
         rows = await db.fetch(
             """
@@ -362,9 +389,10 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = 10) -> str:
             WHERE lower(title) LIKE ANY($1::text[])
                OR lower(content) LIKE ANY($1::text[])
             ORDER BY updated_at DESC
-            LIMIT 80
+            LIMIT $2
             """,
             patterns,
+            _env_int("HVHN_PDF_SEARCH_CANDIDATE_LIMIT", PDF_SEARCH_CANDIDATE_LIMIT, minimum=40),
         )
 
     def score(row) -> int:
@@ -374,18 +402,18 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = 10) -> str:
     ranked = sorted(rows, key=score, reverse=True)[:limit]
     doc_refs = {}
     for row in ranked:
-        title = row["title"]
+        title = _source_label(row["source"] or "", row["title"])
         if title not in doc_refs:
             doc_refs[title] = len(doc_refs) + 1
 
     blocks = []
     if doc_refs:
         blocks.append(
-            "TÀI LIỆU THAM KHẢO PDF BẮT BUỘC GIỮ ĐÚNG TÊN:\n"
+            "TÀI LIỆU THAM KHẢO PDF LIÊN QUAN (chỉ nêu các tài liệu thật sự dùng):\n"
             + "\n".join(f"[{ref_no}] {title}" for title, ref_no in doc_refs.items())
         )
         blocks.append(
-            "Quy ước: [P...] là mã đoạn nội bộ. Khi trả lời người dùng, trích/tham khảo PDF bằng số tài liệu [1], [2]... và cuối câu trả lời phải có mục TÀI LIỆU THAM KHẢO."
+            "Quy ước: [P...] là mã đoạn nội bộ. Khi trả lời người dùng, chỉ dẫn PDF bằng số tài liệu [1], [2]... và cuối câu trả lời chỉ nêu TÀI LIỆU THAM KHẢO liên quan đã dùng."
         )
 
     for index, row in enumerate(ranked, start=1):
@@ -393,7 +421,8 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = 10) -> str:
         if len(content) > 1200:
             content = content[:1200] + "..."
         source = row["source"] or row["title"]
-        ref_no = doc_refs[row["title"]]
+        ref_title = _source_label(source, row["title"])
+        ref_no = doc_refs[ref_title]
         blocks.append(
             f"[P{index}] Tài liệu [{ref_no}] - {row['title']} - đoạn {row['chunk_index']}\n"
             f"Nguồn PDF: {source}\n{content}"

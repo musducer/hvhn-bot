@@ -2,3 +2,13 @@
 xp.db
 __pycache__/
 *.pyc
+.tmp.driveupload/
+.tmp.drivedownload/
+docs/
+bot_docs/
+output/
+tessdata/
+*.zip
+clients.csv
+new_rows.csv
+HVHN ĐỘC QUYỀN/

@@ -25,6 +25,7 @@ const SHEET_XOA_TAILIEU_NAME = '_don_sheet_xoa_tai_lieu';
 const SHEET_GIAHAN_KHACH_NAME = '_don_sheet_giahan_khach';
 const SHEET_STATUS_NAME = '_sheet_status';
 const SHEET_STATUS_FILE = 'sheet_status.json';
+const BOT_ONLY_DOC_PREFIXES = ['discord'];
 
 // Tab không phải dữ liệu khách -> luôn bỏ qua khi quét
 function isSystemTab(name) {
@@ -71,6 +72,7 @@ function onOpen() {
     .addSeparator()
     .addItem('📄 Cập nhật danh sách Tài liệu', 'capNhatTaiLieu')
     .addItem('🗑️ Xóa TÀI LIỆU đã tích', 'xoaTaiLieuDaTich')
+    .addItem('🧹 Dọn tài liệu bot-only khỏi kho khách', 'donTaiLieuBotOnlyKhoKhach')
     .addItem('🗑️ Xóa KHÁCH đã tích (cột H)', 'xoaKhachDaTich')
     .addItem('🗑️ Xóa TẤT CẢ khách', 'xoaTatCaKhach')
     .addItem('Cấp quyền xem folder cho khách', 'capQuyenFolderKhachHang')
@@ -218,6 +220,7 @@ function hvhnTuDongHoa() {
     xuLyLenhGiaHanDiscordTuDong(); // lệnh gia hạn từ Discord
     kiemTraHetHan();          // quá hạn -> tự gỡ quyền/xoá file
     xuLyLenhDiscordTuDong();  // lệnh xoá từ Discord -> xoá Sheet/Drive thật
+    donTaiLieuBotOnlyKhoKhachTuDong(); // tài liệu bot-only lỡ lọt kho khách -> gỡ khỏi Sheet/Drive
     xoaKhachDaTichTuDong();   // tick Xóa khách -> tự xoá, không cần bấm menu
     xoaTaiLieuDaTichTuDong(); // tick Xóa tài liệu -> tự xoá, không cần bấm menu
     capNhatTaiLieu();         // tab Tài liệu luôn mới
@@ -297,7 +300,11 @@ function phanPhoi() {
     const seen = {}; // chống trùng dòng trong cùng 1 tab
     for (let i = 1; i < data.length; i++) {
       const [name, email, fileName, status] = data[i];
-      if (!name || !email || !fileName || status === 'Xong') continue;
+      if (!name || !email || !fileName || String(status || '').startsWith('Xong')) continue;
+      if (_isBotOnlyDocFileName(fileName)) {
+        sheet.getRange(i + 1, 4).setValue('Bot-only (không phân phối)');
+        continue;
+      }
       if (seen[fileName]) {         // dòng lặp trong tab -> đánh dấu, không xử lý lại
         sheet.getRange(i + 1, 4).setValue('Trùng (bỏ qua)');
         continue;
@@ -1179,6 +1186,63 @@ function _docBaseFromFileName(fileName) {
   const idx = fileName.indexOf('__');
   let base = idx >= 0 ? fileName.substring(idx + 2) : fileName;
   return base.replace(/\.pdf$/i, '');
+}
+
+function _isBotOnlyDocFileName(fileName) {
+  const base = _docBaseFromFileName(String(fileName || '')).toLowerCase();
+  return BOT_ONLY_DOC_PREFIXES.some(prefix => base.indexOf(prefix.toLowerCase()) === 0);
+}
+
+function _xoaFileTheoTenTrongFolder(folder, predicate) {
+  const files = folder.getFiles();
+  let removed = 0;
+  while (files.hasNext()) {
+    const f = files.next();
+    if (predicate(f.getName())) {
+      f.setTrashed(true);
+      removed++;
+    }
+  }
+  return removed;
+}
+
+function donTaiLieuBotOnlyKhoKhachTuDong() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
+  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  let removedRows = 0;
+  let removedFiles = 0;
+
+  ss.getSheets().forEach(sheet => {
+    if (isSystemTab(sheet.getName())) return;
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
+
+    for (let i = data.length - 1; i >= 1; i--) {
+      const fn = data[i][2];
+      if (!fn || !_isBotOnlyDocFileName(fn)) continue;
+      const folders = destRoot.getFoldersByName(sheet.getName());
+      while (folders.hasNext()) {
+        const folder = folders.next();
+        const df = folder.getFilesByName(String(fn));
+        while (df.hasNext()) { df.next().setTrashed(true); removedFiles++; }
+      }
+      sheet.deleteRow(i + 1);
+      removedRows++;
+    }
+  });
+
+  removedFiles += _xoaFileTheoTenTrongFolder(sourceFolder, _isBotOnlyDocFileName);
+  if (removedRows || removedFiles) {
+    ghiLog('Dọn tài liệu bot-only khỏi kho khách', removedRows + ' dòng; ' + removedFiles + ' file');
+    capNhatTaiLieu();
+    capNhatDashboard();
+  }
+}
+
+function donTaiLieuBotOnlyKhoKhach() {
+  donTaiLieuBotOnlyKhoKhachTuDong();
+  SpreadsheetApp.getUi().alert('Đã dọn các tài liệu bot-only (ví dụ tên bắt đầu bằng "discord") khỏi kho khách.');
 }
 
 // Menu/nút: dựng tab "Tài liệu" — mỗi tài liệu 1 dòng, kèm số khách đang có + ô tick Xóa.

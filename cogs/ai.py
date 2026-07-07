@@ -11,7 +11,7 @@ from pdf_knowledge import search_pdf_knowledge
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GEMINI_MODEL = "gemini-2.0-flash"
-MAX_DISCORD_LEN = 1900
+MAX_DISCORD_LEN = 3800
 WEB_RESULT_LIMIT = 5
 WEB_CONTEXT_LIMIT = 7
 TRUSTED_SOURCE_HINTS = (
@@ -46,8 +46,8 @@ THEN_SYSTEM_PROMPT = (
     "5. Luôn trả lời trực tiếp vào câu hỏi trước, rồi mới nói nguồn/căn cứ sau.\n"
     "6. Không được trả lời kiểu 'có thể tham khảo các nguồn sau' rồi liệt kê link. "
     "Nguồn web chỉ là căn cứ để tổng hợp thành câu trả lời.\n"
-    "Giọng văn: sắc, ấm, có chiều sâu, tránh sáo rỗng. Câu hỏi đơn giản thì trả lời gọn; "
-    "câu hỏi cần phân tích thì đi sâu có lớp lang."
+    "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ. Câu hỏi đơn giản thì trả lời gọn; "
+    "câu hỏi cần phân tích thì đi sâu có lớp lang, tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
 )
 
 
@@ -206,7 +206,7 @@ class AI(commands.Cog):
 
     async def _pdf_knowledge_context(self, query: str) -> str:
         try:
-            return await search_pdf_knowledge(self.bot.db, query, limit=10)
+            return await search_pdf_knowledge(self.bot.db, query, limit=16)
         except Exception as exc:
             print(f"[ai] PDF knowledge exception: {exc}")
             return ""
@@ -358,12 +358,12 @@ class AI(commands.Cog):
         deduped = {}
         for item in results:
             deduped.setdefault(item["url"], item)
-        results = sorted(deduped.values(), key=lambda item: self._source_score(item["url"]), reverse=True)
+        results = list(deduped.values())
 
         chunks = []
         for index, item in enumerate(results[:WEB_CONTEXT_LIMIT], start=1):
             snippet = item["snippet"][:850]
-            trust = "ưu tiên" if self._source_score(item["url"]) else "cần kiểm chứng"
+            trust = "nguồn có tín hiệu đáng tin" if self._source_score(item["url"]) else "cần kiểm chứng"
             chunks.append(f"[W{index}] {item['title']}\nURL: {item['url']}\nĐộ tin cậy: {trust}\nTóm tắt: {snippet}")
         return "\n\n".join(chunks)
 
@@ -374,21 +374,19 @@ class AI(commands.Cog):
         return (
             "ĐÂY LÀ LỆNH CẦN TRẢ LỜI HAY, ĐÚNG TRỌNG TÂM, CÓ CĂN CỨ.\n"
             f"CHẾ ĐỘ: {mode}\n\n"
-            "KHO PDF/TRI THỨC HVHN ĐÃ ĐỌC TRƯỚC KHI SEARCH WEB:\n"
+            "KHO PDF/TRI THỨC HVHN ĐÃ TRUY XUẤT:\n"
             f"{source_block}\n\n"
             "NGUỒN WEB VỪA TRA CỨU:\n"
             f"{web_block}\n\n"
             "QUY TẮC TRẢ LỜI BẮT BUỘC:\n"
             "- Dòng/đoạn đầu tiên phải trả lời thẳng vào câu hỏi của người dùng, không mở bằng 'có thể tham khảo'.\n"
             "- Không được chỉ liệt kê nguồn. Phải tổng hợp thành câu trả lời có nội dung cụ thể.\n"
-            "- Ưu tiên nguồn PDF/kho HVHN hơn nguồn web. Nếu PDF đã đủ, trả lời dựa trên PDF và chỉ dùng web để bổ sung/kiểm chứng.\n"
+            "- Ba nguồn PDF độc quyền, PDF riêng cho bot/tri thức HVHN, và web được xem ngang nhau. Không khóa câu trả lời vào một nguồn; hãy đối chiếu, tổng hợp, và chỉ nói điều có căn cứ.\n"
             "- Nếu người dùng hỏi gợi ý/danh sách, hãy đưa danh sách cụ thể kèm lý do ngắn cho từng mục.\n"
-            "- Câu đơn giản: trả lời 3-7 dòng. Câu cần phân tích: trả lời sâu hơn, có luận điểm rõ.\n"
+            "- Câu đơn giản: trả lời 5-10 dòng nếu cần. Câu cần phân tích: trả lời đầy đặn hơn, có luận điểm rõ.\n"
+            "- Khi phân tích tác phẩm/văn bản, ưu tiên cấu trúc: Luận điểm chính -> Nội dung -> Nghệ thuật -> Liên hệ mở rộng. Văn phong giàu hình ảnh nhưng lập luận phải sắc.\n"
             "- Mọi khẳng định quan trọng lấy từ PDF phải gắn số tài liệu dạng [1], [2] ngay sau ý liên quan. Không dùng [P1] trong câu trả lời cuối vì [P...] chỉ là mã đoạn nội bộ.\n"
-            "- Nếu dùng PDF, cuối câu trả lời bắt buộc có mục:\n"
-            "TÀI LIỆU THAM KHẢO:\n"
-            "[1] Tên file PDF\n"
-            "[2] Tên file PDF\n"
+            "- Nếu dùng PDF, cuối câu trả lời chỉ nêu mục TÀI LIỆU THAM KHẢO với các tài liệu liên quan thật sự đã dùng; không khai hết danh sách.\n"
             "- Mọi khẳng định quan trọng lấy từ tri thức HVHN thủ công phải gắn [S1], [S2] ngay sau ý liên quan.\n"
             "- Mọi khẳng định quan trọng lấy từ web phải gắn nguồn dạng [W1], [W2] ngay sau ý liên quan.\n"
             "- Nếu nguồn web chỉ là snippet/tóm tắt, không trích dẫn nguyên văn và không khẳng định quá mức.\n"
@@ -447,19 +445,19 @@ class AI(commands.Cog):
 
         lowered = answer.lower()
         used_numbers = set(re.findall(r"(?<![A-Za-z])\[(\d+)\]", answer))
-        selected = [(num, title) for num, title in refs if not used_numbers or num in used_numbers]
+        selected = [(num, title) for num, title in refs if used_numbers and num in used_numbers]
         if not selected:
-            selected = refs
+            selected = refs[:3]
 
         missing_titles = [(num, title) for num, title in selected if title not in answer]
         if "tài liệu tham khảo" in lowered or "tai lieu tham khao" in lowered:
             if not missing_titles:
                 return answer
-            lines = ["", "TÀI LIỆU THAM KHẢO (đầy đủ):"]
+            lines = ["", "TÀI LIỆU THAM KHẢO (liên quan):"]
             lines.extend(f"[{num}] {title}" for num, title in missing_titles)
             return answer.rstrip() + "\n".join(lines)
 
-        lines = ["", "TÀI LIỆU THAM KHẢO:"]
+        lines = ["", "TÀI LIỆU THAM KHẢO (liên quan):"]
         lines.extend(f"[{num}] {title}" for num, title in selected)
         return answer.rstrip() + "\n".join(lines)
 
@@ -469,8 +467,7 @@ class AI(commands.Cog):
         needs_repair = bool(answer) and (
             not self._has_grounding_footer(answer)
             or self._looks_like_source_dump(answer)
-            or (bool(knowledge) and "TÀI LIỆU THAM KHẢO PDF" in knowledge and "TÀI LIỆU THAM KHẢO" not in answer.upper())
-            or (bool(web_context) and "[W" not in answer)
+            or (bool(knowledge) and ("TÀI LIỆU THAM KHẢO PDF" in knowledge or "TAI LIEU THAM KHAO PDF" in knowledge) and not re.search(r"t[aà]i li[eệ]u tham kh[aả]o|tai lieu tham khao|ngu[oồ]n:", answer, re.I))
         )
         if answer and needs_repair:
             repair_prompt = (

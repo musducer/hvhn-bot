@@ -18,7 +18,8 @@ except Exception:
 DEFAULT_MIRROR_PARENT = Path(MIRROR_SOURCE).parent
 ADMIN_ROLE_ENV = "HVHN_ADMIN_ROLE"
 MIRROR_PARENT_ENV = "HVHN_MIRROR_PARENT"
-MAX_PDF_BYTES = 25 * 1024 * 1024
+MAX_PDF_BYTES = int(os.getenv("HVHN_MAX_PDF_MB", "300")) * 1024 * 1024
+INLINE_INDEX_MAX_BYTES = int(os.getenv("HVHN_INLINE_INDEX_MAX_MB", "0")) * 1024 * 1024
 
 
 def _safe_stem(value: str, fallback: str = "don") -> str:
@@ -101,10 +102,16 @@ class DocumentStorage(commands.Cog):
         if not file.filename.lower().endswith(".pdf"):
             return "chỉ nhận PDF"
         if file.size and file.size > MAX_PDF_BYTES:
-            return "quá 25MB"
+            return f"quá {MAX_PDF_BYTES // 1024 // 1024}MB"
         return None
 
-    async def _enqueue_and_index_pdf(self, file: discord.Attachment, requested_by: int) -> tuple[int | None, dict | None, str | None]:
+    async def _enqueue_and_index_pdf(
+        self,
+        file: discord.Attachment,
+        requested_by: int,
+        *,
+        distribute_to_clients: bool = False,
+    ) -> tuple[int | None, dict | None, str | None]:
         error = self._validate_pdf_attachment(file)
         if error:
             return None, None, error
@@ -114,21 +121,24 @@ class DocumentStorage(commands.Cog):
         except Exception as exc:
             return None, None, f"lỗi đọc file: {exc}"
         if len(data) > MAX_PDF_BYTES:
-            return None, None, "quá 25MB"
+            return None, None, f"quá {MAX_PDF_BYTES // 1024 // 1024}MB"
 
         job_id = await self._enqueue(
-            "add_document",
+            "add_document" if distribute_to_clients else "add_bot_document",
             file_name=file.filename,
             file_data=data,
             requested_by=requested_by,
         )
+
+        if INLINE_INDEX_MAX_BYTES <= 0 or len(data) > INLINE_INDEX_MAX_BYTES:
+            return job_id, None, None
 
         try:
             indexed = await index_pdf_bytes(
                 self.bot.db,
                 file.filename,
                 data,
-                source=f"discord:{file.filename}",
+                source=("discord_client:" if distribute_to_clients else "bot_only:") + file.filename,
                 created_by=requested_by,
             )
         except Exception as exc:
@@ -153,7 +163,7 @@ class DocumentStorage(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="hvhn_themtailieu", description="Thêm PDF tài liệu vào hệ thống HVHN")
+    @app_commands.command(name="hvhn_themtailieu", description="Nạp PDF vào kho riêng cho bot AI, không phân phối cho khách")
     async def add_document(self, interaction: discord.Interaction, file: discord.Attachment):
         if not await self._require_admin(interaction):
             return
@@ -171,11 +181,31 @@ class DocumentStorage(commands.Cog):
         elif error:
             ai_note = f"\nCảnh báo: {error}"
         await interaction.followup.send(
-            f"Đã xếp hàng đơn #{job_id}: thêm tài liệu `{file.filename}`. Watcher sẽ watermark và phân phối cho toàn bộ khách.{ai_note}",
+            f"Đã xếp hàng đơn #{job_id}: nạp `{file.filename}` vào kho riêng cho bot. Watcher sẽ lưu file, không watermark/không phân phối cho khách.{ai_note}",
             ephemeral=True,
         )
 
-    @app_commands.command(name="hvhn_nap_tailieu", description="Nạp nhiều PDF vào kho HVHN và kho tri thức AI")
+    @app_commands.command(name="hvhn_tailieu_khach", description="Thêm PDF vào kho độc quyền và phân phối cho khách")
+    async def add_client_document(self, interaction: discord.Interaction, file: discord.Attachment):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        job_id, indexed, error = await self._enqueue_and_index_pdf(file, interaction.user.id, distribute_to_clients=True)
+        if not job_id:
+            await interaction.followup.send(f"Không nhận `{file.filename}`: {error}.", ephemeral=True)
+            return
+
+        ai_note = ""
+        if indexed:
+            ai_note = f"\nAI cũng đã đọc vào kho tri thức: `{indexed['chunks']}` đoạn."
+        elif error:
+            ai_note = f"\nCảnh báo: {error}"
+        await interaction.followup.send(
+            f"Đã xếp hàng đơn #{job_id}: thêm `{file.filename}` vào kho độc quyền cho khách. Watcher sẽ watermark và phân phối.{ai_note}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="hvhn_nap_tailieu", description="Nạp nhiều PDF vào kho riêng cho bot AI, không phân phối cho khách")
     async def add_many_documents(
         self,
         interaction: discord.Interaction,
@@ -303,7 +333,9 @@ class DocumentStorage(commands.Cog):
             value=(
                 f"Local clients/docs: `{status.get('clients_count', '0')}` / `{status.get('docs_count', '0')}`\n"
                 f"Sheet clients/docs: `{sheet_clients}` / `{sheet_docs}`\n"
-                f"AI PDF: `{status.get('ai_pdf_docs_indexed', '0')}` file | sync: `{status.get('ai_pdf_last_sync', 'chưa có')}`"
+                f"AI PDF: `{status.get('ai_pdf_docs_indexed', '0')}` file "
+                f"(độc quyền `{status.get('ai_pdf_exclusive_docs_indexed', '0')}`, bot `{status.get('ai_pdf_bot_docs_indexed', '0')}`) "
+                f"| sync: `{status.get('ai_pdf_last_sync', 'chưa có')}`"
             ),
             inline=False,
         )
@@ -315,6 +347,7 @@ class DocumentStorage(commands.Cog):
         local_queue = [
             f"thêm khách `{status.get('queue_add_client', '0')}`",
             f"thêm tài liệu `{status.get('queue_add_document', '0')}`",
+            f"tài liệu bot `{status.get('bot_docs_count', '0')}`",
             f"xóa khách `{status.get('queue_remove_client', '0')}`",
             f"xóa tài liệu `{status.get('queue_remove_document', '0')}`",
             f"sheet xóa khách `{status.get('queue_sheet_remove_client', '0')}`",

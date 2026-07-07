@@ -9,6 +9,7 @@ import shutil
 import traceback
 import asyncio
 import json
+import uuid
 from pathlib import Path
 
 import asyncpg
@@ -43,6 +44,8 @@ LAST_PDF_SYNC = 0
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
+BOT_DOCS_DIR = os.getenv("HVHN_BOT_DOCS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_docs"))
+STALE_PROCESSING_MINUTES = int(os.getenv("HVHN_STALE_PROCESSING_MINUTES", "30"))
 
 DOC_JOB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS hvhn_doc_jobs (
@@ -124,7 +127,7 @@ def _safe_stem(value, fallback="don"):
 
 
 def _job_name(prefix, label, suffix):
-    return f"{prefix}_{_ts()}_{_safe_stem(label)}{suffix}"
+    return f"{prefix}_{_ts()}_{_safe_stem(label)}_{uuid.uuid4().hex[:8]}{suffix}"
 
 
 def _write_atomic(path, data):
@@ -143,6 +146,16 @@ async def _fetch_discord_jobs():
     try:
         await conn.execute(DOC_JOB_SCHEMA)
         async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE hvhn_doc_jobs
+                SET status = 'pending', error = NULL
+                WHERE status = 'processing'
+                  AND processed_at IS NULL
+                  AND created_at < now() - ($1::int * interval '1 minute')
+                """,
+                STALE_PROCESSING_MINUTES,
+            )
             rows = await conn.fetch(
                 """
                 SELECT id, job_type, text_payload, file_name, file_data
@@ -195,6 +208,13 @@ def _materialize_discord_job(job):
             raise ValueError("Tài liệu từ Discord không phải PDF")
         target = os.path.join(INCOMING_DOCS, _job_name("discord_tailieu", os.path.splitext(filename)[0], ".pdf"))
         _write_atomic(target, bytes(job["file_data"] or b""))
+    elif job_type == "add_bot_document":
+        filename = job["file_name"] or f"bot_tai_lieu_{job['id']}.pdf"
+        if not filename.lower().endswith(".pdf"):
+            raise ValueError("Tài liệu bot từ Discord không phải PDF")
+        os.makedirs(BOT_DOCS_DIR, exist_ok=True)
+        target = os.path.join(BOT_DOCS_DIR, _job_name("bot_tailieu", os.path.splitext(filename)[0], ".pdf"))
+        _write_atomic(target, bytes(job["file_data"] or b""))
     elif job_type == "remove_client":
         email = (job["text_payload"] or "").strip()
         _write_atomic(os.path.join(SHEET_XOA_KHACH, _job_name("discord_sheet_xoa_khach", email, ".txt")), email.encode("utf-8"))
@@ -240,6 +260,11 @@ async def _sync_runtime_status():
         await conn.execute(DOC_JOB_SCHEMA)
         clients = load_clients()
         docs = [os.path.splitext(os.path.basename(p))[0] for p in list_docs()]
+        bot_docs = [
+            os.path.splitext(name)[0]
+            for name in sorted(os.listdir(BOT_DOCS_DIR))
+            if os.path.isdir(BOT_DOCS_DIR) and name.lower().endswith(".pdf")
+        ] if os.path.isdir(BOT_DOCS_DIR) else []
         doc_count = len(docs)
         status = {
             "watcher_heartbeat": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -247,6 +272,7 @@ async def _sync_runtime_status():
             "mirror_ready": str(os.path.isdir(MIRROR_SOURCE)),
             "clients_count": str(len(clients)),
             "docs_count": str(doc_count),
+            "bot_docs_count": str(len(bot_docs)),
             "queue_add_client": str(_count_files(JOBS_KHACH, ".txt")),
             "queue_add_document": str(_count_files(INCOMING_DOCS, ".pdf")),
             "queue_remove_client": str(_count_files(XOA_KHACH, ".txt")),
@@ -404,11 +430,15 @@ async def _sync_pdf_knowledge(force=False):
         return
     LAST_PDF_SYNC = now
     try:
-        result = await sync_pdf_folder(DATABASE_URL, DOCS_DIR)
-        await _set_runtime_status("ai_pdf_docs_indexed", result["indexed"])
+        exclusive = await sync_pdf_folder(DATABASE_URL, DOCS_DIR)
+        bot_only = await sync_pdf_folder(DATABASE_URL, BOT_DOCS_DIR)
+        await _set_runtime_status("ai_pdf_docs_indexed", exclusive["indexed"] + bot_only["indexed"])
+        await _set_runtime_status("ai_pdf_exclusive_docs_indexed", exclusive["indexed"])
+        await _set_runtime_status("ai_pdf_bot_docs_indexed", bot_only["indexed"])
         await _set_runtime_status("ai_pdf_last_sync", time.strftime("%Y-%m-%d %H:%M:%S"))
-        if result["changed"]:
-            print(f"[AI PDF] đồng bộ docs/: {result['indexed']} file, cập nhật {result['changed']} file")
+        changed = exclusive["changed"] + bot_only["changed"]
+        if changed:
+            print(f"[AI PDF] đồng bộ kho AI: doc quyen {exclusive['indexed']} file, bot {bot_only['indexed']} file, cap nhat {changed} file")
     except Exception:
         print("  LỖI đồng bộ kho PDF AI:")
         traceback.print_exc()
