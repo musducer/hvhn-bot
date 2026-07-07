@@ -372,11 +372,30 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = 10) -> str:
         return sum(haystack.count(term) for term in terms) + sum(3 for term in terms if term in row["title"].lower())
 
     ranked = sorted(rows, key=score, reverse=True)[:limit]
+    doc_refs = {}
+    for row in ranked:
+        title = row["title"]
+        if title not in doc_refs:
+            doc_refs[title] = len(doc_refs) + 1
+
     blocks = []
+    if doc_refs:
+        blocks.append(
+            "TÀI LIỆU THAM KHẢO PDF BẮT BUỘC GIỮ ĐÚNG TÊN:\n"
+            + "\n".join(f"[{ref_no}] {title}" for title, ref_no in doc_refs.items())
+        )
+        blocks.append(
+            "Quy ước: [P...] là mã đoạn nội bộ. Khi trả lời người dùng, trích/tham khảo PDF bằng số tài liệu [1], [2]... và cuối câu trả lời phải có mục TÀI LIỆU THAM KHẢO."
+        )
+
     for index, row in enumerate(ranked, start=1):
         content = row["content"]
         if len(content) > 1200:
             content = content[:1200] + "..."
         source = row["source"] or row["title"]
-        blocks.append(f"[P{index}] {row['title']} - đoạn {row['chunk_index']}\nNguồn PDF: {source}\n{content}")
+        ref_no = doc_refs[row["title"]]
+        blocks.append(
+            f"[P{index}] Tài liệu [{ref_no}] - {row['title']} - đoạn {row['chunk_index']}\n"
+            f"Nguồn PDF: {source}\n{content}"
+        )
     return "\n\n".join(blocks)

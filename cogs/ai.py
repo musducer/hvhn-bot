@@ -381,17 +381,22 @@ class AI(commands.Cog):
             "QUY TẮC TRẢ LỜI BẮT BUỘC:\n"
             "- Dòng/đoạn đầu tiên phải trả lời thẳng vào câu hỏi của người dùng, không mở bằng 'có thể tham khảo'.\n"
             "- Không được chỉ liệt kê nguồn. Phải tổng hợp thành câu trả lời có nội dung cụ thể.\n"
-            "- Ưu tiên nguồn [P...] từ PDF/kho HVHN hơn nguồn web. Nếu [P...] đã đủ, trả lời dựa trên [P...] và chỉ dùng web để bổ sung/kiểm chứng.\n"
+            "- Ưu tiên nguồn PDF/kho HVHN hơn nguồn web. Nếu PDF đã đủ, trả lời dựa trên PDF và chỉ dùng web để bổ sung/kiểm chứng.\n"
             "- Nếu người dùng hỏi gợi ý/danh sách, hãy đưa danh sách cụ thể kèm lý do ngắn cho từng mục.\n"
             "- Câu đơn giản: trả lời 3-7 dòng. Câu cần phân tích: trả lời sâu hơn, có luận điểm rõ.\n"
-            "- Mọi khẳng định quan trọng lấy từ kho PDF/HVHN phải gắn nguồn dạng [P1], [P2] hoặc [S1] ngay sau ý liên quan.\n"
+            "- Mọi khẳng định quan trọng lấy từ PDF phải gắn số tài liệu dạng [1], [2] ngay sau ý liên quan. Không dùng [P1] trong câu trả lời cuối vì [P...] chỉ là mã đoạn nội bộ.\n"
+            "- Nếu dùng PDF, cuối câu trả lời bắt buộc có mục:\n"
+            "TÀI LIỆU THAM KHẢO:\n"
+            "[1] Tên file PDF\n"
+            "[2] Tên file PDF\n"
+            "- Mọi khẳng định quan trọng lấy từ tri thức HVHN thủ công phải gắn [S1], [S2] ngay sau ý liên quan.\n"
             "- Mọi khẳng định quan trọng lấy từ web phải gắn nguồn dạng [W1], [W2] ngay sau ý liên quan.\n"
             "- Nếu nguồn web chỉ là snippet/tóm tắt, không trích dẫn nguyên văn và không khẳng định quá mức.\n"
             "- Kiến thức phổ thông chỉ được dùng cho khái niệm/hướng làm bài chung; không dùng để khẳng định "
             "chi tiết tác phẩm, trích dẫn, năm tháng, hoàn cảnh sáng tác, nhân vật, hay nhận định phê bình nếu không có nguồn.\n"
             "- Không trích dẫn nguyên văn nếu không có nguồn trong prompt.\n"
             "- Nếu câu hỏi yêu cầu một thông tin mà dữ liệu không có, hãy nói không đủ dữ liệu.\n"
-            "- Cuối câu trả lời chỉ thêm một dòng ngắn: Nguồn: [P1], [S1], [W1]... Nếu không có nguồn thì ghi: Nguồn: chưa đủ dữ liệu.\n"
+            "- Nếu không dùng PDF, cuối câu trả lời chỉ thêm một dòng ngắn: Nguồn: [S1], [W1]... Nếu không có nguồn thì ghi: Nguồn: chưa đủ dữ liệu.\n"
             "- Không thêm mục 'Mức căn cứ'/'Cần kiểm chứng' trừ khi thật sự cần cảnh báo rủi ro.\n\n"
             "YÊU CẦU NGƯỜI DÙNG:\n"
             f"{prompt}"
@@ -400,7 +405,14 @@ class AI(commands.Cog):
     @staticmethod
     def _has_grounding_footer(answer: str) -> bool:
         lowered = answer.lower()
-        return "nguồn:" in lowered or "nguon:" in lowered or "chưa đủ dữ liệu" in lowered or "chua du du lieu" in lowered
+        return (
+            "tài liệu tham khảo" in lowered
+            or "tai lieu tham khao" in lowered
+            or "nguồn:" in lowered
+            or "nguon:" in lowered
+            or "chưa đủ dữ liệu" in lowered
+            or "chua du du lieu" in lowered
+        )
 
     @staticmethod
     def _looks_like_source_dump(answer: str) -> bool:
@@ -416,13 +428,48 @@ class AI(commands.Cog):
         has_many_source_bullets = len(re.findall(r"^\s*[-•]\s+.*\[(?:w|W)\d+\]", answer, re.M)) >= 3
         return has_dump_intro or has_many_source_bullets
 
+    @staticmethod
+    def _pdf_reference_lines(knowledge: str) -> list[tuple[str, str]]:
+        if "PDF" not in knowledge and "pdf" not in knowledge:
+            return []
+        refs = []
+        for line in knowledge.splitlines():
+            match = re.match(r"^\[(\d+)\]\s+(.+\.pdf)\s*$", line.strip(), flags=re.I)
+            if match:
+                refs.append((match.group(1), match.group(2).strip()))
+        return refs
+
+    @classmethod
+    def _ensure_pdf_references(cls, answer: str, knowledge: str) -> str:
+        refs = cls._pdf_reference_lines(knowledge)
+        if not refs:
+            return answer
+
+        lowered = answer.lower()
+        used_numbers = set(re.findall(r"(?<![A-Za-z])\[(\d+)\]", answer))
+        selected = [(num, title) for num, title in refs if not used_numbers or num in used_numbers]
+        if not selected:
+            selected = refs
+
+        missing_titles = [(num, title) for num, title in selected if title not in answer]
+        if "tài liệu tham khảo" in lowered or "tai lieu tham khao" in lowered:
+            if not missing_titles:
+                return answer
+            lines = ["", "TÀI LIỆU THAM KHẢO (đầy đủ):"]
+            lines.extend(f"[{num}] {title}" for num, title in missing_titles)
+            return answer.rstrip() + "\n".join(lines)
+
+        lines = ["", "TÀI LIỆU THAM KHẢO:"]
+        lines.extend(f"[{num}] {title}" for num, title in selected)
+        return answer.rstrip() + "\n".join(lines)
+
     async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.15)
         needs_repair = bool(answer) and (
             not self._has_grounding_footer(answer)
             or self._looks_like_source_dump(answer)
-            or (bool(knowledge) and "[P" in knowledge and "[P" not in answer)
+            or (bool(knowledge) and "TÀI LIỆU THAM KHẢO PDF" in knowledge and "TÀI LIỆU THAM KHẢO" not in answer.upper())
             or (bool(web_context) and "[W" not in answer)
         )
         if answer and needs_repair:
@@ -430,7 +477,8 @@ class AI(commands.Cog):
                 "Sửa câu trả lời sau để trả lời đúng trọng tâm, không bịa, không chỉ liệt kê nguồn. "
                 "Không thêm thông tin mới ngoài KHO PDF/TRI THỨC HVHN/NGUỒN WEB đã cung cấp. "
                 "Mở đầu bằng câu trả lời trực tiếp. Nếu câu hỏi xin gợi ý/danh sách, đưa mục cụ thể và lý do. "
-                "Gắn [P...]/[S...] sau ý dùng từ PDF/HVHN, gắn [W...] sau ý dùng từ web, rồi thêm dòng cuối 'Nguồn: [P...], [S...], [W...]'.\n\n"
+                "Nếu dùng PDF, gắn số tài liệu [1], [2] sau ý liên quan và thêm mục 'TÀI LIỆU THAM KHẢO' với đúng tên PDF. "
+                "Không dùng [P...] trong câu trả lời cuối. Gắn [S...] cho tri thức thủ công và [W...] cho web.\n\n"
                 f"CÂU TRẢ LỜI CẦN SỬA:\n{answer}"
             )
             repaired = await self.generate(
@@ -440,6 +488,8 @@ class AI(commands.Cog):
             )
             if repaired:
                 answer = repaired
+        if answer:
+            answer = self._ensure_pdf_references(answer, knowledge)
         return answer, full_prompt
 
     async def _then_answer(self, interaction: discord.Interaction, title: str, user_prompt: str, prompt: str, mode: str):
