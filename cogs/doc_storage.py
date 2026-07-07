@@ -7,7 +7,7 @@ from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands
-from pdf_knowledge import index_pdf_bytes
+from pdf_knowledge import index_pdf_bytes, pdf_knowledge_stats
 
 try:
     from hvhn_batch import MIRROR_SOURCE
@@ -20,6 +20,7 @@ ADMIN_ROLE_ENV = "HVHN_ADMIN_ROLE"
 MIRROR_PARENT_ENV = "HVHN_MIRROR_PARENT"
 MAX_PDF_BYTES = int(os.getenv("HVHN_MAX_PDF_MB", "300")) * 1024 * 1024
 INLINE_INDEX_MAX_BYTES = int(os.getenv("HVHN_INLINE_INDEX_MAX_MB", "0")) * 1024 * 1024
+PDF_URL_PATTERN = re.compile(r"^https?://", re.I)
 
 
 def _safe_stem(value: str, fallback: str = "don") -> str:
@@ -146,6 +147,25 @@ class DocumentStorage(commands.Cog):
             return job_id, indexed, f"đã xếp hàng nhưng AI chưa đọc được PDF: {exc}"
         return job_id, indexed, None
 
+    async def _enqueue_pdf_url(
+        self,
+        url: str,
+        file_name: str,
+        requested_by: int,
+        *,
+        distribute_to_clients: bool = False,
+    ) -> int | None:
+        url = url.strip()
+        if not PDF_URL_PATTERN.match(url):
+            return None
+        safe_file_name = _safe_stem(Path(file_name).stem or "tai_lieu") + ".pdf"
+        return await self._enqueue(
+            "add_document_url" if distribute_to_clients else "add_bot_document_url",
+            text_payload=url,
+            file_name=safe_file_name,
+            requested_by=requested_by,
+        )
+
     @app_commands.command(name="hvhn_themkhach", description="Thêm khách vào hệ thống tài liệu HVHN")
     async def add_client(self, interaction: discord.Interaction, ten: str, email: str):
         if not await self._require_admin(interaction):
@@ -180,6 +200,8 @@ class DocumentStorage(commands.Cog):
                 ai_note += " PDF này có thể là scan ảnh, cần OCR nếu muốn AI đọc nội dung."
         elif error:
             ai_note = f"\nCảnh báo: {error}"
+        else:
+            ai_note = "\nĐã xếp hàng; watcher sẽ đọc/OCR sau để tránh Discord timeout với PDF lớn/PDF ảnh."
         await interaction.followup.send(
             f"Đã xếp hàng đơn #{job_id}: nạp `{file.filename}` vào kho riêng cho bot. Watcher sẽ lưu file, không watermark/không phân phối cho khách.{ai_note}",
             ephemeral=True,
@@ -200,8 +222,36 @@ class DocumentStorage(commands.Cog):
             ai_note = f"\nAI cũng đã đọc vào kho tri thức: `{indexed['chunks']}` đoạn."
         elif error:
             ai_note = f"\nCảnh báo: {error}"
+        else:
+            ai_note = "\nĐã xếp hàng; watcher sẽ watermark/phân phối và đọc/OCR sau."
         await interaction.followup.send(
             f"Đã xếp hàng đơn #{job_id}: thêm `{file.filename}` vào kho độc quyền cho khách. Watcher sẽ watermark và phân phối.{ai_note}",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="hvhn_nap_link", description="Nạp PDF lớn bằng link Drive vào kho riêng cho bot AI")
+    async def add_bot_document_link(self, interaction: discord.Interaction, url: str, ten_file: str):
+        if not await self._require_admin(interaction):
+            return
+        job_id = await self._enqueue_pdf_url(url, ten_file, interaction.user.id)
+        if not job_id:
+            await interaction.response.send_message("Link không hợp lệ. Cần link bắt đầu bằng http/https.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Đã xếp hàng đơn #{job_id}: watcher sẽ tải `{ten_file}.pdf` từ link và OCR nếu là PDF hình ảnh.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="hvhn_tailieu_khach_link", description="Nạp PDF lớn bằng link Drive vào kho khách và phân phối")
+    async def add_client_document_link(self, interaction: discord.Interaction, url: str, ten_file: str):
+        if not await self._require_admin(interaction):
+            return
+        job_id = await self._enqueue_pdf_url(url, ten_file, interaction.user.id, distribute_to_clients=True)
+        if not job_id:
+            await interaction.response.send_message("Link không hợp lệ. Cần link bắt đầu bằng http/https.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Đã xếp hàng đơn #{job_id}: watcher sẽ tải `{ten_file}.pdf`, watermark, phân phối và nạp vào kho AI.",
             ephemeral=True,
         )
 
@@ -233,11 +283,14 @@ class DocumentStorage(commands.Cog):
                 lines.append(f"❌ `{file.filename}`: {error}")
                 continue
             ok += 1
-            chunks = indexed["chunks"] if indexed else 0
-            suffix = " - cần OCR nếu là PDF scan ảnh" if indexed and indexed["chunks"] == 0 else ""
+            chunks = indexed["chunks"] if indexed else None
+            suffix = " - đã xếp hàng, watcher sẽ đọc/OCR sau" if indexed is None and error is None else ""
+            if indexed and indexed["chunks"] == 0:
+                suffix = " - sẽ OCR nếu là PDF scan ảnh"
             if error:
                 suffix = f" - {error}"
-            lines.append(f"✅ `#{job_id}` `{file.filename}`: AI đọc `{chunks}` đoạn{suffix}")
+            read_text = f"AI đọc `{chunks}` đoạn" if chunks is not None else "chờ watcher"
+            lines.append(f"✅ `#{job_id}` `{file.filename}`: {read_text}{suffix}")
 
         await interaction.followup.send(
             "Đã nạp `{}`/`{}` PDF.\n{}".format(ok, len(files), "\n".join(lines[:20])),
@@ -388,6 +441,27 @@ class DocumentStorage(commands.Cog):
                 ids,
             )
         await interaction.response.send_message(f"Đã đưa `{len(ids)}` đơn lỗi về hàng chờ.", ephemeral=True)
+
+    @app_commands.command(name="hvhn_ai_pdf_audit", description="Kiểm tra AI đã đọc/OCR kho PDF chưa")
+    async def ai_pdf_audit(self, interaction: discord.Interaction):
+        if not await self._require_admin(interaction):
+            return
+        stats = await pdf_knowledge_stats(self.bot.db)
+        exclusive = stats["by_source"].get("exclusive", {"docs": 0, "chunks": 0})
+        bot_only = stats["by_source"].get("bot", {"docs": 0, "chunks": 0})
+        lines = [
+            f"Tổng: `{stats['total_docs']}` PDF | `{stats['total_chunks']}` đoạn AI đọc được",
+            f"Kho khách: `{exclusive['docs']}` PDF | `{exclusive['chunks']}` đoạn",
+            f"Kho bot: `{bot_only['docs']}` PDF | `{bot_only['chunks']}` đoạn",
+        ]
+        if stats["zero_docs"]:
+            lines.append("")
+            lines.append("PDF chưa đọc được nội dung/OCR ra 0 đoạn:")
+            lines.extend(f"- `{row['title']}`" for row in stats["zero_docs"][:15])
+        else:
+            lines.append("")
+            lines.append("Không có PDF nào đang ở trạng thái 0 đoạn.")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     @app_commands.command(name="hvhn_khach", description="Xem trạng thái một khách theo email")
     async def client_status(self, interaction: discord.Interaction, email: str):

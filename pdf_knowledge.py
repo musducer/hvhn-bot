@@ -52,6 +52,13 @@ def _safe_key(title: str) -> str:
     return "pdf:" + (stem[:140] or "tai-lieu")
 
 
+def _safe_doc_key(title: str, source: str = "") -> str:
+    source_l = (source or "").lower()
+    bot_dir = os.getenv("HVHN_BOT_DOCS_DIR", str(Path(__file__).resolve().parent / "bot_docs")).lower()
+    namespace = "bot" if source_l.startswith("bot_only:") or (bot_dir and source_l.startswith(bot_dir)) else "exclusive"
+    return _safe_key(namespace + "__" + title)
+
+
 def _source_label(source: str, title: str) -> str:
     source_l = (source or "").lower()
     bot_dir = os.getenv("HVHN_BOT_DOCS_DIR", str(Path(__file__).resolve().parent / "bot_docs")).lower()
@@ -216,7 +223,7 @@ async def ensure_pdf_knowledge_schema(db) -> None:
 async def index_pdf_bytes(db, title: str, data: bytes, *, source: str = "", created_by: int | None = None) -> dict:
     await ensure_pdf_knowledge_schema(db)
     title = Path(title).name
-    doc_key = _safe_key(title)
+    doc_key = _safe_doc_key(title, source)
     content_hash = _content_hash(data)
 
     current = await db.fetchrow(
@@ -302,9 +309,16 @@ async def index_pdf_path(database_url: str, path: str | os.PathLike) -> dict:
 
 async def remove_pdf_document(db, title_or_key: str) -> None:
     await ensure_pdf_knowledge_schema(db)
-    doc_key = title_or_key if title_or_key.startswith("pdf:") else _safe_key(title_or_key)
-    await db.execute("DELETE FROM ai_pdf_chunks WHERE doc_key = $1", doc_key)
-    await db.execute("DELETE FROM ai_pdf_documents WHERE doc_key = $1", doc_key)
+    if title_or_key.startswith("pdf:"):
+        keys = [title_or_key]
+    else:
+        keys = [
+            _safe_key(title_or_key),
+            _safe_doc_key(title_or_key, ""),
+            _safe_doc_key(title_or_key, "bot_only:" + title_or_key),
+        ]
+    await db.execute("DELETE FROM ai_pdf_chunks WHERE doc_key = ANY($1::text[])", keys)
+    await db.execute("DELETE FROM ai_pdf_documents WHERE doc_key = ANY($1::text[])", keys)
 
 
 async def remove_pdf_document_by_title(database_url: str, title_or_key: str) -> None:
@@ -428,3 +442,39 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
             f"Nguồn PDF: {source}\n{content}"
         )
     return "\n\n".join(blocks)
+
+
+async def pdf_knowledge_stats(db, *, limit_zero: int = 15) -> dict:
+    await ensure_pdf_knowledge_schema(db)
+    total_docs = await db.fetchval("SELECT count(*) FROM ai_pdf_documents")
+    total_chunks = await db.fetchval("SELECT coalesce(sum(chunk_count), 0) FROM ai_pdf_documents")
+    zero_docs = await db.fetch(
+        """
+        SELECT title, source, updated_at
+        FROM ai_pdf_documents
+        WHERE chunk_count = 0
+        ORDER BY updated_at DESC
+        LIMIT $1
+        """,
+        limit_zero,
+    )
+    by_source = await db.fetch(
+        """
+        SELECT
+          CASE
+            WHEN lower(coalesce(source, '')) LIKE '%bot_docs%' OR lower(coalesce(source, '')) LIKE 'bot_only:%'
+              THEN 'bot'
+            ELSE 'exclusive'
+          END AS kind,
+          count(*) AS docs,
+          coalesce(sum(chunk_count), 0) AS chunks
+        FROM ai_pdf_documents
+        GROUP BY kind
+        """
+    )
+    return {
+        "total_docs": int(total_docs or 0),
+        "total_chunks": int(total_chunks or 0),
+        "zero_docs": [dict(row) for row in zero_docs],
+        "by_source": {row["kind"]: {"docs": int(row["docs"]), "chunks": int(row["chunks"])} for row in by_source},
+    }

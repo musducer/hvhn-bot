@@ -11,7 +11,9 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
+import requests
 import asyncpg
 from dotenv import load_dotenv
 
@@ -139,6 +141,63 @@ def _write_atomic(path, data):
     os.replace(tmp_path, path)
 
 
+def _unique_path(folder, filename):
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_stem(Path(filename).stem, "tai_lieu") + Path(filename).suffix.lower()
+    path = folder / safe_name
+    if not path.exists():
+        return str(path)
+    stem = path.stem
+    suffix = path.suffix
+    for i in range(2, 1000):
+        candidate = folder / f"{stem}_{i}{suffix}"
+        if not candidate.exists():
+            return str(candidate)
+    return str(folder / f"{stem}_{uuid.uuid4().hex[:8]}{suffix}")
+
+
+def _drive_direct_url(url):
+    parsed = urlparse(url.strip())
+    if "drive.google.com" not in parsed.netloc:
+        return url.strip()
+    if "/file/d/" in parsed.path:
+        file_id = parsed.path.split("/file/d/", 1)[1].split("/", 1)[0]
+        return f"https://drive.google.com/uc?export=download&id={file_id}"
+    qs = parse_qs(parsed.query)
+    if "id" in qs and qs["id"]:
+        return f"https://drive.google.com/uc?export=download&id={qs['id'][0]}"
+    return url.strip()
+
+
+def _download_pdf(url, filename, target_folder):
+    target = _unique_path(target_folder, filename or "tai_lieu.pdf")
+    direct_url = _drive_direct_url(url)
+    with requests.Session() as session:
+        resp = session.get(direct_url, stream=True, timeout=120)
+        token = None
+        for key, value in session.cookies.items():
+            if key.startswith("download_warning"):
+                token = value
+                break
+        if token:
+            resp.close()
+            resp = session.get(direct_url, params={"confirm": token}, stream=True, timeout=120)
+        resp.raise_for_status()
+        tmp = target + ".part"
+        with open(tmp, "wb") as f:
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+        with open(tmp, "rb") as f:
+            head = f.read(5)
+        if head != b"%PDF-":
+            os.remove(tmp)
+            raise ValueError("Link không tải ra PDF thật. Hãy đặt file Google Drive ở chế độ 'Anyone with the link can view' hoặc dùng Google Form upload.")
+        os.replace(tmp, target)
+    return target
+
+
 async def _fetch_discord_jobs():
     if not DATABASE_URL:
         return []
@@ -206,15 +265,24 @@ def _materialize_discord_job(job):
         filename = job["file_name"] or f"discord_tai_lieu_{job['id']}.pdf"
         if not filename.lower().endswith(".pdf"):
             raise ValueError("Tài liệu từ Discord không phải PDF")
-        target = os.path.join(INCOMING_DOCS, _job_name("discord_tailieu", os.path.splitext(filename)[0], ".pdf"))
+        target = _unique_path(INCOMING_DOCS, filename)
         _write_atomic(target, bytes(job["file_data"] or b""))
+    elif job_type == "add_document_url":
+        url = (job["text_payload"] or "").strip()
+        filename = job["file_name"] or f"tai_lieu_{job['id']}.pdf"
+        _download_pdf(url, filename, INCOMING_DOCS)
     elif job_type == "add_bot_document":
         filename = job["file_name"] or f"bot_tai_lieu_{job['id']}.pdf"
         if not filename.lower().endswith(".pdf"):
             raise ValueError("Tài liệu bot từ Discord không phải PDF")
         os.makedirs(BOT_DOCS_DIR, exist_ok=True)
-        target = os.path.join(BOT_DOCS_DIR, _job_name("bot_tailieu", os.path.splitext(filename)[0], ".pdf"))
+        target = _unique_path(BOT_DOCS_DIR, filename)
         _write_atomic(target, bytes(job["file_data"] or b""))
+    elif job_type == "add_bot_document_url":
+        url = (job["text_payload"] or "").strip()
+        filename = job["file_name"] or f"bot_tai_lieu_{job['id']}.pdf"
+        os.makedirs(BOT_DOCS_DIR, exist_ok=True)
+        _download_pdf(url, filename, BOT_DOCS_DIR)
     elif job_type == "remove_client":
         email = (job["text_payload"] or "").strip()
         _write_atomic(os.path.join(SHEET_XOA_KHACH, _job_name("discord_sheet_xoa_khach", email, ".txt")), email.encode("utf-8"))

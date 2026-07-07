@@ -1,5 +1,7 @@
 import os
 import re
+import unicodedata
+from pathlib import Path
 from html import unescape
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -25,6 +27,20 @@ TRUSTED_SOURCE_HINTS = (
     "thivien.net",
     "wikipedia.org",
 )
+
+
+def _load_literature_system_instructions() -> str:
+    path = Path(__file__).resolve().parents[1] / "SYSTEM INSTRUCTIONS.txt"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if len(text) > 6000:
+        text = text[:6000] + "\n...(đã rút gọn chỉ thị hệ thống vì quá dài)"
+    return text
+
+
+LITERATURE_SYSTEM_INSTRUCTIONS = _load_literature_system_instructions()
 
 SYSTEM_PROMPT = (
     "Bạn là trợ giảng môn Ngữ Văn cho cộng đồng HVHN. Trả lời bằng tiếng Việt có dấu, "
@@ -369,34 +385,31 @@ class AI(commands.Cog):
 
     @staticmethod
     def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str) -> str:
-        source_block = knowledge or "KHÔNG CÓ KHO PDF/TRI THỨC HVHN PHÙ HỢP ĐƯỢC NẠP."
-        web_block = web_context or "KHÔNG CÓ NGUỒN WEB ĐƯỢC TRUY XUẤT."
+        source_block = knowledge or "KHONG CO KHO PDF/TRI THUC HVHN PHU HOP DUOC NAP."
+        web_block = web_context or "KHONG CO NGUON WEB DUOC TRUY XUAT."
+        literature_rules = (
+            "\n\nCHI THI NGU VAN BO SUNG TU SYSTEM INSTRUCTIONS.txt:\n"
+            f"{LITERATURE_SYSTEM_INSTRUCTIONS}\n"
+            if LITERATURE_SYSTEM_INSTRUCTIONS else ""
+        )
         return (
-            "ĐÂY LÀ LỆNH CẦN TRẢ LỜI HAY, ĐÚNG TRỌNG TÂM, CÓ CĂN CỨ.\n"
-            f"CHẾ ĐỘ: {mode}\n\n"
-            "KHO PDF/TRI THỨC HVHN ĐÃ TRUY XUẤT:\n"
+            "DAY LA LENH CAN TRA LOI HAY, DUNG TRONG TAM, CO CAN CU.\n"
+            f"CHE DO: {mode}\n"
+            f"{literature_rules}\n"
+            "KHO PDF/TRI THUC HVHN DA TRUY XUAT (chi dung lam can cu noi bo, khong can neu ten nguon ra cau tra loi):\n"
             f"{source_block}\n\n"
-            "NGUỒN WEB VỪA TRA CỨU:\n"
+            "NGUON WEB VUA TRA CUU (chi dung lam can cu noi bo, khong can neu link ra cau tra loi):\n"
             f"{web_block}\n\n"
-            "QUY TẮC TRẢ LỜI BẮT BUỘC:\n"
-            "- Dòng/đoạn đầu tiên phải trả lời thẳng vào câu hỏi của người dùng, không mở bằng 'có thể tham khảo'.\n"
-            "- Không được chỉ liệt kê nguồn. Phải tổng hợp thành câu trả lời có nội dung cụ thể.\n"
-            "- Ba nguồn PDF độc quyền, PDF riêng cho bot/tri thức HVHN, và web được xem ngang nhau. Không khóa câu trả lời vào một nguồn; hãy đối chiếu, tổng hợp, và chỉ nói điều có căn cứ.\n"
-            "- Nếu người dùng hỏi gợi ý/danh sách, hãy đưa danh sách cụ thể kèm lý do ngắn cho từng mục.\n"
-            "- Câu đơn giản: trả lời 5-10 dòng nếu cần. Câu cần phân tích: trả lời đầy đặn hơn, có luận điểm rõ.\n"
-            "- Khi phân tích tác phẩm/văn bản, ưu tiên cấu trúc: Luận điểm chính -> Nội dung -> Nghệ thuật -> Liên hệ mở rộng. Văn phong giàu hình ảnh nhưng lập luận phải sắc.\n"
-            "- Mọi khẳng định quan trọng lấy từ PDF phải gắn số tài liệu dạng [1], [2] ngay sau ý liên quan. Không dùng [P1] trong câu trả lời cuối vì [P...] chỉ là mã đoạn nội bộ.\n"
-            "- Nếu dùng PDF, cuối câu trả lời chỉ nêu mục TÀI LIỆU THAM KHẢO với các tài liệu liên quan thật sự đã dùng; không khai hết danh sách.\n"
-            "- Mọi khẳng định quan trọng lấy từ tri thức HVHN thủ công phải gắn [S1], [S2] ngay sau ý liên quan.\n"
-            "- Mọi khẳng định quan trọng lấy từ web phải gắn nguồn dạng [W1], [W2] ngay sau ý liên quan.\n"
-            "- Nếu nguồn web chỉ là snippet/tóm tắt, không trích dẫn nguyên văn và không khẳng định quá mức.\n"
-            "- Kiến thức phổ thông chỉ được dùng cho khái niệm/hướng làm bài chung; không dùng để khẳng định "
-            "chi tiết tác phẩm, trích dẫn, năm tháng, hoàn cảnh sáng tác, nhân vật, hay nhận định phê bình nếu không có nguồn.\n"
-            "- Không trích dẫn nguyên văn nếu không có nguồn trong prompt.\n"
-            "- Nếu câu hỏi yêu cầu một thông tin mà dữ liệu không có, hãy nói không đủ dữ liệu.\n"
-            "- Nếu không dùng PDF, cuối câu trả lời chỉ thêm một dòng ngắn: Nguồn: [S1], [W1]... Nếu không có nguồn thì ghi: Nguồn: chưa đủ dữ liệu.\n"
-            "- Không thêm mục 'Mức căn cứ'/'Cần kiểm chứng' trừ khi thật sự cần cảnh báo rủi ro.\n\n"
-            "YÊU CẦU NGƯỜI DÙNG:\n"
+            "QUY TAC TRA LOI BAT BUOC:\n"
+            "- Tra loi thang vao cau hoi, khong mo bang danh sach nguon.\n"
+            "- Khong bia tac gia, tac pham, nhan vat, nhan dinh phe binh, trich dan, nam thang, hoan canh sang tac.\n"
+            "- Khong hien ma nguon noi bo nhu [P1], [1], [S1], [W1], URL, hoac muc TAI LIEU THAM KHAO, tru khi nguoi dung hoi rieng nguon.\n"
+            "- Van phai tu kiem chung bang kho PDF/tri thuc/web trong prompt. Neu du lieu khong du, noi ro 'chua du du lieu de khang dinh'.\n"
+            "- Khong dat trong ngoac kep bat ky cau nhan dinh/trich dan nao neu khong thay nguyen van trong du lieu duoc cung cap.\n"
+            "- Ba nguon PDF doc quyen, PDF rieng cho bot/tri thuc HVHN, va web ngang nhau; hay doi chieu va tong hop, khong khoa cung vao mot nguon.\n"
+            "- Khi phan tich van hoc, chia ro: luan diem chinh, noi dung, nghe thuat, lien he mo rong. Van phong giau hinh anh nhung lap luan phai sac.\n"
+            "- Cau don gian tra loi gon; cau can phan tich tra loi day dan, co lop lang.\n\n"
+            "YEU CAU NGUOI DUNG:\n"
             f"{prompt}"
         )
 
@@ -463,20 +476,15 @@ class AI(commands.Cog):
 
     async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
-        answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.15)
-        needs_repair = bool(answer) and (
-            not self._has_grounding_footer(answer)
-            or self._looks_like_source_dump(answer)
-            or (bool(knowledge) and ("TÀI LIỆU THAM KHẢO PDF" in knowledge or "TAI LIEU THAM KHAO PDF" in knowledge) and not re.search(r"t[aà]i li[eệ]u tham kh[aả]o|tai lieu tham khao|ngu[oồ]n:", answer, re.I))
-        )
+        answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.08)
+        needs_repair = bool(answer) and self._looks_like_source_dump(answer)
         if answer and needs_repair:
             repair_prompt = (
-                "Sửa câu trả lời sau để trả lời đúng trọng tâm, không bịa, không chỉ liệt kê nguồn. "
-                "Không thêm thông tin mới ngoài KHO PDF/TRI THỨC HVHN/NGUỒN WEB đã cung cấp. "
-                "Mở đầu bằng câu trả lời trực tiếp. Nếu câu hỏi xin gợi ý/danh sách, đưa mục cụ thể và lý do. "
-                "Nếu dùng PDF, gắn số tài liệu [1], [2] sau ý liên quan và thêm mục 'TÀI LIỆU THAM KHẢO' với đúng tên PDF. "
-                "Không dùng [P...] trong câu trả lời cuối. Gắn [S...] cho tri thức thủ công và [W...] cho web.\n\n"
-                f"CÂU TRẢ LỜI CẦN SỬA:\n{answer}"
+                "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon, "
+                "khong hien citation/noi bo/URL/muc tai lieu tham khao. "
+                "Khong them thong tin moi ngoai KHO PDF/TRI THUC HVHN/NGUON WEB da cung cap. "
+                "Neu du lieu khong du, noi ro chua du du lieu de khang dinh.\n\n"
+                f"CAU TRA LOI CAN SUA:\n{answer}"
             )
             repaired = await self.generate(
                 self._guarded_prompt(repair_prompt, knowledge, web_context, "repair"),
@@ -486,8 +494,31 @@ class AI(commands.Cog):
             if repaired:
                 answer = repaired
         if answer:
-            answer = self._ensure_pdf_references(answer, knowledge)
+            answer = self._strip_visible_sources(answer)
         return answer, full_prompt
+
+    @staticmethod
+    def _strip_visible_sources(answer: str) -> str:
+        def plain(value: str) -> str:
+            value = unicodedata.normalize("NFD", value)
+            value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn")
+            return value.lower()
+
+        lines = []
+        skip_rest = False
+        for line in answer.splitlines():
+            lower = plain(line.strip())
+            if lower.startswith(("tai lieu tham khao", "nguon:")):
+                skip_rest = True
+                continue
+            if skip_rest:
+                if not line.strip():
+                    continue
+                if re.match(r"^\s*([#*_-]|\d+[.)])", line):
+                    continue
+            line = re.sub(r"\s*\[(?:P|S|W)?\d+\]", "", line)
+            lines.append(line)
+        return "\n".join(lines).strip()
 
     async def _then_answer(self, interaction: discord.Interaction, title: str, user_prompt: str, prompt: str, mode: str):
         if not self._has_ai():
