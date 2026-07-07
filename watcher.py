@@ -18,6 +18,12 @@ from hvhn_batch import (
     MIRROR_SOURCE, DOCS_DIR, load_clients, append_client,
     list_docs, render_batch, write_new_rows_csv, remove_client, remove_doc,
 )
+from pdf_knowledge import (
+    PDF_KNOWLEDGE_SCHEMA,
+    index_pdf_path,
+    remove_pdf_document_by_title,
+    sync_pdf_folder,
+)
 
 # Các folder đơn hàng (nằm cạnh folder Source, do Apps Script tạo + Form/menu ghi vào)
 MIRROR_PARENT = os.path.dirname(MIRROR_SOURCE)
@@ -32,6 +38,8 @@ SHEET_GIAHAN_KHACH = os.path.join(MIRROR_PARENT, "_don_sheet_giahan_khach") # Di
 SHEET_STATUS_FILE = os.path.join(MIRROR_PARENT, "_sheet_status", "sheet_status.json")
 
 POLL_SECONDS = 30
+PDF_SYNC_SECONDS = 600
+LAST_PDF_SYNC = 0
 
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -85,6 +93,8 @@ CREATE TABLE IF NOT EXISTS hvhn_sheet_docs (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
+
+DOC_JOB_SCHEMA += PDF_KNOWLEDGE_SCHEMA
 
 
 def _ts():
@@ -342,6 +352,68 @@ async def _sync_runtime_status():
         await conn.close()
 
 
+async def _set_runtime_status(key, value):
+    if not DATABASE_URL:
+        return
+    conn = await asyncpg.connect(DATABASE_URL)
+    try:
+        await conn.execute(DOC_JOB_SCHEMA)
+        await conn.execute(
+            """
+            INSERT INTO hvhn_runtime_status (key, value, updated_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+            """,
+            key,
+            str(value),
+        )
+    finally:
+        await conn.close()
+
+
+async def _index_pdf_for_ai(path):
+    if not DATABASE_URL:
+        return
+    try:
+        result = await index_pdf_path(DATABASE_URL, path)
+        print(f"[AI PDF] {os.path.basename(path)} -> {result['chunks']} đoạn")
+        await _set_runtime_status("ai_pdf_last_indexed", f"{result['title']} ({result['chunks']} đoạn)")
+    except Exception:
+        print("  LỖI nạp PDF vào kho tri thức AI:")
+        traceback.print_exc()
+
+
+async def _remove_pdf_from_ai(doc_base):
+    if not DATABASE_URL:
+        return
+    try:
+        await remove_pdf_document_by_title(DATABASE_URL, doc_base)
+        await remove_pdf_document_by_title(DATABASE_URL, doc_base + ".pdf")
+        await _set_runtime_status("ai_pdf_last_removed", doc_base)
+    except Exception:
+        print("  LỖI xóa PDF khỏi kho tri thức AI:")
+        traceback.print_exc()
+
+
+async def _sync_pdf_knowledge(force=False):
+    global LAST_PDF_SYNC
+    if not DATABASE_URL:
+        return
+    now = time.time()
+    if not force and now - LAST_PDF_SYNC < PDF_SYNC_SECONDS:
+        return
+    LAST_PDF_SYNC = now
+    try:
+        result = await sync_pdf_folder(DATABASE_URL, DOCS_DIR)
+        await _set_runtime_status("ai_pdf_docs_indexed", result["indexed"])
+        await _set_runtime_status("ai_pdf_last_sync", time.strftime("%Y-%m-%d %H:%M:%S"))
+        if result["changed"]:
+            print(f"[AI PDF] đồng bộ docs/: {result['indexed']} file, cập nhật {result['changed']} file")
+    except Exception:
+        print("  LỖI đồng bộ kho PDF AI:")
+        traceback.print_exc()
+
+
 def xu_ly_don_them_khach():
     if not os.path.isdir(JOBS_KHACH):
         return
@@ -384,6 +456,7 @@ def xu_ly_don_them_tai_lieu():
             dest_doc = os.path.join(DOCS_DIR, pdf)
             os.makedirs(DOCS_DIR, exist_ok=True)
             shutil.copy2(path, dest_doc)  # lưu vào kho docs/ để khách mới sau này cũng nhận
+            asyncio.run(_index_pdf_for_ai(dest_doc))
 
             clients = load_clients()
             rows = render_batch([dest_doc], clients)
@@ -426,7 +499,10 @@ def xu_ly_don_xoa_tai_lieu():
             with open(path, encoding="utf-8") as f:
                 doc_base = f.read().strip()
             if doc_base:
-                print(f"[XOÁ TÀI LIỆU] {doc_base} -> {'đã gỡ' if remove_doc(doc_base) else 'không có trong docs/'}")
+                removed = remove_doc(doc_base)
+                print(f"[XOÁ TÀI LIỆU] {doc_base} -> {'đã gỡ' if removed else 'không có trong docs/'}")
+                if removed:
+                    asyncio.run(_remove_pdf_from_ai(doc_base))
             os.remove(path)
         except Exception:
             print("  LỖI xử lý đơn xoá tài liệu:")
@@ -445,6 +521,7 @@ def main():
             xu_ly_don_xoa_khach()
             xu_ly_don_xoa_tai_lieu()
             asyncio.run(_sync_runtime_status())
+            asyncio.run(_sync_pdf_knowledge())
         except Exception:
             traceback.print_exc()
         time.sleep(POLL_SECONDS)

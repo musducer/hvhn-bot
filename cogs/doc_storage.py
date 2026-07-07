@@ -7,6 +7,7 @@ from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands
+from pdf_knowledge import index_pdf_bytes
 
 try:
     from hvhn_batch import MIRROR_SOURCE
@@ -95,6 +96,46 @@ class DocumentStorage(commands.Cog):
     def _clean_email(email: str) -> str:
         return email.strip().lower()
 
+    @staticmethod
+    def _validate_pdf_attachment(file: discord.Attachment) -> str | None:
+        if not file.filename.lower().endswith(".pdf"):
+            return "chỉ nhận PDF"
+        if file.size and file.size > MAX_PDF_BYTES:
+            return "quá 25MB"
+        return None
+
+    async def _enqueue_and_index_pdf(self, file: discord.Attachment, requested_by: int) -> tuple[int | None, dict | None, str | None]:
+        error = self._validate_pdf_attachment(file)
+        if error:
+            return None, None, error
+
+        try:
+            data = await file.read()
+        except Exception as exc:
+            return None, None, f"lỗi đọc file: {exc}"
+        if len(data) > MAX_PDF_BYTES:
+            return None, None, "quá 25MB"
+
+        job_id = await self._enqueue(
+            "add_document",
+            file_name=file.filename,
+            file_data=data,
+            requested_by=requested_by,
+        )
+
+        try:
+            indexed = await index_pdf_bytes(
+                self.bot.db,
+                file.filename,
+                data,
+                source=f"discord:{file.filename}",
+                created_by=requested_by,
+            )
+        except Exception as exc:
+            indexed = None
+            return job_id, indexed, f"đã xếp hàng nhưng AI chưa đọc được PDF: {exc}"
+        return job_id, indexed, None
+
     @app_commands.command(name="hvhn_themkhach", description="Thêm khách vào hệ thống tài liệu HVHN")
     async def add_client(self, interaction: discord.Interaction, ten: str, email: str):
         if not await self._require_admin(interaction):
@@ -116,32 +157,60 @@ class DocumentStorage(commands.Cog):
     async def add_document(self, interaction: discord.Interaction, file: discord.Attachment):
         if not await self._require_admin(interaction):
             return
-        if not file.filename.lower().endswith(".pdf"):
-            await interaction.response.send_message("Chỉ nhận file PDF.", ephemeral=True)
-            return
-        if file.size and file.size > MAX_PDF_BYTES:
-            await interaction.response.send_message("PDF quá lớn. Giới hạn hiện tại là 25MB.", ephemeral=True)
-            return
-
         await interaction.response.defer(ephemeral=True, thinking=True)
-        try:
-            data = await file.read()
-        except Exception as exc:
-            await interaction.followup.send(f"Lỗi đọc file từ Discord: `{exc}`", ephemeral=True)
-            return
-        if len(data) > MAX_PDF_BYTES:
-            await interaction.followup.send("PDF quá lớn. Giới hạn hiện tại là 25MB.", ephemeral=True)
+        job_id, indexed, error = await self._enqueue_and_index_pdf(file, interaction.user.id)
+        if not job_id:
+            await interaction.followup.send(f"Không nhận `{file.filename}`: {error}.", ephemeral=True)
             return
 
-        job_id = await self._enqueue(
-            "add_document",
-            file_name=file.filename,
-            file_data=data,
-            requested_by=interaction.user.id,
+        ai_note = ""
+        if indexed:
+            ai_note = f"\nAI đã đọc vào kho tri thức: `{indexed['chunks']}` đoạn."
+            if indexed["chunks"] == 0:
+                ai_note += " PDF này có thể là scan ảnh, cần OCR nếu muốn AI đọc nội dung."
+        elif error:
+            ai_note = f"\nCảnh báo: {error}"
+        await interaction.followup.send(
+            f"Đã xếp hàng đơn #{job_id}: thêm tài liệu `{file.filename}`. Watcher sẽ watermark và phân phối cho toàn bộ khách.{ai_note}",
+            ephemeral=True,
         )
 
+    @app_commands.command(name="hvhn_nap_tailieu", description="Nạp nhiều PDF vào kho HVHN và kho tri thức AI")
+    async def add_many_documents(
+        self,
+        interaction: discord.Interaction,
+        file_1: discord.Attachment,
+        file_2: discord.Attachment | None = None,
+        file_3: discord.Attachment | None = None,
+        file_4: discord.Attachment | None = None,
+        file_5: discord.Attachment | None = None,
+        file_6: discord.Attachment | None = None,
+        file_7: discord.Attachment | None = None,
+        file_8: discord.Attachment | None = None,
+        file_9: discord.Attachment | None = None,
+        file_10: discord.Attachment | None = None,
+    ):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        files = [f for f in (file_1, file_2, file_3, file_4, file_5, file_6, file_7, file_8, file_9, file_10) if f]
+        lines = []
+        ok = 0
+        for file in files:
+            job_id, indexed, error = await self._enqueue_and_index_pdf(file, interaction.user.id)
+            if not job_id:
+                lines.append(f"❌ `{file.filename}`: {error}")
+                continue
+            ok += 1
+            chunks = indexed["chunks"] if indexed else 0
+            suffix = " - cần OCR nếu là PDF scan ảnh" if indexed and indexed["chunks"] == 0 else ""
+            if error:
+                suffix = f" - {error}"
+            lines.append(f"✅ `#{job_id}` `{file.filename}`: AI đọc `{chunks}` đoạn{suffix}")
+
         await interaction.followup.send(
-            f"Đã xếp hàng đơn #{job_id}: thêm tài liệu `{file.filename}`. Watcher sẽ watermark và phân phối cho toàn bộ khách.",
+            "Đã nạp `{}`/`{}` PDF.\n{}".format(ok, len(files), "\n".join(lines[:20])),
             ephemeral=True,
         )
 

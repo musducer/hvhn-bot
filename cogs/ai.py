@@ -7,6 +7,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+from pdf_knowledge import search_pdf_knowledge
 
 GROQ_MODEL = "llama-3.3-70b-versatile"
 GEMINI_MODEL = "gemini-2.0-flash"
@@ -37,7 +38,7 @@ THEN_SYSTEM_PROMPT = (
     "1. Không được bịa tác giả, tác phẩm, nhân vật, năm sáng tác, hoàn cảnh sáng tác, "
     "trích dẫn, nhận định phê bình, số liệu, hay nội dung bài học.\n"
     "2. Không đặt trong dấu ngoặc kép bất kỳ câu nào nếu câu đó không xuất hiện trong "
-    "văn bản người dùng gửi hoặc TRI THỨC HVHN LIÊN QUAN.\n"
+    "văn bản người dùng gửi hoặc KHO PDF/TRI THỨC HVHN LIÊN QUAN.\n"
     "3. Nếu câu hỏi cần chi tiết văn bản/tác phẩm mà không có dữ liệu xác thực, hãy nói "
     "'không đủ dữ liệu để khẳng định' và đưa cách kiểm chứng/hướng làm an toàn.\n"
     "4. Chỉ nhận xét dựa trên văn bản người dùng đưa vào; không suy diễn "
@@ -203,6 +204,13 @@ class AI(commands.Cog):
         role_name = os.getenv("HVHN_ADMIN_ROLE", "HVHN Admin").strip()
         return any(role.name == role_name for role in interaction.user.roles) or interaction.user.guild_permissions.manage_guild
 
+    async def _pdf_knowledge_context(self, query: str) -> str:
+        try:
+            return await search_pdf_knowledge(self.bot.db, query, limit=10)
+        except Exception as exc:
+            print(f"[ai] PDF knowledge exception: {exc}")
+            return ""
+
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
         terms = [t for t in query.lower().split() if len(t) >= 3][:8]
         if not terms:
@@ -361,27 +369,29 @@ class AI(commands.Cog):
 
     @staticmethod
     def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str) -> str:
-        source_block = knowledge or "KHÔNG CÓ TRI THỨC HVHN PHÙ HỢP ĐƯỢC NẠP."
+        source_block = knowledge or "KHÔNG CÓ KHO PDF/TRI THỨC HVHN PHÙ HỢP ĐƯỢC NẠP."
         web_block = web_context or "KHÔNG CÓ NGUỒN WEB ĐƯỢC TRUY XUẤT."
         return (
             "ĐÂY LÀ LỆNH CẦN TRẢ LỜI HAY, ĐÚNG TRỌNG TÂM, CÓ CĂN CỨ.\n"
             f"CHẾ ĐỘ: {mode}\n\n"
-            "TRI THỨC HVHN LIÊN QUAN:\n"
+            "KHO PDF/TRI THỨC HVHN ĐÃ ĐỌC TRƯỚC KHI SEARCH WEB:\n"
             f"{source_block}\n\n"
             "NGUỒN WEB VỪA TRA CỨU:\n"
             f"{web_block}\n\n"
             "QUY TẮC TRẢ LỜI BẮT BUỘC:\n"
             "- Dòng/đoạn đầu tiên phải trả lời thẳng vào câu hỏi của người dùng, không mở bằng 'có thể tham khảo'.\n"
             "- Không được chỉ liệt kê nguồn. Phải tổng hợp thành câu trả lời có nội dung cụ thể.\n"
+            "- Ưu tiên nguồn [P...] từ PDF/kho HVHN hơn nguồn web. Nếu [P...] đã đủ, trả lời dựa trên [P...] và chỉ dùng web để bổ sung/kiểm chứng.\n"
             "- Nếu người dùng hỏi gợi ý/danh sách, hãy đưa danh sách cụ thể kèm lý do ngắn cho từng mục.\n"
             "- Câu đơn giản: trả lời 3-7 dòng. Câu cần phân tích: trả lời sâu hơn, có luận điểm rõ.\n"
+            "- Mọi khẳng định quan trọng lấy từ kho PDF/HVHN phải gắn nguồn dạng [P1], [P2] hoặc [S1] ngay sau ý liên quan.\n"
             "- Mọi khẳng định quan trọng lấy từ web phải gắn nguồn dạng [W1], [W2] ngay sau ý liên quan.\n"
             "- Nếu nguồn web chỉ là snippet/tóm tắt, không trích dẫn nguyên văn và không khẳng định quá mức.\n"
             "- Kiến thức phổ thông chỉ được dùng cho khái niệm/hướng làm bài chung; không dùng để khẳng định "
             "chi tiết tác phẩm, trích dẫn, năm tháng, hoàn cảnh sáng tác, nhân vật, hay nhận định phê bình nếu không có nguồn.\n"
             "- Không trích dẫn nguyên văn nếu không có nguồn trong prompt.\n"
             "- Nếu câu hỏi yêu cầu một thông tin mà dữ liệu không có, hãy nói không đủ dữ liệu.\n"
-            "- Cuối câu trả lời chỉ thêm một dòng ngắn: Nguồn: [W1], [W2]... Nếu không có nguồn thì ghi: Nguồn: chưa đủ dữ liệu.\n"
+            "- Cuối câu trả lời chỉ thêm một dòng ngắn: Nguồn: [P1], [S1], [W1]... Nếu không có nguồn thì ghi: Nguồn: chưa đủ dữ liệu.\n"
             "- Không thêm mục 'Mức căn cứ'/'Cần kiểm chứng' trừ khi thật sự cần cảnh báo rủi ro.\n\n"
             "YÊU CẦU NGƯỜI DÙNG:\n"
             f"{prompt}"
@@ -412,14 +422,15 @@ class AI(commands.Cog):
         needs_repair = bool(answer) and (
             not self._has_grounding_footer(answer)
             or self._looks_like_source_dump(answer)
+            or (bool(knowledge) and "[P" in knowledge and "[P" not in answer)
             or (bool(web_context) and "[W" not in answer)
         )
         if answer and needs_repair:
             repair_prompt = (
                 "Sửa câu trả lời sau để trả lời đúng trọng tâm, không bịa, không chỉ liệt kê nguồn. "
-                "Không thêm thông tin mới ngoài TRI THỨC HVHN/NGUỒN WEB đã cung cấp. "
+                "Không thêm thông tin mới ngoài KHO PDF/TRI THỨC HVHN/NGUỒN WEB đã cung cấp. "
                 "Mở đầu bằng câu trả lời trực tiếp. Nếu câu hỏi xin gợi ý/danh sách, đưa mục cụ thể và lý do. "
-                "Gắn [W...] sau ý dùng từ web, rồi thêm dòng cuối 'Nguồn: [W...]'.\n\n"
+                "Gắn [P...]/[S...] sau ý dùng từ PDF/HVHN, gắn [W...] sau ý dùng từ web, rồi thêm dòng cuối 'Nguồn: [P...], [S...], [W...]'.\n\n"
                 f"CÂU TRẢ LỜI CẦN SỬA:\n{answer}"
             )
             repaired = await self.generate(
@@ -437,7 +448,14 @@ class AI(commands.Cog):
             return
 
         await interaction.response.defer(thinking=True)
-        knowledge = await self._knowledge_context(user_prompt)
+        pdf_knowledge = await self._pdf_knowledge_context(user_prompt)
+        manual_knowledge = await self._knowledge_context(user_prompt)
+        knowledge_parts = []
+        if pdf_knowledge:
+            knowledge_parts.append("KHO PDF HVHN:\n" + pdf_knowledge)
+        if manual_knowledge:
+            knowledge_parts.append("TRI THỨC HVHN THỦ CÔNG:\n" + manual_knowledge)
+        knowledge = "\n\n".join(knowledge_parts)
         web_context = await self._web_context(user_prompt, mode)
         answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode)
         if answer is None:

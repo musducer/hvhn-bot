@@ -5,7 +5,7 @@ from discord.ext import commands
 ADMIN_ONLY_COMMANDS = {
     "giverole", "removerole", "clear", "lock", "unlock", "answer", "questions", "setup",
     "warn", "mute", "unmute", "kick", "ban", "unban", "slowmode", "addbadword", "removebadword",
-    "announce", "hvhn_themkhach", "hvhn_themtailieu", "hvhn_xoakhach", "hvhn_xoatailieu",
+    "announce", "hvhn_themkhach", "hvhn_themtailieu", "hvhn_nap_tailieu", "hvhn_xoakhach", "hvhn_xoatailieu",
     "hvhn_trangthai", "hvhn_status_full", "hvhn_retry_failed", "hvhn_khach", "hvhn_giahan",
     "hvhn_baocao", "ai_kienthuc_them", "ai_feedback_stats",
 }

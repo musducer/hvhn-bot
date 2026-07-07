@@ -7,6 +7,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from keep_alive import keep_alive
+from pdf_knowledge import PDF_KNOWLEDGE_SCHEMA
 
 load_dotenv()
 
@@ -137,6 +138,8 @@ CREATE TABLE IF NOT EXISTS ai_feedback (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 """
+
+SCHEMA += PDF_KNOWLEDGE_SCHEMA
 
 
 class HVHNBot(commands.Bot):
