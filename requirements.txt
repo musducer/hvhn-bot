@@ -4,3 +4,6 @@ asyncpg
 flask
 aiohttp
 pypdf
+pymupdf
+pytesseract
+Pillow

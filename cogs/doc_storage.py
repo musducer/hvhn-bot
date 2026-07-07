@@ -302,7 +302,8 @@ class DocumentStorage(commands.Cog):
             name="Dữ liệu",
             value=(
                 f"Local clients/docs: `{status.get('clients_count', '0')}` / `{status.get('docs_count', '0')}`\n"
-                f"Sheet clients/docs: `{sheet_clients}` / `{sheet_docs}`"
+                f"Sheet clients/docs: `{sheet_clients}` / `{sheet_docs}`\n"
+                f"AI PDF: `{status.get('ai_pdf_docs_indexed', '0')}` file | sync: `{status.get('ai_pdf_last_sync', 'chưa có')}`"
             ),
             inline=False,
         )

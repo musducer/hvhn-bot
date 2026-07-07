@@ -11,6 +11,7 @@ from pypdf import PdfReader
 PDF_CHUNK_SIZE = 1800
 PDF_CHUNK_OVERLAP = 220
 PDF_MAX_CHUNKS_PER_DOC = 500
+OCR_MIN_TEXT_CHARS = 350
 
 PDF_KNOWLEDGE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_pdf_documents (
@@ -53,7 +54,26 @@ def _content_hash(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def extract_pdf_text_from_bytes(data: bytes) -> str:
+def _env_flag(name: str, default: bool = True) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _env_int(name: str, default: int, *, minimum: int | None = None, maximum: int | None = None) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except ValueError:
+        value = default
+    if minimum is not None:
+        value = max(minimum, value)
+    if maximum is not None:
+        value = min(maximum, value)
+    return value
+
+
+def _extract_native_pdf_text(data: bytes) -> str:
     reader = PdfReader(io.BytesIO(data))
     pages = []
     for index, page in enumerate(reader.pages, start=1):
@@ -65,6 +85,76 @@ def extract_pdf_text_from_bytes(data: bytes) -> str:
         if text:
             pages.append(f"[Trang {index}]\n{text}")
     return _clean_text("\n\n".join(pages))
+
+
+def _ocr_pdf_text_from_bytes(data: bytes) -> str:
+    try:
+        import fitz
+        import pytesseract
+        from PIL import Image
+    except ImportError as exc:
+        raise RuntimeError(f"Thiếu thư viện OCR: {exc}") from exc
+
+    tesseract_cmd = os.getenv("HVHN_TESSERACT_CMD") or os.getenv("TESSERACT_CMD")
+    if not tesseract_cmd:
+        for candidate in (
+            r"C:\Program Files\Tesseract-OCR\tesseract.exe",
+            r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
+        ):
+            if Path(candidate).is_file():
+                tesseract_cmd = candidate
+                break
+    if tesseract_cmd:
+        pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
+
+    lang = os.getenv("HVHN_OCR_LANG", "vie+eng")
+    fallback_lang = os.getenv("HVHN_OCR_FALLBACK_LANG", "eng")
+    dpi = _env_int("HVHN_OCR_DPI", 220, minimum=120, maximum=350)
+    max_pages = _env_int("HVHN_OCR_MAX_PAGES", 120, minimum=0)
+    zoom = dpi / 72
+
+    pages = []
+    with fitz.open(stream=data, filetype="pdf") as doc:
+        total_pages = doc.page_count
+        page_limit = total_pages if max_pages == 0 else min(total_pages, max_pages)
+        matrix = fitz.Matrix(zoom, zoom)
+        for page_index in range(page_limit):
+            page = doc.load_page(page_index)
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            image = Image.open(io.BytesIO(pix.tobytes("png")))
+            try:
+                text = pytesseract.image_to_string(image, lang=lang, config="--psm 6")
+            except Exception as exc:
+                if fallback_lang and fallback_lang != lang:
+                    try:
+                        text = pytesseract.image_to_string(image, lang=fallback_lang, config="--psm 6")
+                    except Exception as fallback_exc:
+                        raise RuntimeError(f"Tesseract OCR lỗi ở trang {page_index + 1}: {fallback_exc}") from fallback_exc
+                else:
+                    raise RuntimeError(f"Tesseract OCR lỗi ở trang {page_index + 1}: {exc}") from exc
+
+            text = _clean_text(text)
+            if text:
+                pages.append(f"[Trang {page_index + 1} - OCR]\n{text}")
+
+        if max_pages and total_pages > max_pages:
+            pages.append(f"[Ghi chú OCR]\nĐã OCR {max_pages}/{total_pages} trang theo giới hạn HVHN_OCR_MAX_PAGES.")
+
+    return _clean_text("\n\n".join(pages))
+
+
+def extract_pdf_text_from_bytes(data: bytes) -> str:
+    native_text = _extract_native_pdf_text(data)
+    min_text = _env_int("HVHN_OCR_MIN_TEXT_CHARS", OCR_MIN_TEXT_CHARS, minimum=0)
+    if len(native_text) >= min_text or not _env_flag("HVHN_OCR_ENABLED", True):
+        return native_text
+
+    try:
+        ocr_text = _ocr_pdf_text_from_bytes(data)
+    except Exception as exc:
+        print(f"[AI PDF] OCR chưa chạy được: {exc}")
+        return native_text
+    return ocr_text if len(ocr_text) > len(native_text) else native_text
 
 
 def extract_pdf_text_from_path(path: str | os.PathLike) -> str:
@@ -107,7 +197,8 @@ async def index_pdf_bytes(db, title: str, data: bytes, *, source: str = "", crea
         "SELECT content_hash, chunk_count FROM ai_pdf_documents WHERE doc_key = $1",
         doc_key,
     )
-    if current and current["content_hash"] == content_hash:
+    retry_empty = _env_flag("HVHN_RETRY_EMPTY_PDF_OCR", True)
+    if current and current["content_hash"] == content_hash and (current["chunk_count"] > 0 or not retry_empty):
         return {"doc_key": doc_key, "title": title, "chunks": current["chunk_count"], "changed": False}
 
     text = extract_pdf_text_from_bytes(data)
