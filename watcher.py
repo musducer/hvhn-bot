@@ -55,6 +55,8 @@ DB_RETRY_BASE_SECONDS = 2
 DB_RETRY_MAX_SECONDS = 60
 DB_CONNECT_TIMEOUT_SECONDS = float(os.getenv("HVHN_DB_CONNECT_TIMEOUT_SECONDS", "20"))
 DB_COMMAND_TIMEOUT_SECONDS = float(os.getenv("HVHN_DB_COMMAND_TIMEOUT_SECONDS", "30"))
+DB_QUERY_TIMEOUT_SECONDS = float(os.getenv("HVHN_DB_QUERY_TIMEOUT_SECONDS", "30"))
+DB_LONG_QUERY_SECONDS = float(os.getenv("HVHN_DB_LONG_QUERY_SECONDS", "5"))
 DB_POOL_MIN_SIZE = int(os.getenv("HVHN_DB_POOL_MIN_SIZE", "1"))
 DB_POOL_MAX_SIZE = int(os.getenv("HVHN_DB_POOL_MAX_SIZE", "4"))
 _db_backoff_seconds = DB_RETRY_BASE_SECONDS
@@ -66,6 +68,8 @@ _db_last_success = ""
 _db_last_latency_ms = 0.0
 _db_last_dns_ms = 0.0
 _db_last_connect_ms = 0.0
+_db_acquire_count = 0
+_db_release_count = 0
 
 
 def _redact_database_url(url):
@@ -144,19 +148,6 @@ async def _get_db_pool(context="db"):
         return None
 
 
-async def _db_acquire(context="db"):
-    pool = await _get_db_pool(context)
-    if pool is None:
-        return None, None
-    start = time.perf_counter()
-    try:
-        conn = await pool.acquire()
-        return pool, conn
-    except Exception as exc:
-        await _reset_db_pool(f"acquire_failed:{context}:{type(exc).__name__}:{exc}")
-        return None, None
-
-
 async def _reset_db_pool(reason):
     global _db_pool, _db_pool_loop_id, _last_db_error
     _last_db_error = str(reason)
@@ -166,12 +157,9 @@ async def _reset_db_pool(reason):
     _db_pool_loop_id = None
     if pool is not None:
         try:
-            await pool.close()
+            pool.terminate()
         except Exception:
-            try:
-                pool.terminate()
-            except Exception:
-                pass
+            pass
     print(f"[DB] pool_reset loop={old_loop_id} reason={reason}", flush=True)
 
 
@@ -180,6 +168,36 @@ def _mark_db_success(context, started):
     _db_last_success = time.strftime("%Y-%m-%d %H:%M:%S")
     _db_last_latency_ms = (time.perf_counter() - started) * 1000
     print(f"[DB] query_ok context={context} ms={_db_last_latency_ms:.1f}", flush=True)
+
+
+def _pool_stats():
+    if _db_pool is None:
+        return "size=0 idle=0 active=0"
+    try:
+        size = _db_pool.get_size()
+        idle = _db_pool.get_idle_size()
+        active = size - idle
+        return f"size={size} idle={idle} active={active} acquired={_db_acquire_count} released={_db_release_count}"
+    except Exception:
+        return f"unknown acquired={_db_acquire_count} released={_db_release_count}"
+
+
+def _log_pool(context):
+    print(f"[DB] pool context={context} {_pool_stats()}", flush=True)
+
+
+async def _db_call(context, op, *args):
+    started = time.perf_counter()
+    try:
+        result = await asyncio.wait_for(op(*args), timeout=DB_QUERY_TIMEOUT_SECONDS)
+        elapsed = time.perf_counter() - started
+        if elapsed > DB_LONG_QUERY_SECONDS:
+            print(f"[DB] long_query context={context} seconds={elapsed:.1f} {_pool_stats()}", flush=True)
+        return result
+    except Exception as exc:
+        elapsed = time.perf_counter() - started
+        print(f"[DB] query_error context={context} seconds={elapsed:.1f} err={type(exc).__name__}: {exc} {_pool_stats()}", flush=True)
+        raise
 
 
 def _db_health_snapshot():
@@ -196,7 +214,7 @@ def _db_health_snapshot():
         "watcher_db_last_success": _db_last_success,
         "watcher_db_reconnect_count": str(_db_reconnect_count),
         "watcher_db_last_error": _last_db_error,
-        "watcher_db_pool_state": pool_state,
+        "watcher_db_pool_state": _pool_stats() if _db_pool is not None else pool_state,
     }
 
 DOC_JOB_SCHEMA = """
@@ -364,84 +382,102 @@ def _download_pdf(url, filename, target_folder):
 
 
 async def _fetch_discord_jobs():
+    global _db_acquire_count, _db_release_count
     if not DATABASE_URL:
         return []
-    pool, conn = await _db_acquire("watcher")
-    if conn is None:
+    pool = await _get_db_pool("watcher")
+    if pool is None:
         return []
     started = time.perf_counter()
+    ok = False
     try:
-        await conn.execute(DOC_JOB_SCHEMA)
-        async with conn.transaction():
-            await conn.execute(
-                """
-                UPDATE hvhn_doc_jobs
-                SET status = 'pending', error = NULL
-                WHERE status = 'processing'
-                  AND processed_at IS NULL
-                  AND created_at < now() - ($1::int * interval '1 minute')
-                """,
-                STALE_PROCESSING_MINUTES,
-            )
-            rows = await conn.fetch(
-                """
-                SELECT id, job_type, text_payload, file_name, file_data
-                FROM hvhn_doc_jobs
-                WHERE status = 'pending'
-                ORDER BY created_at ASC
-                LIMIT 10
-                FOR UPDATE SKIP LOCKED
-                """
-            )
-            ids = [row["id"] for row in rows]
-            if ids:
-                await conn.execute(
-                    "UPDATE hvhn_doc_jobs SET status = 'processing' WHERE id = ANY($1::int[])",
-                    ids,
-                )
-        return [dict(row) for row in rows]
+        _log_pool("watcher_before_acquire")
+        async with pool.acquire() as conn:
+            _db_acquire_count += 1
+            try:
+                await _db_call("watcher_schema", conn.execute, DOC_JOB_SCHEMA)
+                async with conn.transaction():
+                    await _db_call(
+                        "watcher_reset_stale",
+                        conn.execute,
+                        """
+                        UPDATE hvhn_doc_jobs
+                        SET status = 'pending', error = NULL
+                        WHERE status = 'processing'
+                          AND processed_at IS NULL
+                          AND created_at < now() - ($1::int * interval '1 minute')
+                        """,
+                        STALE_PROCESSING_MINUTES,
+                    )
+                    rows = await _db_call(
+                        "watcher_fetch_pending",
+                        conn.fetch,
+                        """
+                        SELECT id, job_type, text_payload, file_name, file_data
+                        FROM hvhn_doc_jobs
+                        WHERE status = 'pending'
+                        ORDER BY created_at ASC
+                        LIMIT 10
+                        FOR UPDATE SKIP LOCKED
+                        """,
+                    )
+                    ids = [row["id"] for row in rows]
+                    if ids:
+                        await _db_call(
+                            "watcher_mark_processing",
+                            conn.execute,
+                            "UPDATE hvhn_doc_jobs SET status = 'processing' WHERE id = ANY($1::int[])",
+                            ids,
+                        )
+                ok = True
+                return [dict(row) for row in rows]
+            finally:
+                _db_release_count += 1
     except Exception as exc:
         print(f"[DB] query_failed context=watcher err={type(exc).__name__}: {exc}", flush=True)
         await _reset_db_pool(f"watcher:{type(exc).__name__}:{exc}")
         return []
     finally:
-        if pool and conn:
-            try:
-                await pool.release(conn)
-            except Exception:
-                pass
-        if not _last_db_error:
+        _log_pool("watcher_after_release")
+        if ok and not _last_db_error:
             _mark_db_success("watcher", started)
 
 
 async def _mark_discord_job(job_id, status, error=None):
+    global _db_acquire_count, _db_release_count
     if not DATABASE_URL:
         return
-    pool, conn = await _db_acquire("mark_job")
-    if conn is None:
+    pool = await _get_db_pool("mark_job")
+    if pool is None:
         return
     started = time.perf_counter()
+    ok = False
     try:
-        await conn.execute(
-            """
-            UPDATE hvhn_doc_jobs
-            SET status = $2, error = $3, processed_at = now()
-            WHERE id = $1
-            """,
-            job_id,
-            status,
-            error,
-        )
+        _log_pool("mark_job_before_acquire")
+        async with pool.acquire() as conn:
+            _db_acquire_count += 1
+            try:
+                await _db_call(
+                    "mark_job_update",
+                    conn.execute,
+                    """
+                    UPDATE hvhn_doc_jobs
+                    SET status = $2, error = $3, processed_at = now()
+                    WHERE id = $1
+                    """,
+                    job_id,
+                    status,
+                    error,
+                )
+                ok = True
+            finally:
+                _db_release_count += 1
     except Exception as exc:
         print(f"[DB] query_failed context=mark_job err={type(exc).__name__}: {exc}", flush=True)
         await _reset_db_pool(f"mark_job:{type(exc).__name__}:{exc}")
     finally:
-        if pool and conn:
-            try:
-                await pool.release(conn)
-            except Exception:
-                pass
-        if not _last_db_error:
+        _log_pool("mark_job_after_release")
+        if ok and not _last_db_error:
             _mark_db_success("mark_job", started)
 
 
@@ -520,17 +556,32 @@ def _count_files(folder, suffix=None):
     )
 
 
+async def _upsert_runtime_status(conn, key, value):
+    await _db_call(
+        "runtime_status_upsert",
+        conn.execute,
+        """
+        INSERT INTO hvhn_runtime_status (key, value, updated_at)
+        VALUES ($1, $2, now())
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+        """,
+        key,
+        str(value),
+    )
+
+
 async def _sync_runtime_status():
+    global _db_acquire_count, _db_release_count
     if not DATABASE_URL:
         return
-    pool, conn = await _db_acquire("runtime_status")
-    if conn is None:
+    pool = await _get_db_pool("runtime_status")
+    if pool is None:
         return
     started = time.perf_counter()
+    ok = False
     try:
-        await conn.execute(DOC_JOB_SCHEMA)
         clients = load_clients()
-        docs = [os.path.splitext(os.path.basename(p))[0] for p in list_docs()]
+        docs = [os.path.splitext(os.path.basename(path))[0] for path in list_docs()]
         bot_docs = [
             os.path.splitext(name)[0]
             for name in sorted(os.listdir(BOT_DOCS_DIR))
@@ -553,154 +604,136 @@ async def _sync_runtime_status():
             "queue_sheet_remove_document": str(_count_files(SHEET_XOA_TAILIEU, ".txt")),
             "queue_sheet_renew_client": str(_count_files(SHEET_GIAHAN_KHACH, ".txt")),
         }
-        for key, value in status.items():
-            await conn.execute(
-                """
-                INSERT INTO hvhn_runtime_status (key, value, updated_at)
-                VALUES ($1, $2, now())
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-                """,
-                key,
-                value,
-            )
-        for key, value in _db_health_snapshot().items():
-            await conn.execute(
-                """
-                INSERT INTO hvhn_runtime_status (key, value, updated_at)
-                VALUES ($1, $2, now())
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-                """,
-                key,
-                str(value),
-            )
 
-        await conn.execute("TRUNCATE hvhn_clients_cache")
-        if clients:
-            await conn.executemany(
-                """
-                INSERT INTO hvhn_clients_cache (email, name, doc_count, updated_at)
-                VALUES ($1, $2, $3, now())
-                ON CONFLICT (email) DO UPDATE
-                SET name = EXCLUDED.name, doc_count = EXCLUDED.doc_count, updated_at = now()
-                """,
-                [(c["email"].lower(), c["name"], doc_count) for c in clients],
-            )
+        _log_pool("runtime_status_before_acquire")
+        async with pool.acquire() as conn:
+            _db_acquire_count += 1
+            try:
+                await _db_call("runtime_status_schema", conn.execute, DOC_JOB_SCHEMA)
+                for key, value in status.items():
+                    await _upsert_runtime_status(conn, key, value)
+                for key, value in _db_health_snapshot().items():
+                    await _upsert_runtime_status(conn, key, value)
 
-        await conn.execute("TRUNCATE hvhn_docs_cache")
-        if docs:
-            await conn.executemany(
-                """
-                INSERT INTO hvhn_docs_cache (doc_name, updated_at)
-                VALUES ($1, now())
-                ON CONFLICT (doc_name) DO UPDATE SET updated_at = now()
-                """,
-                [(d,) for d in docs],
-            )
+                await _db_call("runtime_truncate_clients", conn.execute, "TRUNCATE hvhn_clients_cache")
+                if clients:
+                    await _db_call(
+                        "runtime_upsert_clients",
+                        conn.executemany,
+                        """
+                        INSERT INTO hvhn_clients_cache (email, name, doc_count, updated_at)
+                        VALUES ($1, $2, $3, now())
+                        ON CONFLICT (email) DO UPDATE
+                        SET name = EXCLUDED.name, doc_count = EXCLUDED.doc_count, updated_at = now()
+                        """,
+                        [(c["email"].lower(), c["name"], doc_count) for c in clients],
+                    )
 
-        if os.path.isfile(SHEET_STATUS_FILE):
-            with open(SHEET_STATUS_FILE, encoding="utf-8") as f:
-                snapshot = json.load(f)
-            sheet_clients = snapshot.get("clients") or []
-            sheet_docs = snapshot.get("docs") or []
+                await _db_call("runtime_truncate_docs", conn.execute, "TRUNCATE hvhn_docs_cache")
+                if docs:
+                    await _db_call(
+                        "runtime_upsert_docs",
+                        conn.executemany,
+                        """
+                        INSERT INTO hvhn_docs_cache (doc_name, updated_at)
+                        VALUES ($1, now())
+                        ON CONFLICT (doc_name) DO UPDATE SET updated_at = now()
+                        """,
+                        [(d,) for d in docs],
+                    )
 
-            await conn.execute("TRUNCATE hvhn_sheet_clients")
-            if sheet_clients:
-                await conn.executemany(
-                    """
-                    INSERT INTO hvhn_sheet_clients
-                        (email, name, grant_date, expiry_date, days_left, status, doc_count, updated_at)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, now())
-                    ON CONFLICT (email) DO UPDATE
-                    SET name = EXCLUDED.name,
-                        grant_date = EXCLUDED.grant_date,
-                        expiry_date = EXCLUDED.expiry_date,
-                        days_left = EXCLUDED.days_left,
-                        status = EXCLUDED.status,
-                        doc_count = EXCLUDED.doc_count,
-                        updated_at = now()
-                    """,
-                    [
-                        (
-                            str(c.get("email", "")).lower(),
-                            c.get("name") or "",
-                            c.get("grant_date") or "",
-                            c.get("expiry_date") or "",
-                            c.get("days_left"),
-                            c.get("status") or "",
-                            int(c.get("doc_count") or 0),
+                if os.path.isfile(SHEET_STATUS_FILE):
+                    with open(SHEET_STATUS_FILE, encoding="utf-8") as f:
+                        snapshot = json.load(f)
+                    sheet_clients = snapshot.get("clients") or []
+                    sheet_docs = snapshot.get("docs") or []
+
+                    await _db_call("runtime_truncate_sheet_clients", conn.execute, "TRUNCATE hvhn_sheet_clients")
+                    if sheet_clients:
+                        await _db_call(
+                            "runtime_upsert_sheet_clients",
+                            conn.executemany,
+                            """
+                            INSERT INTO hvhn_sheet_clients
+                                (email, name, grant_date, expiry_date, days_left, status, doc_count, updated_at)
+                            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                            ON CONFLICT (email) DO UPDATE
+                            SET name = EXCLUDED.name,
+                                grant_date = EXCLUDED.grant_date,
+                                expiry_date = EXCLUDED.expiry_date,
+                                days_left = EXCLUDED.days_left,
+                                status = EXCLUDED.status,
+                                doc_count = EXCLUDED.doc_count,
+                                updated_at = now()
+                            """,
+                            [
+                                (
+                                    str(c.get("email", "")).lower(),
+                                    c.get("name") or "",
+                                    c.get("grant_date") or "",
+                                    c.get("expiry_date") or "",
+                                    c.get("days_left"),
+                                    c.get("status") or "",
+                                    int(c.get("doc_count") or 0),
+                                )
+                                for c in sheet_clients
+                                if c.get("email") and c.get("name")
+                            ],
                         )
-                        for c in sheet_clients
-                        if c.get("email") and c.get("name")
-                    ],
-                )
 
-            await conn.execute("TRUNCATE hvhn_sheet_docs")
-            if sheet_docs:
-                await conn.executemany(
-                    """
-                    INSERT INTO hvhn_sheet_docs (doc_name, client_count, updated_at)
-                    VALUES ($1, $2, now())
-                    ON CONFLICT (doc_name) DO UPDATE
-                    SET client_count = EXCLUDED.client_count, updated_at = now()
-                    """,
-                    [(d.get("doc_name") or "", int(d.get("client_count") or 0)) for d in sheet_docs if d.get("doc_name")],
-                )
-            await conn.execute(
-                """
-                INSERT INTO hvhn_runtime_status (key, value, updated_at)
-                VALUES ('sheet_status_exported_at', $1, now())
-                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-                """,
-                str(snapshot.get("exported_at") or ""),
-            )
-            for key, value in _db_health_snapshot().items():
-                await conn.execute(
-                    """
-                    INSERT INTO hvhn_runtime_status (key, value, updated_at)
-                    VALUES ($1, $2, now())
-                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-                    """,
-                    key,
-                    str(value),
-                )
+                    await _db_call("runtime_truncate_sheet_docs", conn.execute, "TRUNCATE hvhn_sheet_docs")
+                    if sheet_docs:
+                        await _db_call(
+                            "runtime_upsert_sheet_docs",
+                            conn.executemany,
+                            """
+                            INSERT INTO hvhn_sheet_docs (doc_name, client_count, updated_at)
+                            VALUES ($1, $2, now())
+                            ON CONFLICT (doc_name) DO UPDATE
+                            SET client_count = EXCLUDED.client_count, updated_at = now()
+                            """,
+                            [(d.get("doc_name") or "", int(d.get("client_count") or 0)) for d in sheet_docs if d.get("doc_name")],
+                        )
+                    await _upsert_runtime_status(conn, "sheet_status_exported_at", str(snapshot.get("exported_at") or ""))
+                ok = True
+            finally:
+                _db_release_count += 1
     except Exception as exc:
         print(f"  LOI dong bo trang thai watcher: {type(exc).__name__}: {exc}", flush=True)
         traceback.print_exc()
         await _reset_db_pool(f"runtime_status:{type(exc).__name__}:{exc}")
     finally:
-        try:
-            await pool.release(conn)
-        except Exception:
-            pass
-        _mark_db_success("runtime_status", started)
+        _log_pool("runtime_status_after_release")
+        if ok and not _last_db_error:
+            _mark_db_success("runtime_status", started)
+
 
 async def _set_runtime_status(key, value):
+    global _db_acquire_count, _db_release_count
     if not DATABASE_URL:
         return
-    pool, conn = await _db_acquire("set_status")
-    if conn is None:
+    pool = await _get_db_pool("set_status")
+    if pool is None:
         return
     started = time.perf_counter()
+    ok = False
     try:
-        await conn.execute(DOC_JOB_SCHEMA)
-        await conn.execute(
-            """
-            INSERT INTO hvhn_runtime_status (key, value, updated_at)
-            VALUES ($1, $2, now())
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
-            """,
-            key,
-            str(value),
-        )
+        _log_pool("set_status_before_acquire")
+        async with pool.acquire() as conn:
+            _db_acquire_count += 1
+            try:
+                await _db_call("set_status_schema", conn.execute, DOC_JOB_SCHEMA)
+                await _upsert_runtime_status(conn, key, value)
+                ok = True
+            finally:
+                _db_release_count += 1
     except Exception as exc:
         print(f"[DB] query_failed context=set_status err={type(exc).__name__}: {exc}", flush=True)
         await _reset_db_pool(f"set_status:{type(exc).__name__}:{exc}")
     finally:
-        try:
-            await pool.release(conn)
-        except Exception:
-            pass
-        _mark_db_success("set_status", started)
+        _log_pool("set_status_after_release")
+        if ok and not _last_db_error:
+            _mark_db_success("set_status", started)
 
 
 async def _index_pdf_for_ai(path):
