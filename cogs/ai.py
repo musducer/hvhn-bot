@@ -210,12 +210,22 @@ class RAGPlan:
 @dataclass
 class QuoteEvidence:
     quote: str
-    author: str = ""
+    author: str = "UNKNOWN"
     pdf_title: str = ""
+    page: int | None = None
+    chunk_id: str = ""
     source: str = ""
     chunk: int | None = None
     context: str = ""
+    confidence: float = 0.0
     score: int = 0
+
+
+@dataclass
+class QuoteSpan:
+    quote: str
+    start: int
+    end: int
 
 
 class IntentClassifier:
@@ -285,11 +295,13 @@ class Planner:
 
 class QuoteExtractor:
     QUOTE_PAIRS = ((chr(8220), chr(8221)), ('"', '"'), ("'", "'"))
+    AUTHOR_VERBS = ("cho rang", "viet", "noi", "khang dinh", "nhan dinh", "quan niem", "tung viet")
+    UNKNOWN = "UNKNOWN"
 
     @classmethod
-    def quoted_units(cls, text: str) -> list[str]:
+    def quote_spans(cls, text: str) -> list[QuoteSpan]:
         text = re.sub(r"\s+", " ", text or "").strip()
-        out = []
+        spans: list[QuoteSpan] = []
         for open_q, close_q in cls.QUOTE_PAIRS:
             start = 0
             while True:
@@ -300,46 +312,101 @@ class QuoteExtractor:
                 if right < 0:
                     break
                 quote = text[left + 1:right].strip()
-                if 12 <= len(quote) <= 900 and quote not in out:
-                    out.append(quote)
+                if 20 <= len(quote) <= 1200:
+                    spans.append(QuoteSpan(quote=quote, start=left, end=right + 1))
                 start = right + 1
-        return out
+        spans.sort(key=lambda item: item.start)
+        deduped = []
+        seen = set()
+        for span in spans:
+            key = _rag_plain(span.quote)[:260]
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(span)
+        return deduped
 
-    @staticmethod
-    def infer_author(chunk_text: str, quote: str, requested_author: str = "") -> str:
-        if requested_author and _rag_plain(requested_author) in _rag_plain(chunk_text):
-            return requested_author
-        idx = chunk_text.find(quote)
-        window = chunk_text[max(0, idx - 180): idx + len(quote) + 80] if idx >= 0 else chunk_text[:260]
-        match = re.search(r"([A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*(?:\s+[A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*){1,4})\s*(?:cho rằng|viết|nói|khẳng định|nhận định|:)", window)
-        return match.group(1).strip() if match else ""
+    @classmethod
+    def quoted_units(cls, text: str) -> list[str]:
+        return [span.quote for span in cls.quote_spans(text)]
+
+    @classmethod
+    def _candidate_names(cls, text: str) -> list[tuple[str, int, int]]:
+        token_pattern = re.compile(r"[^\W\d_][^\W\d_'-]*", flags=re.UNICODE)
+        tokens = [(m.group(0), m.start(), m.end()) for m in token_pattern.finditer(text or "")]
+        names = []
+        i = 0
+        while i < len(tokens):
+            word, start, end = tokens[i]
+            if not word[:1].isupper():
+                i += 1
+                continue
+            words = [word]
+            j = i + 1
+            while j < len(tokens) and len(words) < 5 and tokens[j][0][:1].isupper():
+                words.append(tokens[j][0])
+                end = tokens[j][2]
+                j += 1
+            if len(words) >= 2:
+                names.append((" ".join(words), start, end))
+                i = j
+            else:
+                i += 1
+        return names
+
+    @classmethod
+    def infer_author(cls, chunk_text: str, span: QuoteSpan) -> tuple[str, float]:
+        before_start = max(0, span.start - 240)
+        after_end = min(len(chunk_text), span.end + 140)
+        before = chunk_text[before_start:span.start]
+        after = chunk_text[span.end:after_end]
+        near_before = cls._candidate_names(before)
+        near_after = cls._candidate_names(after)
+        best: tuple[str, float] = (cls.UNKNOWN, 0.0)
+        for name, start, end in near_before:
+            tail = _rag_plain(before[end:])
+            distance = len(before) - end
+            verb_bonus = 0.45 if any(verb in tail[-80:] for verb in cls.AUTHOR_VERBS) else 0.0
+            colon_bonus = 0.25 if ":" in tail[-30:] else 0.0
+            score = max(0.0, 0.65 - distance / 300) + verb_bonus + colon_bonus
+            if score > best[1]:
+                best = (name, min(score, 1.0))
+        for name, start, end in near_after:
+            head = _rag_plain(after[:start])
+            distance = start
+            verb_bonus = 0.35 if any(verb in head[:80] for verb in cls.AUTHOR_VERBS) else 0.0
+            score = max(0.0, 0.35 - distance / 300) + verb_bonus
+            if score > best[1]:
+                best = (name, min(score, 0.85))
+        if best[1] < 0.55:
+            return cls.UNKNOWN, best[1]
+        return best
 
     @classmethod
     def extract(cls, pdf_meta: dict, plan: RAGPlan, query: str) -> list[QuoteEvidence]:
         requested_plain = _rag_plain(plan.author_filter)
         evidences: list[QuoteEvidence] = []
         for chunk in pdf_meta.get("chunks") or []:
-            text = chunk.get("content") or chunk.get("excerpt") or ""
-            if requested_plain and requested_plain not in _rag_plain(text + " " + chunk.get("title", "")):
-                continue
-            quotes = cls.quoted_units(text)
-            if not quotes and plan.intent in {"QUOTE_COLLECTION", "COMPARE", "ANALYSIS"}:
-                quotes = AI._extract_units_from_chunk(query, chunk, quote_mode=False, max_units=2)
-            for quote in quotes:
-                author = cls.infer_author(text, quote, plan.author_filter)
-                score = 0
-                if plan.author_filter and _rag_plain(plan.author_filter) == _rag_plain(author):
-                    score += 100
-                if plan.author_filter and requested_plain in _rag_plain(text):
-                    score += 60
-                score += AI._unit_score(query, quote)
+            text = re.sub(r"\s+", " ", chunk.get("content") or chunk.get("excerpt") or "").strip()
+            spans = cls.quote_spans(text)
+            if not spans and plan.intent in {"QUOTE_COLLECTION", "COMPARE", "ANALYSIS"}:
+                units = AI._extract_units_from_chunk(query, chunk, quote_mode=False, max_units=2)
+                spans = [QuoteSpan(unit, text.find(unit) if text.find(unit) >= 0 else 0, (text.find(unit) if text.find(unit) >= 0 else 0) + len(unit)) for unit in units]
+            for span in spans:
+                author, confidence = cls.infer_author(text, span)
+                if requested_plain and _rag_plain(author) != requested_plain:
+                    continue
+                score = int(confidence * 100) + AI._unit_score(query, span.quote)
                 evidences.append(QuoteEvidence(
-                    quote=quote,
+                    quote=span.quote,
                     author=author,
                     pdf_title=chunk.get("title") or "",
+                    page=chunk.get("page"),
+                    chunk_id=f"{chunk.get('title') or ''}#{chunk.get('chunk_index')}",
                     source=chunk.get("source") or "",
                     chunk=chunk.get("chunk_index"),
-                    context=text[:700],
+                    context=text[max(0, span.start - 140): min(len(text), span.end + 140)],
+                    confidence=confidence,
                     score=score,
                 ))
         return Aggregator.deduplicate(evidences)
