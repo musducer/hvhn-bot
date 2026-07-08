@@ -1,5 +1,6 @@
 import os
 import re
+import asyncio
 import unicodedata
 from pathlib import Path
 from html import unescape
@@ -23,6 +24,8 @@ COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "900
 SYSTEM_EXTRA_MAX_CHARS = 1500
 VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
+RETRIEVAL_DEBUG = os.getenv("HVHN_RETRIEVAL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
+DEBUG_COMMAND_TIMEOUT_SECONDS = int(os.getenv("HVHN_DEBUG_COMMAND_TIMEOUT_SECONDS", "25"))
 TRUSTED_SOURCE_HINTS = (
     ".gov.vn",
     ".edu.vn",
@@ -86,6 +89,19 @@ def build_context_budget(
     if not parts:
         return ""
     return "\n\n".join(parts)
+
+
+def _context_part_stats(pdf_chunks: str, manual_knowledge: str, teacher_feedback: str, web_results: str, final_context: str) -> dict:
+    return {
+        "pdf_chars": len(pdf_chunks or ""),
+        "manual_chars": len(manual_knowledge or ""),
+        "feedback_chars": len(teacher_feedback or ""),
+        "web_chars": len(web_results or ""),
+        "final_context_chars": len(final_context or ""),
+        "context_truncated": len(final_context or "") < (
+            len(pdf_chunks or "") + len(manual_knowledge or "") + len(teacher_feedback or "") + len(web_results or "")
+        ),
+    }
 
 SYSTEM_PROMPT = (
     "Bạn là trợ giảng môn Ngữ Văn cho cộng đồng HVHN. Trả lời bằng tiếng Việt có dấu, "
@@ -543,11 +559,19 @@ class AI(commands.Cog):
             return "NO_RETRIEVAL"
         if not (pdf_meta.get("context") or manual_count or feedback_count or web_count):
             return "EMPTY_CONTEXT"
-        if pdf_meta.get("error") or (pdf_meta.get("candidate_count", 0) > 0 and pdf_meta.get("selected_count", 0) == 0):
+        if pdf_meta.get("error"):
             return "OCR_FAILURE"
+        if pdf_meta.get("candidate_count", 0) > 0 and pdf_meta.get("selected_count", 0) == 0:
+            return "RERANK_REJECTED"
         if pdf_meta.get("selected_count") and float(pdf_meta.get("top_score") or 0) < LOW_RETRIEVAL_SCORE:
             return "LOW_RETRIEVAL_SCORE"
-        return ""
+        return "UNKNOWN"
+
+    @staticmethod
+    def _has_strong_evidence(pdf_meta: dict, manual_count: int, feedback_count: int, web_count: int) -> bool:
+        if manual_count or feedback_count or web_count:
+            return True
+        return bool(pdf_meta.get("selected_count")) and float(pdf_meta.get("top_score") or 0) >= LOW_RETRIEVAL_SCORE
 
 
     def _is_admin(self, interaction: discord.Interaction) -> bool:
@@ -808,6 +832,7 @@ class AI(commands.Cog):
             "- Khong bia tac gia, tac pham, nhan vat, nam thang, hoan canh sang tac, trich dan, nhan dinh phe binh.\n"
             "- Chi dat trong ngoac kep neu thay nguyen van trong van ban/context.\n"
             "- Neu context khong du de khang dinh, phai noi ro: chua du du lieu de khang dinh.\n"
+            "- Neu KHO PDF/TRI THUC co bang chung lien quan, bat buoc tra loi dua tren bang chung do; khong duoc tu choi chung chung.\n"
             "- Duoc neu ghi chu nguon ngan gon khi cau tra loi mang tinh su kien/van hoc/can kiem chung.\n"
             "- Khong hien ma noi bo [P1], [S1], [W1] hoac URL dai; neu can, chi neu ten tai lieu/nguon ngan gon.\n"
             "- Tra loi thang vao cau hoi, sau do moi ghi can cu/nguon neu that su can.\n"
@@ -892,23 +917,34 @@ class AI(commands.Cog):
         verifier_prompt = (
             "Kiem chung cau tra loi sau bang dung context duoc cung cap. "
             "Hay giu cau dung, xoa hoac viet lai moi khang dinh khong du can cu thanh 'chua du du lieu de khang dinh'. "
+            "Neu BANG CHUNG RUT GON co thong tin lien quan, khong duoc bien cau tra loi thanh tu choi chung chung; hay sua de tra loi bang evidence. "
             "Tuyet doi khong them tac gia/tac pham/nam/trich dan/nhan dinh moi. "
             "Khong hien ma noi bo [P1]/[S1]/[W1] hoac URL dai. Tra lai ban da sua, tieng Viet.\n\n"
             f"CAU HOI/PROMPT:\n{prompt}\n\n"
             f"BANG CHUNG RUT GON:\n{compact_evidence or 'KHONG CO'}\n\n"
             f"CAU TRA LOI CAN KIEM:\n{compact_answer}"
         )
+        if RETRIEVAL_DEBUG:
+            print(f"[debug] verifier_prompt\n{verifier_prompt}", flush=True)
         verified = await self.generate(verifier_prompt, THEN_SYSTEM_PROMPT, temperature=0.0)
+        if RETRIEVAL_DEBUG:
+            print(f"[debug] verifier_output\n{verified}", flush=True)
         if verified:
             self._last_verifier_rejected = (not self._insufficient_answer(answer)) and self._insufficient_answer(verified)
-            print(f"[ai] verifier=ok mode={mode}", flush=True)
+            print(
+                f"[debug] verifier_result mode={mode} rejected={self._last_verifier_rejected} "
+                f"input_insufficient={self._insufficient_answer(answer)} output_insufficient={self._insufficient_answer(verified)}",
+                flush=True,
+            )
             return verified
-        print(f"[ai] verifier=skipped mode={mode}", flush=True)
+        print(f"[debug] verifier_result mode={mode} skipped=True", flush=True)
         return answer
 
     async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
         self._last_verifier_rejected = False
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
+        if RETRIEVAL_DEBUG:
+            print(f"[debug] final_prompt\n{full_prompt}", flush=True)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.05)
         needs_repair = bool(answer) and self._looks_like_source_dump(answer)
         if answer and needs_repair:
@@ -929,6 +965,37 @@ class AI(commands.Cog):
             answer = self._strip_internal_markers(answer)
         return answer, full_prompt
 
+    async def _force_grounded_answer(self, prompt: str, knowledge: str, web_context: str, mode: str) -> str | None:
+        force_prompt = (
+            "BAT BUOC TRA LOI BANG CHUNG DA TRUY XUAT NEU CO. "
+            "Khong duoc noi 'khong du du lieu de khang dinh' khi KHO PDF/TRI THUC ben duoi co doan lien quan. "
+            "Hay trich y tu evidence, noi ro can cu tu tai lieu nao, va chi tu choi nhung chi tiet khong nam trong evidence.\n\n"
+            f"{prompt}"
+        )
+        full_prompt = self._guarded_prompt(force_prompt, knowledge, web_context, mode + "_force_grounded")
+        if RETRIEVAL_DEBUG:
+            print(f"[debug] forced_prompt\n{full_prompt}", flush=True)
+        answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.0)
+        if answer:
+            return self._strip_internal_markers(answer)
+        return None
+
+    @staticmethod
+    def _evidence_fallback_answer(pdf_meta: dict, manual_knowledge: str, web_context: str) -> str:
+        chunks = pdf_meta.get("chunks") or []
+        if chunks:
+            lines = ["Dựa trên các đoạn tài liệu đã truy xuất, có thể trả lời bằng chứng sau:"]
+            for chunk in chunks[:3]:
+                excerpt = re.sub(r"\s+", " ", chunk.get("excerpt", "")).strip()
+                lines.append(f"- {chunk.get('title')} (đoạn {chunk.get('chunk_index')}): {excerpt[:650]}")
+            lines.append("Phần trên là trích ý trực tiếp từ evidence; cần đối chiếu thêm tài liệu gốc nếu muốn diễn giải sâu hơn.")
+            return "\n".join(lines)
+        if manual_knowledge:
+            return "Dựa trên tri thức HVHN đã truy xuất:\n" + _clip_text(manual_knowledge, 1800)
+        if web_context:
+            return "Dựa trên nguồn web đã truy xuất:\n" + _clip_text(web_context, 1800)
+        return "Chưa có evidence đủ rõ để trả lời."
+
 
     @staticmethod
     def _strip_internal_markers(answer: str) -> str:
@@ -944,19 +1011,31 @@ class AI(commands.Cog):
 
     async def _then_answer(self, interaction: discord.Interaction, title: str, user_prompt: str, prompt: str, mode: str):
         if not self._has_ai():
-            await interaction.response.send_message("Tính năng AI chưa cấu hình API key.", ephemeral=True)
+            await interaction.response.send_message("Tinh nang AI chua cau hinh API key.", ephemeral=True)
             return
 
         await interaction.response.defer(thinking=True)
+        print(f"[debug] before_retrieval query={user_prompt[:220]!r} mode={mode}", flush=True)
         pdf_meta = await self._pdf_retrieval(user_prompt)
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
+        print(
+            f"[debug] after_retrieval pdf_candidates={pdf_meta.get('candidate_count', 0)} "
+            f"pdf_selected={pdf_meta.get('selected_count', 0)} top_score={pdf_meta.get('top_score', 0)} "
+            f"pdf_chars={len(pdf_knowledge)} manual_chars={len(manual_knowledge)} feedback_chars={len(feedback_knowledge)}",
+            flush=True,
+        )
         has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
         web_context = await self._web_context(user_prompt, mode, has_local_context)
         manual_count = self._retrieval_count(manual_knowledge, "S")
         feedback_count = self._retrieval_count(feedback_knowledge, "F")
         web_count = self._retrieval_count(web_context, "W")
+        print(
+            f"[debug] after_rerank selected_chunks={pdf_meta.get('selected_count', 0)} "
+            f"scores={[c.get('score') for c in (pdf_meta.get('chunks') or [])[:5]]}",
+            flush=True,
+        )
         knowledge = build_context_budget(
             user_prompt,
             pdf_knowledge,
@@ -964,6 +1043,16 @@ class AI(commands.Cog):
             web_context,
             CONTEXT_MAX_CHARS,
             teacher_feedback=feedback_knowledge,
+        )
+        stats = _context_part_stats(pdf_knowledge, manual_knowledge, feedback_knowledge, web_context, knowledge)
+        full_prompt_preview = self._guarded_prompt(prompt, knowledge, web_context, mode)
+        print(
+            "[debug] prompt_build_done "
+            f"prompt_chars={len(full_prompt_preview)} est_tokens={self._estimated_tokens(full_prompt_preview)} "
+            f"pdf_chars={stats['pdf_chars']} manual_chars={stats['manual_chars']} feedback_chars={stats['feedback_chars']} "
+            f"web_chars={stats['web_chars']} final_context_chars={stats['final_context_chars']} "
+            f"context_truncated={stats['context_truncated']} retrieved_chunk_count={pdf_meta.get('selected_count', 0)}",
+            flush=True,
         )
         print(
             "[ai-retrieval] "
@@ -976,17 +1065,42 @@ class AI(commands.Cog):
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
             return
+        print(
+            f"[debug] llm_answer_received insufficient={self._insufficient_answer(answer)} "
+            f"answer_chars={len(answer)} verifier_rejected={self._last_verifier_rejected}",
+            flush=True,
+        )
         if self._insufficient_answer(answer):
             reason = self._reason_code(pdf_meta, manual_count, feedback_count, web_count, self._last_verifier_rejected)
+            if stats["context_truncated"] and reason == "UNKNOWN":
+                reason = "CONTEXT_TRUNCATED"
+            if self._has_strong_evidence(pdf_meta, manual_count, feedback_count, web_count):
+                if reason == "UNKNOWN":
+                    reason = "PROMPT_FILTERED"
+                forced = await self._force_grounded_answer(prompt, knowledge, web_context, mode)
+                if forced and not self._insufficient_answer(forced):
+                    print(f"[debug] refusal_suppressed_by=force_grounded original_reason={reason}", flush=True)
+                    answer = forced
+                    reason = ""
+                else:
+                    reason = "VERIFIER_REJECTED" if self._last_verifier_rejected else "LLM_REFUSED"
+                    answer = self._evidence_fallback_answer(pdf_meta, manual_knowledge, web_context)
+                    print(f"[debug] refusal_replaced_by=evidence_fallback original_reason={reason}", flush=True)
+                    reason = ""
             if reason and "REASON_CODE:" not in answer:
                 answer = answer.rstrip() + f"\n\n`REASON_CODE: {reason}`"
 
         if len(answer) > MAX_DISCORD_LEN:
-            answer = answer[:MAX_DISCORD_LEN] + "\n\n*(đã rút gọn để vừa Discord)*"
+            answer = answer[:MAX_DISCORD_LEN] + "\n\n*(da rut gon de vua Discord)*"
 
         embed = discord.Embed(title=title, description=answer, color=discord.Color.green())
-        embed.set_footer(text=f"Then trả lời cho {interaction.user.display_name}. Bấm feedback nếu cần sửa.")
+        embed.set_footer(text=f"Then tra loi cho {interaction.user.display_name}. Bam feedback neu can sua.")
         await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
+        print(
+            f"[debug] final_answer_sent insufficient={self._insufficient_answer(answer)} "
+            f"chars={len(answer)} reason_code={'REASON_CODE:' in answer}",
+            flush=True,
+        )
 
     @app_commands.command(name="ai", description="Hỏi trợ giảng AI: giải đáp, gợi ý làm bài, phân tích tác phẩm")
     async def ai(self, interaction: discord.Interaction, question: str):
@@ -1066,12 +1180,8 @@ class AI(commands.Cog):
             embed.add_field(name=f"#{row['id']} [{row['category']}] {row['title']}", value=content, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="hvhn_debug_retrieval", description="Debug retrieval PDF/manual/feedback/web cho Then (Admin)")
-    async def debug_retrieval(self, interaction: discord.Interaction, query: str):
-        if not self._is_admin(interaction):
-            await interaction.response.send_message("Ban can role HVHN Admin hoac quyen Manage Server.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
+    async def _run_debug_retrieval(self, query: str) -> list[str]:
+        print(f"[debug] before_retrieval query={query[:220]!r} mode=debug_command", flush=True)
         pdf_meta = await self._pdf_retrieval(query)
         manual_knowledge = await self._knowledge_context(query)
         feedback_knowledge = await self._feedback_context(query)
@@ -1080,31 +1190,73 @@ class AI(commands.Cog):
         manual_count = self._retrieval_count(manual_knowledge, "S")
         feedback_count = self._retrieval_count(feedback_knowledge, "F")
         web_count = self._retrieval_count(web_context, "W")
-        decision = self._reason_code(pdf_meta, manual_count, feedback_count, web_count) or "OK"
+        decision = self._reason_code(pdf_meta, manual_count, feedback_count, web_count)
+        if decision == "UNKNOWN" and self._has_strong_evidence(pdf_meta, manual_count, feedback_count, web_count):
+            decision = "OK"
+        knowledge = build_context_budget(
+            query,
+            pdf_meta.get("context", ""),
+            manual_knowledge,
+            web_context,
+            CONTEXT_MAX_CHARS,
+            teacher_feedback=feedback_knowledge,
+        )
+        stats = _context_part_stats(pdf_meta.get("context", ""), manual_knowledge, feedback_knowledge, web_context, knowledge)
+        prompt_preview = self._guarded_prompt(query, knowledge, web_context, "debug_retrieval")
 
         lines = [
             f"Query: `{query[:180]}`",
-            f"PDF candidates: `{pdf_meta.get('candidate_count', 0)}` | selected: `{pdf_meta.get('selected_count', 0)}` | top_score: `{pdf_meta.get('top_score', 0)}`",
+            f"Reason code: `{decision}`",
+            f"Verifier decision: `{decision}` (debug retrieval only; no LLM/verifier call)",
+            f"PDF candidates: `{pdf_meta.get('candidate_count', 0)}` | selected sent to LLM: `{pdf_meta.get('selected_count', 0)}` | top_score: `{pdf_meta.get('top_score', 0)}`",
             f"Manual: `{manual_count}` | Feedback: `{feedback_count}` | Web sources: `{web_count}`",
-            f"Verifier decision: `{decision}`",
+            f"Prompt chars: `{len(prompt_preview)}` | est tokens: `{self._estimated_tokens(prompt_preview)}`",
+            f"Chars PDF/manual/feedback/web/final: `{stats['pdf_chars']}` / `{stats['manual_chars']}` / `{stats['feedback_chars']}` / `{stats['web_chars']}` / `{stats['final_context_chars']}`",
+            f"Context truncated: `{stats['context_truncated']}`",
             "",
-            "Top PDF chunks:",
+            "Final selected PDF chunks sent to LLM:",
         ]
         chunks = pdf_meta.get("chunks") or []
         if not chunks:
             lines.append("- Khong co PDF chunk phu hop.")
-        for chunk in chunks[:5]:
-            excerpt = re.sub(r"\s+", " ", chunk.get("excerpt", "")).strip()
-            if len(excerpt) > 260:
-                excerpt = excerpt[:260] + "..."
+        for chunk in chunks:
+            first_500 = re.sub(r"\s+", " ", chunk.get("first_500") or chunk.get("excerpt", "")).strip()[:500]
+            sent_excerpt = re.sub(r"\s+", " ", chunk.get("excerpt", "")).strip()[:500]
             lines.append(
-                f"- P{chunk.get('index')} score=`{chunk.get('score')}` rank=`{chunk.get('rank')}` kw=`{chunk.get('keyword_score')}` "
-                f"doc=`{chunk.get('title')}` chunk=`{chunk.get('chunk_index')}`\n  {excerpt}"
+                f"- P{chunk.get('index')} doc=`{chunk.get('title')}` chunk=`{chunk.get('chunk_index')}` "
+                f"rank=`{chunk.get('rank')}` kw=`{chunk.get('keyword_score')}` rerank_score=`{chunk.get('score')}`\n"
+                f"  first500: {first_500}\n"
+                f"  sent: {sent_excerpt}"
             )
+        lines.append("")
+        lines.append("Selected context block sent to LLM:")
+        lines.append(_clip_text(knowledge, 2200))
         text = "\n".join(lines)
-        if len(text) > MAX_DISCORD_LEN:
-            text = text[:MAX_DISCORD_LEN] + "\n...(debug bi rut gon de vua Discord)"
-        await interaction.followup.send(text, ephemeral=True)
+        pages = []
+        while text:
+            pages.append(text[:MAX_DISCORD_LEN])
+            text = text[MAX_DISCORD_LEN:]
+        return pages[:5]
+
+    @app_commands.command(name="hvhn_debug_retrieval", description="Debug retrieval PDF/manual/feedback/web cho Then (Admin)")
+    async def debug_retrieval(self, interaction: discord.Interaction, query: str):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Ban can role HVHN Admin hoac quyen Manage Server.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            pages = await asyncio.wait_for(self._run_debug_retrieval(query), timeout=DEBUG_COMMAND_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            print(f"[debug] hvhn_debug_retrieval timeout query={query[:180]!r}", flush=True)
+            await interaction.followup.send("Debug retrieval timeout. Xem Render logs `[debug]` de biet diem ket.", ephemeral=True)
+            return
+        except Exception as exc:
+            print(f"[debug] hvhn_debug_retrieval exception={type(exc).__name__}: {exc}", flush=True)
+            await interaction.followup.send(f"Debug retrieval loi: `{type(exc).__name__}: {str(exc)[:1200]}`", ephemeral=True)
+            return
+        for i, page in enumerate(pages, start=1):
+            suffix = f"\n\n(page {i}/{len(pages)})" if len(pages) > 1 else ""
+            await interaction.followup.send(page + suffix, ephemeral=True)
 
     @app_commands.command(name="ai_feedback_stats", description="Xem thống kê feedback AI (Admin)")
     async def feedback_stats(self, interaction: discord.Interaction):

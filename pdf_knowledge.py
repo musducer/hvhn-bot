@@ -487,7 +487,8 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
 
     selected_meta = []
     for index, row in enumerate(selected, start=1):
-        content = row["content"]
+        raw_content = row["content"]
+        content = raw_content
         chunk_chars = _env_int("HVHN_PDF_SEARCH_CHUNK_CHARS", 850, minimum=500, maximum=1200)
         content = best_excerpt(content, chunk_chars)
         source = row["source"] or row["title"]
@@ -509,6 +510,7 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
                 "keyword_score": keyword_score,
                 "score": fts_rank + keyword_score,
                 "excerpt": content,
+                "first_500": raw_content[:500],
             }
         )
     top_score = selected_meta[0]["score"] if selected_meta else 0
