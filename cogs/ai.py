@@ -561,11 +561,19 @@ class AI(commands.Cog):
         terms = cls._query_terms(query)
         if not terms:
             return bool(pdf_meta.get("selected_count"))
+        for chunk in (pdf_meta.get("chunks") or []):
+            if chunk.get("matched_phrases"):
+                return True
+            matched = set(chunk.get("matched_keywords") or [])
+            coverage = len(matched) / max(1, len(terms))
+            important_terms = {term for term in terms if len(term) >= 4}
+            if coverage >= 0.65 and (not important_terms or len(matched & important_terms) >= max(1, len(important_terms) // 2)):
+                return True
         haystack = cls._plain_text(" ".join(
             (chunk.get("first_500") or "") + " " + (chunk.get("excerpt") or "")
             for chunk in (pdf_meta.get("chunks") or [])
         ))
-        return any(term in haystack for term in terms)
+        return len([term for term in terms if term in haystack]) / max(1, len(terms)) >= 0.75
 
     @staticmethod
     def _log_top_pdf_chunks(pdf_meta: dict) -> None:
@@ -574,8 +582,9 @@ class AI(commands.Cog):
             print(
                 "[debug] top_pdf_chunk "
                 f"id=P{chunk.get('index')} score={chunk.get('score')} rank={chunk.get('rank')} "
-                f"kw={chunk.get('keyword_score')} title={chunk.get('title')!r} "
-                f"chunk_index={chunk.get('chunk_index')} first500={preview!r}",
+                f"kw={chunk.get('keyword_score')} phrase={chunk.get('phrase_score')} coverage={chunk.get('coverage')} "
+                f"matched_phrases={chunk.get('matched_phrases')} missing_keywords={chunk.get('missing_keywords')} "
+                f"title={chunk.get('title')!r} chunk_index={chunk.get('chunk_index')} first500={preview!r}",
                 flush=True,
             )
 
@@ -1297,7 +1306,10 @@ class AI(commands.Cog):
             sent_excerpt = re.sub(r"\s+", " ", chunk.get("excerpt", "")).strip()[:500]
             lines.append(
                 f"- P{chunk.get('index')} doc=`{chunk.get('title')}` chunk=`{chunk.get('chunk_index')}` "
-                f"rank=`{chunk.get('rank')}` kw=`{chunk.get('keyword_score')}` rerank_score=`{chunk.get('score')}`\n"
+                f"rank=`{chunk.get('rank')}` kw=`{chunk.get('keyword_score')}` phrase=`{chunk.get('phrase_score')}` "
+                f"coverage=`{chunk.get('coverage')}` rerank_score=`{chunk.get('score')}`\n"
+                f"  matched_phrases: `{chunk.get('matched_phrases')}`\n"
+                f"  missing_keywords: `{chunk.get('missing_keywords')}`\n"
                 f"  first500: {first_500}\n"
                 f"  extracted_preview: {first_500}\n"
                 f"  sent: {sent_excerpt}"

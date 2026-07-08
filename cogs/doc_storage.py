@@ -375,12 +375,16 @@ class DocumentStorage(commands.Cog):
         embed.add_field(
             name="Watcher",
             value=(
-                f"Heartbeat: `{status.get('watcher_heartbeat', 'chưa có')}`\n"
+                f"Heartbeat: `{status.get('watcher_heartbeat', 'chua co')}`\n"
                 f"Mirror: `{status.get('mirror_ready', 'unknown')}`\n"
-                f"Sheet snapshot: `{status.get('sheet_status_exported_at', 'chưa có')}`"
+                f"Sheet snapshot: `{status.get('sheet_status_exported_at', 'chua co')}`\n"
+                f"DB latency: `{status.get('watcher_db_latency_ms', 'n/a')}ms` | DNS: `{status.get('watcher_db_dns_ms', 'n/a')}ms` | connect: `{status.get('watcher_db_connect_ms', 'n/a')}ms`\n"
+                f"DB last ok: `{status.get('watcher_db_last_success', 'chua co')}` | reconnects: `{status.get('watcher_db_reconnect_count', '0')}`\n"
+                f"DB pool: `{status.get('watcher_db_pool_state', 'unknown')}`"
             ),
             inline=False,
         )
+
         embed.add_field(
             name="Dữ liệu",
             value=(

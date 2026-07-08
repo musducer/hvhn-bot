@@ -136,4 +136,17 @@ Sheet: **"Phân phối - HVHN"** = `1KwCP7JcKCAR_GGlIPLUXYMk8_tdQu2Wo-E-nD5nRf6Y
 - Thêm quản lý: chỉ cần gửi 2 link Form; không giới hạn số người điền.
 
 ---
-*Cập nhật gần nhất: 2026-07-05 — thêm xoá khách/tài liệu thủ công, tab Tài liệu, tab Nhật ký (audit log).*
+
+## 11. Bot AI/RAG - debug 2026-07
+
+- Repo bot: `D:\Bothvhn`; xem commit moi nhat bang `git log -1 --oneline`.
+- Env model: `GROQ_MODEL`, `GEMINI_MODEL`; startup log model + so key; log API co status/body/flush.
+- RAG: lay PDF candidate lon (default 300) -> rerank -> chi dua top compact evidence vao prompt.
+- Groq 413: log `prompt_chars/est_tokens`; prompt dai uu tien Gemini; Groq qua lon thi nen/retry context.
+- PDF selected default 5, excerpt ~850 chars quanh keyword; debug co `first_500`.
+- Feedback context: top 3, tong ~1000 chars; log count/chars/preview.
+- Debug commands: `/hvhn_debug_retrieval <query>` va `/debug_retrieval <query>`; chi retrieval, khong goi LLM; co timeout/pagination.
+- Logs can xem: `[ai-retrieval]`, `[debug] before_retrieval/after_retrieval/after_rerank/prompt_build_done/llm_answer_received/verifier_result/final_answer_sent/top_pdf_chunk`.
+- Reason codes: `NO_RETRIEVAL`, `EMPTY_CONTEXT`, `LOW_RETRIEVAL_SCORE`, `RERANK_REJECTED`, `VERIFIER_REJECTED`, `PROMPT_FILTERED`, `CONTEXT_TRUNCATED`, `LLM_REFUSED`, `OCR_FAILURE`, `UNKNOWN`.
+- Fix false refusal: neu evidence manh hoac `RETRIEVAL_HIT=True`, verifier khong duoc doi thanh "khong du du lieu"; neu LLM van refuse -> forced-grounded retry -> fallback tra excerpt evidence.
+- Loi ton dong: `RETRIEVAL_HIT` co the false-positive neu query term qua chung; can redeploy/sync slash de thay command moi; neu van sai, xem `top_pdf_chunk first500` de biet OCR/chunk co that su chua dap an khong.

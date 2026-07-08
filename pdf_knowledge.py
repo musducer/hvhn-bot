@@ -2,6 +2,7 @@ import hashlib
 import io
 import os
 import re
+import unicodedata
 from pathlib import Path
 
 import asyncpg
@@ -14,6 +15,12 @@ PDF_MAX_CHUNKS_PER_DOC = 2200
 OCR_MIN_TEXT_CHARS = 350
 PDF_SEARCH_LIMIT_DEFAULT = 5
 PDF_SEARCH_CANDIDATE_LIMIT = 300
+
+VI_STOPWORDS = {
+    "la", "gi", "ve", "va", "cua", "cho", "trong", "theo", "tai", "lieu", "da", "nap",
+    "mot", "nhung", "cac", "nhu", "thi", "ma", "bi", "duoc", "tu", "voi", "khi", "noi",
+    "hay", "neu", "nay", "kia", "do", "ay", "ra", "vao", "len", "xuong", "o", "de",
+}
 
 PDF_KNOWLEDGE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_pdf_documents (
@@ -46,6 +53,58 @@ def _clean_text(text: str) -> str:
     text = re.sub(r"[ \t\r\f\v]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
+
+
+def _plain_text(value: str) -> str:
+    value = unicodedata.normalize("NFD", value or "")
+    value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn")
+    return re.sub(r"\s+", " ", value.lower()).strip()
+
+
+def _query_features(query: str) -> dict:
+    plain = _plain_text(query)
+    raw_terms = re.findall(r"[a-z0-9]{2,}", plain)
+    terms = [term for term in raw_terms if term not in VI_STOPWORDS and len(term) >= 3]
+    if not terms:
+        terms = [term for term in raw_terms if len(term) >= 3]
+
+    phrases = []
+    if len(terms) >= 2:
+        phrases.append(" ".join(terms))
+    for n in (4, 3, 2):
+        for i in range(0, max(0, len(terms) - n + 1)):
+            phrase = " ".join(terms[i:i + n])
+            if phrase not in phrases:
+                phrases.append(phrase)
+    return {"plain": plain, "terms": terms[:16], "phrases": phrases[:24]}
+
+
+def _score_pdf_text(query: str, title: str, content: str, rank: float = 0.0) -> dict:
+    features = _query_features(query)
+    haystack = _plain_text(f"{title} {content}")
+    title_plain = _plain_text(title)
+    phrase_hits = [phrase for phrase in features["phrases"] if phrase and phrase in haystack]
+    term_hits = [term for term in features["terms"] if term in haystack]
+    missing_terms = [term for term in features["terms"] if term not in haystack]
+    coverage = len(term_hits) / max(1, len(features["terms"]))
+
+    phrase_score = 0
+    for phrase in phrase_hits:
+        words = len(phrase.split())
+        phrase_score += 120 if words >= 3 else 70
+    title_score = sum(25 for term in term_hits if term in title_plain)
+    keyword_score = sum(haystack.count(term) for term in term_hits)
+    score = float(rank or 0) + phrase_score + title_score + keyword_score + (coverage * 20)
+    return {
+        "score": score,
+        "rank": float(rank or 0),
+        "keyword_score": keyword_score,
+        "phrase_score": phrase_score,
+        "coverage": coverage,
+        "matched_phrases": phrase_hits,
+        "matched_keywords": term_hits,
+        "missing_keywords": missing_terms,
+    }
 
 
 def _safe_key(title: str) -> str:
@@ -396,7 +455,8 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
     await ensure_pdf_knowledge_schema(db)
     evidence_limit = max(1, min(limit, _env_int("HVHN_PDF_EVIDENCE_LIMIT_MAX", 8, minimum=4)))
     candidate_limit = _env_int("HVHN_PDF_SEARCH_CANDIDATE_LIMIT", PDF_SEARCH_CANDIDATE_LIMIT, minimum=80)
-    terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:16]
+    features = _query_features(query)
+    terms = features["terms"][:16]
     if not terms:
         rows = await db.fetch(
             """
@@ -444,12 +504,13 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
                 candidate_limit,
             )
 
-    def score(row) -> int:
-        haystack = f"{row['title']} {row['content']}".lower()
-        return sum(haystack.count(term) for term in terms) + sum(3 for term in terms if term in row["title"].lower())
+    def row_score(row) -> dict:
+        return _score_pdf_text(query, row["title"], row["content"], float(row["rank"] or 0))
 
-    ranked = sorted(rows, key=lambda row: (float(row["rank"] or 0), score(row)), reverse=True)
-    selected = ranked[:evidence_limit]
+    scored_rows = [(row, row_score(row)) for row in rows]
+    ranked_pairs = sorted(scored_rows, key=lambda item: item[1]["score"], reverse=True)
+    selected_pairs = ranked_pairs[:evidence_limit]
+    selected = [row for row, _ in selected_pairs]
     doc_refs = {}
     for row in selected:
         title = _source_label(row["source"] or "", row["title"])
@@ -486,7 +547,7 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
         return excerpt
 
     selected_meta = []
-    for index, row in enumerate(selected, start=1):
+    for index, (row, score_info) in enumerate(selected_pairs, start=1):
         raw_content = row["content"]
         content = raw_content
         chunk_chars = _env_int("HVHN_PDF_SEARCH_CHUNK_CHARS", 850, minimum=500, maximum=1200)
@@ -494,8 +555,8 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
         source = row["source"] or row["title"]
         ref_title = _source_label(source, row["title"])
         ref_no = doc_refs[ref_title]
-        fts_rank = float(row["rank"] or 0)
-        keyword_score = score(row)
+        fts_rank = score_info["rank"]
+        keyword_score = score_info["keyword_score"]
         blocks.append(
             f"[P{index}] Tai lieu [{ref_no}] - {row['title']} - doan {row['chunk_index']}\n"
             f"Nguon PDF: {source}\n{content}"
@@ -508,7 +569,12 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
                 "chunk_index": row["chunk_index"],
                 "rank": fts_rank,
                 "keyword_score": keyword_score,
-                "score": fts_rank + keyword_score,
+                "phrase_score": score_info["phrase_score"],
+                "coverage": score_info["coverage"],
+                "matched_phrases": score_info["matched_phrases"],
+                "matched_keywords": score_info["matched_keywords"],
+                "missing_keywords": score_info["missing_keywords"],
+                "score": score_info["score"],
                 "excerpt": content,
                 "first_500": raw_content[:500],
             }

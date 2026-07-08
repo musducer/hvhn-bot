@@ -10,6 +10,7 @@ import traceback
 import asyncio
 import json
 import uuid
+import socket
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlunparse
 
@@ -52,8 +53,18 @@ STALE_PROCESSING_MINUTES = int(os.getenv("HVHN_STALE_PROCESSING_MINUTES", "30"))
 
 DB_RETRY_BASE_SECONDS = 2
 DB_RETRY_MAX_SECONDS = 60
+DB_CONNECT_TIMEOUT_SECONDS = float(os.getenv("HVHN_DB_CONNECT_TIMEOUT_SECONDS", "20"))
+DB_COMMAND_TIMEOUT_SECONDS = float(os.getenv("HVHN_DB_COMMAND_TIMEOUT_SECONDS", "30"))
+DB_POOL_MIN_SIZE = int(os.getenv("HVHN_DB_POOL_MIN_SIZE", "1"))
+DB_POOL_MAX_SIZE = int(os.getenv("HVHN_DB_POOL_MAX_SIZE", "4"))
 _db_backoff_seconds = DB_RETRY_BASE_SECONDS
 _last_db_error = ""
+_db_pool = None
+_db_reconnect_count = 0
+_db_last_success = ""
+_db_last_latency_ms = 0.0
+_db_last_dns_ms = 0.0
+_db_last_connect_ms = 0.0
 
 
 def _redact_database_url(url):
@@ -73,25 +84,110 @@ def _database_host(url):
         return ""
 
 
-async def _connect_db(context="db"):
-    global _db_backoff_seconds, _last_db_error
+async def _resolve_db_host(context="db"):
+    global _db_last_dns_ms
+    host = _database_host(DATABASE_URL)
+    if not host:
+        return
+    start = time.perf_counter()
+    try:
+        await asyncio.to_thread(socket.getaddrinfo, host, 5432)
+        _db_last_dns_ms = (time.perf_counter() - start) * 1000
+        print(f"[DB] dns context={context} host={host} ms={_db_last_dns_ms:.1f}", flush=True)
+    except Exception as exc:
+        _db_last_dns_ms = (time.perf_counter() - start) * 1000
+        print(f"[DB] dns_failed context={context} host={host} ms={_db_last_dns_ms:.1f} err={type(exc).__name__}: {exc}", flush=True)
+
+
+async def _get_db_pool(context="db"):
+    global _db_pool, _db_backoff_seconds, _last_db_error, _db_reconnect_count, _db_last_connect_ms
     if not DATABASE_URL:
         _last_db_error = "DATABASE_URL is missing"
         print(f"[DB] {context}: DATABASE_URL is missing", flush=True)
         return None
+    if _db_pool is not None:
+        return _db_pool
+    await _resolve_db_host(context)
+    start = time.perf_counter()
     try:
-        conn = await asyncpg.connect(DATABASE_URL, timeout=20)
+        _db_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=DB_POOL_MIN_SIZE,
+            max_size=DB_POOL_MAX_SIZE,
+            timeout=DB_CONNECT_TIMEOUT_SECONDS,
+            command_timeout=DB_COMMAND_TIMEOUT_SECONDS,
+        )
+        _db_last_connect_ms = (time.perf_counter() - start) * 1000
+        _db_reconnect_count += 1
         if _last_db_error:
-            print(f"[DB] reconnected host={_database_host(DATABASE_URL)}", flush=True)
+            print(f"[DB] reconnected host={_database_host(DATABASE_URL)} connect_ms={_db_last_connect_ms:.1f} reconnects={_db_reconnect_count}", flush=True)
+        else:
+            print(f"[DB] pool_ready host={_database_host(DATABASE_URL)} connect_ms={_db_last_connect_ms:.1f} reconnects={_db_reconnect_count}", flush=True)
         _last_db_error = ""
         _db_backoff_seconds = DB_RETRY_BASE_SECONDS
-        return conn
+        return _db_pool
     except Exception as exc:
+        _db_pool = None
+        _db_last_connect_ms = (time.perf_counter() - start) * 1000
         _last_db_error = f"{type(exc).__name__}: {exc}"
-        print(f"[DB] {context} failed host={_database_host(DATABASE_URL)} url={_redact_database_url(DATABASE_URL)} err={_last_db_error}; retry in {_db_backoff_seconds}s", flush=True)
+        print(f"[DB] {context} failed host={_database_host(DATABASE_URL)} url={_redact_database_url(DATABASE_URL)} connect_ms={_db_last_connect_ms:.1f} err={_last_db_error}; retry in {_db_backoff_seconds}s", flush=True)
         await asyncio.sleep(_db_backoff_seconds)
         _db_backoff_seconds = min(DB_RETRY_MAX_SECONDS, _db_backoff_seconds * 2)
         return None
+
+
+async def _db_acquire(context="db"):
+    pool = await _get_db_pool(context)
+    if pool is None:
+        return None, None
+    start = time.perf_counter()
+    try:
+        conn = await pool.acquire()
+        return pool, conn
+    except Exception as exc:
+        await _reset_db_pool(f"acquire_failed:{context}:{type(exc).__name__}:{exc}")
+        return None, None
+
+
+async def _reset_db_pool(reason):
+    global _db_pool, _last_db_error
+    _last_db_error = str(reason)
+    pool = _db_pool
+    _db_pool = None
+    if pool is not None:
+        try:
+            await pool.close()
+        except Exception:
+            try:
+                pool.terminate()
+            except Exception:
+                pass
+    print(f"[DB] pool_reset reason={reason}", flush=True)
+
+
+def _mark_db_success(context, started):
+    global _db_last_success, _db_last_latency_ms
+    _db_last_success = time.strftime("%Y-%m-%d %H:%M:%S")
+    _db_last_latency_ms = (time.perf_counter() - started) * 1000
+    print(f"[DB] query_ok context={context} ms={_db_last_latency_ms:.1f}", flush=True)
+
+
+def _db_health_snapshot():
+    pool_state = "none"
+    if _db_pool is not None:
+        try:
+            pool_state = f"size={_db_pool.get_size()} idle={_db_pool.get_idle_size()} min={DB_POOL_MIN_SIZE} max={DB_POOL_MAX_SIZE}"
+        except Exception:
+            pool_state = "unknown"
+    return {
+        "watcher_db_latency_ms": f"{_db_last_latency_ms:.1f}",
+        "watcher_db_dns_ms": f"{_db_last_dns_ms:.1f}",
+        "watcher_db_connect_ms": f"{_db_last_connect_ms:.1f}",
+        "watcher_db_last_success": _db_last_success,
+        "watcher_db_reconnect_count": str(_db_reconnect_count),
+        "watcher_db_last_error": _last_db_error,
+        "watcher_db_pool_state": pool_state,
+    }
 
 DOC_JOB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS hvhn_doc_jobs (
@@ -260,9 +356,10 @@ def _download_pdf(url, filename, target_folder):
 async def _fetch_discord_jobs():
     if not DATABASE_URL:
         return []
-    conn = await _connect_db("watcher")
+    pool, conn = await _db_acquire("watcher")
     if conn is None:
         return []
+    started = time.perf_counter()
     try:
         await conn.execute(DOC_JOB_SCHEMA)
         async with conn.transaction():
@@ -293,16 +390,27 @@ async def _fetch_discord_jobs():
                     ids,
                 )
         return [dict(row) for row in rows]
+    except Exception as exc:
+        print(f"[DB] query_failed context=watcher err={type(exc).__name__}: {exc}", flush=True)
+        await _reset_db_pool(f"watcher:{type(exc).__name__}:{exc}")
+        return []
     finally:
-        await conn.close()
+        if pool and conn:
+            try:
+                await pool.release(conn)
+            except Exception:
+                pass
+        if not _last_db_error:
+            _mark_db_success("watcher", started)
 
 
 async def _mark_discord_job(job_id, status, error=None):
     if not DATABASE_URL:
         return
-    conn = await _connect_db("mark_job")
+    pool, conn = await _db_acquire("mark_job")
     if conn is None:
         return
+    started = time.perf_counter()
     try:
         await conn.execute(
             """
@@ -314,8 +422,17 @@ async def _mark_discord_job(job_id, status, error=None):
             status,
             error,
         )
+    except Exception as exc:
+        print(f"[DB] query_failed context=mark_job err={type(exc).__name__}: {exc}", flush=True)
+        await _reset_db_pool(f"mark_job:{type(exc).__name__}:{exc}")
     finally:
-        await conn.close()
+        if pool and conn:
+            try:
+                await pool.release(conn)
+            except Exception:
+                pass
+        if not _last_db_error:
+            _mark_db_success("mark_job", started)
 
 
 def _materialize_discord_job(job):
@@ -396,9 +513,10 @@ def _count_files(folder, suffix=None):
 async def _sync_runtime_status():
     if not DATABASE_URL:
         return
-    conn = await _connect_db("runtime_status")
+    pool, conn = await _db_acquire("runtime_status")
     if conn is None:
         return
+    started = time.perf_counter()
     try:
         await conn.execute(DOC_JOB_SCHEMA)
         clients = load_clients()
@@ -434,6 +552,16 @@ async def _sync_runtime_status():
                 """,
                 key,
                 value,
+            )
+        for key, value in _db_health_snapshot().items():
+            await conn.execute(
+                """
+                INSERT INTO hvhn_runtime_status (key, value, updated_at)
+                VALUES ($1, $2, now())
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                """,
+                key,
+                str(value),
             )
 
         await conn.execute("TRUNCATE hvhn_clients_cache")
@@ -515,19 +643,34 @@ async def _sync_runtime_status():
                 """,
                 str(snapshot.get("exported_at") or ""),
             )
-    except Exception:
-        print("  LỖI đồng bộ trạng thái watcher:", flush=True)
+            for key, value in _db_health_snapshot().items():
+                await conn.execute(
+                    """
+                    INSERT INTO hvhn_runtime_status (key, value, updated_at)
+                    VALUES ($1, $2, now())
+                    ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()
+                    """,
+                    key,
+                    str(value),
+                )
+    except Exception as exc:
+        print(f"  LOI dong bo trang thai watcher: {type(exc).__name__}: {exc}", flush=True)
         traceback.print_exc()
+        await _reset_db_pool(f"runtime_status:{type(exc).__name__}:{exc}")
     finally:
-        await conn.close()
-
+        try:
+            await pool.release(conn)
+        except Exception:
+            pass
+        _mark_db_success("runtime_status", started)
 
 async def _set_runtime_status(key, value):
     if not DATABASE_URL:
         return
-    conn = await _connect_db("set_status")
+    pool, conn = await _db_acquire("set_status")
     if conn is None:
         return
+    started = time.perf_counter()
     try:
         await conn.execute(DOC_JOB_SCHEMA)
         await conn.execute(
@@ -539,8 +682,15 @@ async def _set_runtime_status(key, value):
             key,
             str(value),
         )
+    except Exception as exc:
+        print(f"[DB] query_failed context=set_status err={type(exc).__name__}: {exc}", flush=True)
+        await _reset_db_pool(f"set_status:{type(exc).__name__}:{exc}")
     finally:
-        await conn.close()
+        try:
+            await pool.release(conn)
+        except Exception:
+            pass
+        _mark_db_success("set_status", started)
 
 
 async def _index_pdf_for_ai(path):
