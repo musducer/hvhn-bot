@@ -552,6 +552,34 @@ class AI(commands.Cog):
         return "khong du du lieu de khang dinh" in lowered or "chua du du lieu de khang dinh" in lowered
 
     @staticmethod
+    def _query_terms(query: str, limit: int = 16) -> list[str]:
+        plain = AI._plain_text(query)
+        return [t for t in re.findall(r"[a-z0-9]{3,}", plain)[:limit]]
+
+    @classmethod
+    def _retrieval_hit(cls, query: str, pdf_meta: dict) -> bool:
+        terms = cls._query_terms(query)
+        if not terms:
+            return bool(pdf_meta.get("selected_count"))
+        haystack = cls._plain_text(" ".join(
+            (chunk.get("first_500") or "") + " " + (chunk.get("excerpt") or "")
+            for chunk in (pdf_meta.get("chunks") or [])
+        ))
+        return any(term in haystack for term in terms)
+
+    @staticmethod
+    def _log_top_pdf_chunks(pdf_meta: dict) -> None:
+        for chunk in (pdf_meta.get("chunks") or [])[:5]:
+            preview = re.sub(r"\s+", " ", chunk.get("first_500") or chunk.get("excerpt", "")).strip()[:500]
+            print(
+                "[debug] top_pdf_chunk "
+                f"id=P{chunk.get('index')} score={chunk.get('score')} rank={chunk.get('rank')} "
+                f"kw={chunk.get('keyword_score')} title={chunk.get('title')!r} "
+                f"chunk_index={chunk.get('chunk_index')} first500={preview!r}",
+                flush=True,
+            )
+
+    @staticmethod
     def _reason_code(pdf_meta: dict, manual_count: int, feedback_count: int, web_count: int, verifier_changed: bool = False) -> str:
         if verifier_changed:
             return "VERIFIER_REJECTED"
@@ -655,7 +683,7 @@ class AI(commands.Cog):
             chunks.append(f"[S{index}] [{row['category']}] {row['title']}\n{content}")
         return "\n\n".join(chunks)
 
-    async def _feedback_context(self, query: str, limit: int = 4) -> str:
+    async def _feedback_context(self, query: str, limit: int = 3) -> str:
         terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:8]
         if not terms:
             return ""
@@ -675,7 +703,22 @@ class AI(commands.Cog):
         )
         if not rows:
             return ""
-        return "\n\n".join(f"[F{i}] Loi giao vien da sua:\n{row['correction']}" for i, row in enumerate(rows, 1))
+        blocks = []
+        total = 0
+        for i, row in enumerate(rows[:3], 1):
+            remaining = max(0, 1000 - total)
+            if remaining <= 80:
+                break
+            correction = _clip_text(str(row["correction"]), min(remaining, 320))
+            block = f"[F{i}] Loi giao vien da sua:\n{correction}"
+            blocks.append(block)
+            total += len(block) + 2
+        context = "\n\n".join(blocks)
+        print(
+            f"[debug] feedback_context count={len(blocks)} chars={len(context)} preview={context[:500]!r}",
+            flush=True,
+        )
+        return context
 
 
     @staticmethod
@@ -903,7 +946,16 @@ class AI(commands.Cog):
         lines.extend(f"[{num}] {title}" for num, title in selected)
         return answer.rstrip() + "\n".join(lines)
 
-    async def _verify_answer(self, answer: str, prompt: str, knowledge: str, web_context: str, mode: str) -> str:
+    async def _verify_answer(
+        self,
+        answer: str,
+        prompt: str,
+        knowledge: str,
+        web_context: str,
+        mode: str,
+        *,
+        retrieval_hit: bool = False,
+    ) -> str:
         if not answer:
             return answer
         compact_evidence = build_context_budget(
@@ -931,16 +983,29 @@ class AI(commands.Cog):
             print(f"[debug] verifier_output\n{verified}", flush=True)
         if verified:
             self._last_verifier_rejected = (not self._insufficient_answer(answer)) and self._insufficient_answer(verified)
+            verifier_reason = "VERIFIER_REJECTED" if self._last_verifier_rejected else "OK"
             print(
                 f"[debug] verifier_result mode={mode} rejected={self._last_verifier_rejected} "
-                f"input_insufficient={self._insufficient_answer(answer)} output_insufficient={self._insufficient_answer(verified)}",
+                f"input_insufficient={self._insufficient_answer(answer)} output_insufficient={self._insufficient_answer(verified)} "
+                f"retrieval_hit={retrieval_hit} verifier_reason={verifier_reason}",
                 flush=True,
             )
+            if retrieval_hit and self._insufficient_answer(verified):
+                print("[debug] verifier_override=retrieval_hit_prevents_false_insufficient", flush=True)
+                return answer
             return verified
         print(f"[debug] verifier_result mode={mode} skipped=True", flush=True)
         return answer
 
-    async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
+    async def _safe_generate(
+        self,
+        prompt: str,
+        knowledge: str,
+        web_context: str,
+        mode: str,
+        *,
+        retrieval_hit: bool = False,
+    ) -> tuple[str | None, str]:
         self._last_verifier_rejected = False
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
         if RETRIEVAL_DEBUG:
@@ -961,7 +1026,7 @@ class AI(commands.Cog):
             if repaired:
                 answer = repaired
         if answer:
-            answer = await self._verify_answer(answer, prompt, knowledge, web_context, mode)
+            answer = await self._verify_answer(answer, prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
             answer = self._strip_internal_markers(answer)
         return answer, full_prompt
 
@@ -1020,10 +1085,13 @@ class AI(commands.Cog):
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
+        retrieval_hit = self._retrieval_hit(user_prompt, pdf_meta)
+        self._log_top_pdf_chunks(pdf_meta)
         print(
             f"[debug] after_retrieval pdf_candidates={pdf_meta.get('candidate_count', 0)} "
             f"pdf_selected={pdf_meta.get('selected_count', 0)} top_score={pdf_meta.get('top_score', 0)} "
-            f"pdf_chars={len(pdf_knowledge)} manual_chars={len(manual_knowledge)} feedback_chars={len(feedback_knowledge)}",
+            f"pdf_chars={len(pdf_knowledge)} manual_chars={len(manual_knowledge)} feedback_chars={len(feedback_knowledge)} "
+            f"feedback_preview={feedback_knowledge[:500]!r} RETRIEVAL_HIT={retrieval_hit}",
             flush=True,
         )
         has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
@@ -1051,7 +1119,9 @@ class AI(commands.Cog):
             f"prompt_chars={len(full_prompt_preview)} est_tokens={self._estimated_tokens(full_prompt_preview)} "
             f"pdf_chars={stats['pdf_chars']} manual_chars={stats['manual_chars']} feedback_chars={stats['feedback_chars']} "
             f"web_chars={stats['web_chars']} final_context_chars={stats['final_context_chars']} "
-            f"context_truncated={stats['context_truncated']} retrieved_chunk_count={pdf_meta.get('selected_count', 0)}",
+            f"context_truncated={stats['context_truncated']} retrieved_chunk_count={pdf_meta.get('selected_count', 0)} "
+            f"retrieved_chunk_titles={[c.get('title') for c in (pdf_meta.get('chunks') or [])[:5]]} "
+            f"feedback_count={feedback_count} RETRIEVAL_HIT={retrieval_hit}",
             flush=True,
         )
         print(
@@ -1061,7 +1131,7 @@ class AI(commands.Cog):
             f"pdf_top_score={pdf_meta.get('top_score', 0)} manual={manual_count} feedback={feedback_count} web={web_count}",
             flush=True,
         )
-        answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode)
+        answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
             return
@@ -1185,6 +1255,8 @@ class AI(commands.Cog):
         pdf_meta = await self._pdf_retrieval(query)
         manual_knowledge = await self._knowledge_context(query)
         feedback_knowledge = await self._feedback_context(query)
+        retrieval_hit = self._retrieval_hit(query, pdf_meta)
+        self._log_top_pdf_chunks(pdf_meta)
         has_local_context = bool(pdf_meta.get("context") or manual_knowledge or feedback_knowledge)
         web_context = await self._web_context(query, "debug_retrieval", has_local_context)
         manual_count = self._retrieval_count(manual_knowledge, "S")
@@ -1209,6 +1281,7 @@ class AI(commands.Cog):
             f"Reason code: `{decision}`",
             f"Verifier decision: `{decision}` (debug retrieval only; no LLM/verifier call)",
             f"PDF candidates: `{pdf_meta.get('candidate_count', 0)}` | selected sent to LLM: `{pdf_meta.get('selected_count', 0)}` | top_score: `{pdf_meta.get('top_score', 0)}`",
+            f"RETRIEVAL_HIT: `{retrieval_hit}`",
             f"Manual: `{manual_count}` | Feedback: `{feedback_count}` | Web sources: `{web_count}`",
             f"Prompt chars: `{len(prompt_preview)}` | est tokens: `{self._estimated_tokens(prompt_preview)}`",
             f"Chars PDF/manual/feedback/web/final: `{stats['pdf_chars']}` / `{stats['manual_chars']}` / `{stats['feedback_chars']}` / `{stats['web_chars']}` / `{stats['final_context_chars']}`",
@@ -1226,6 +1299,7 @@ class AI(commands.Cog):
                 f"- P{chunk.get('index')} doc=`{chunk.get('title')}` chunk=`{chunk.get('chunk_index')}` "
                 f"rank=`{chunk.get('rank')}` kw=`{chunk.get('keyword_score')}` rerank_score=`{chunk.get('score')}`\n"
                 f"  first500: {first_500}\n"
+                f"  extracted_preview: {first_500}\n"
                 f"  sent: {sent_excerpt}"
             )
         lines.append("")
@@ -1252,6 +1326,26 @@ class AI(commands.Cog):
             return
         except Exception as exc:
             print(f"[debug] hvhn_debug_retrieval exception={type(exc).__name__}: {exc}", flush=True)
+            await interaction.followup.send(f"Debug retrieval loi: `{type(exc).__name__}: {str(exc)[:1200]}`", ephemeral=True)
+            return
+        for i, page in enumerate(pages, start=1):
+            suffix = f"\n\n(page {i}/{len(pages)})" if len(pages) > 1 else ""
+            await interaction.followup.send(page + suffix, ephemeral=True)
+
+    @app_commands.command(name="debug_retrieval", description="Debug retrieval nhanh trước khi gọi LLM (Admin)")
+    async def debug_retrieval_alias(self, interaction: discord.Interaction, query: str):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Ban can role HVHN Admin hoac quyen Manage Server.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        try:
+            pages = await asyncio.wait_for(self._run_debug_retrieval(query), timeout=DEBUG_COMMAND_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            print(f"[debug] debug_retrieval timeout query={query[:180]!r}", flush=True)
+            await interaction.followup.send("Debug retrieval timeout. Xem Render logs `[debug]` de biet diem ket.", ephemeral=True)
+            return
+        except Exception as exc:
+            print(f"[debug] debug_retrieval exception={type(exc).__name__}: {exc}", flush=True)
             await interaction.followup.send(f"Debug retrieval loi: `{type(exc).__name__}: {str(exc)[:1200]}`", ephemeral=True)
             return
         for i, page in enumerate(pages, start=1):
