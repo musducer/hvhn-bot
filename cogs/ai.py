@@ -132,6 +132,45 @@ class AI(commands.Cog):
         self.tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
         self.last_ai_errors: list[str] = []
 
+    @staticmethod
+    def _redact_key(key: str) -> str:
+        if not key:
+            return "<missing>"
+        if len(key) <= 10:
+            return key[:2] + "***" + key[-2:]
+        return key[:6] + "***" + key[-4:]
+
+    @staticmethod
+    def _api_error(provider: str, model: str, status: int | None, body: str = "", exc: BaseException | None = None) -> dict:
+        return {
+            "provider": provider,
+            "model": model,
+            "status": status,
+            "body": (body or "")[:2000],
+            "exception": repr(exc) if exc else "",
+        }
+
+    def _log_api_event(
+        self,
+        event: str,
+        *,
+        provider: str,
+        model: str,
+        key: str,
+        key_index: int,
+        total_keys: int,
+        status: int | None = None,
+        body: str = "",
+        exc: BaseException | None = None,
+    ) -> None:
+        print(
+            "[ai-api] "
+            f"event={event} provider={provider} model={model} "
+            f"key_index={key_index}/{total_keys} key={self._redact_key(key)} key_exists={bool(key)} "
+            f"groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)} "
+            f"status={status} body={(body or '')[:1000]!r} exception={repr(exc) if exc else ''}"
+        )
+
     async def ask_groq(
         self,
         session: aiohttp.ClientSession,
@@ -139,7 +178,7 @@ class AI(commands.Cog):
         prompt: str,
         system_prompt: str = SYSTEM_PROMPT,
         temperature: float = 0.2,
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str | dict]:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
@@ -152,11 +191,9 @@ class AI(commands.Cog):
             "top_p": 0.4,
         }
         async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
-            if resp.status == 429:
-                return False, "RATE_LIMIT"
             if resp.status != 200:
-                detail = (await resp.text())[:500]
-                return False, f"HTTP {resp.status}: {detail}"
+                body = await resp.text()
+                return False, self._api_error("groq", GROQ_MODEL, resp.status, body)
             data = await resp.json()
             return True, data["choices"][0]["message"]["content"].strip()
 
@@ -167,7 +204,7 @@ class AI(commands.Cog):
         prompt: str,
         system_prompt: str = SYSTEM_PROMPT,
         temperature: float = 0.2,
-    ) -> tuple[bool, str]:
+    ) -> tuple[bool, str | dict]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}"
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -175,16 +212,14 @@ class AI(commands.Cog):
             "generationConfig": {"temperature": temperature, "topP": 0.4},
         }
         async with session.post(url, json=payload, timeout=60) as resp:
-            if resp.status == 429:
-                return False, "RATE_LIMIT"
             if resp.status != 200:
-                detail = (await resp.text())[:500]
-                return False, f"HTTP {resp.status}: {detail}"
+                body = await resp.text()
+                return False, self._api_error("gemini", GEMINI_MODEL, resp.status, body)
             data = await resp.json()
             try:
                 return True, data["candidates"][0]["content"]["parts"][0]["text"].strip()
             except (KeyError, IndexError):
-                return False, "EMPTY"
+                return False, self._api_error("gemini", GEMINI_MODEL, 200, repr(data))
 
     async def generate(
         self,
@@ -193,35 +228,133 @@ class AI(commands.Cog):
         temperature: float = 0.2,
     ) -> str | None:
         errors: list[str] = []
+        print(
+            "[ai-api] "
+            f"event=generate_start groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)} "
+            f"groq_model={GROQ_MODEL} gemini_model={GEMINI_MODEL} prompt_chars={len(prompt)}"
+        )
         async with aiohttp.ClientSession() as session:
-            for key in self.groq_keys:
+            for index, key in enumerate(self.groq_keys, start=1):
+                self._log_api_event(
+                    "try",
+                    provider="groq",
+                    model=GROQ_MODEL,
+                    key=key,
+                    key_index=index,
+                    total_keys=len(self.groq_keys),
+                )
                 try:
                     ok, content = await self.ask_groq(session, key, prompt, system_prompt, temperature)
                     if ok:
                         self.last_ai_errors = []
-                        print(f"[ai] model=groq/{GROQ_MODEL} ok")
-                        return content
-                    errors.append(f"Groq {content}")
-                    print(f"[ai] Groq error: {content}")
+                        self._log_api_event(
+                            "ok",
+                            provider="groq",
+                            model=GROQ_MODEL,
+                            key=key,
+                            key_index=index,
+                            total_keys=len(self.groq_keys),
+                        )
+                        return str(content)
+                    if isinstance(content, dict):
+                        self._log_api_event(
+                            "non_200",
+                            provider="groq",
+                            model=GROQ_MODEL,
+                            key=key,
+                            key_index=index,
+                            total_keys=len(self.groq_keys),
+                            status=content.get("status"),
+                            body=content.get("body", ""),
+                        )
+                        errors.append(f"Groq {content.get('status')}: {content.get('body', '')[:300]}")
+                    else:
+                        errors.append(f"Groq {content}")
+                        self._log_api_event(
+                            "error",
+                            provider="groq",
+                            model=GROQ_MODEL,
+                            key=key,
+                            key_index=index,
+                            total_keys=len(self.groq_keys),
+                            body=str(content),
+                        )
                 except Exception as exc:
                     msg = f"Groq exception: {type(exc).__name__}: {exc}"
                     errors.append(msg)
-                    print(f"[ai] {msg}")
+                    self._log_api_event(
+                        "exception",
+                        provider="groq",
+                        model=GROQ_MODEL,
+                        key=key,
+                        key_index=index,
+                        total_keys=len(self.groq_keys),
+                        exc=exc,
+                    )
 
-            for key in self.gemini_keys:
+            for index, key in enumerate(self.gemini_keys, start=1):
+                self._log_api_event(
+                    "try",
+                    provider="gemini",
+                    model=GEMINI_MODEL,
+                    key=key,
+                    key_index=index,
+                    total_keys=len(self.gemini_keys),
+                )
                 try:
                     ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature)
                     if ok:
                         self.last_ai_errors = []
-                        print(f"[ai] model=gemini/{GEMINI_MODEL} ok")
-                        return content
-                    errors.append(f"Gemini {content}")
-                    print(f"[ai] Gemini error: {content}")
+                        self._log_api_event(
+                            "ok",
+                            provider="gemini",
+                            model=GEMINI_MODEL,
+                            key=key,
+                            key_index=index,
+                            total_keys=len(self.gemini_keys),
+                        )
+                        return str(content)
+                    if isinstance(content, dict):
+                        self._log_api_event(
+                            "non_200",
+                            provider="gemini",
+                            model=GEMINI_MODEL,
+                            key=key,
+                            key_index=index,
+                            total_keys=len(self.gemini_keys),
+                            status=content.get("status"),
+                            body=content.get("body", ""),
+                        )
+                        errors.append(f"Gemini {content.get('status')}: {content.get('body', '')[:300]}")
+                    else:
+                        errors.append(f"Gemini {content}")
+                        self._log_api_event(
+                            "error",
+                            provider="gemini",
+                            model=GEMINI_MODEL,
+                            key=key,
+                            key_index=index,
+                            total_keys=len(self.gemini_keys),
+                            body=str(content),
+                        )
                 except Exception as exc:
                     msg = f"Gemini exception: {type(exc).__name__}: {exc}"
                     errors.append(msg)
-                    print(f"[ai] {msg}")
+                    self._log_api_event(
+                        "exception",
+                        provider="gemini",
+                        model=GEMINI_MODEL,
+                        key=key,
+                        key_index=index,
+                        total_keys=len(self.gemini_keys),
+                        exc=exc,
+                    )
         self.last_ai_errors = errors[-8:]
+        print(
+            "[ai-api] "
+            f"event=all_failed groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)} "
+            f"errors={self.last_ai_errors!r}"
+        )
         return None
 
 
