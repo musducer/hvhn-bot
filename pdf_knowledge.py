@@ -13,7 +13,7 @@ PDF_CHUNK_OVERLAP = 220
 PDF_MAX_CHUNKS_PER_DOC = 2200
 OCR_MIN_TEXT_CHARS = 350
 PDF_SEARCH_LIMIT_DEFAULT = 5
-PDF_SEARCH_CANDIDATE_LIMIT = 220
+PDF_SEARCH_CANDIDATE_LIMIT = 300
 
 PDF_KNOWLEDGE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_pdf_documents (
@@ -394,7 +394,8 @@ async def sync_pdf_folder(database_url: str, folder: str | os.PathLike) -> dict:
 
 async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_DEFAULT) -> str:
     await ensure_pdf_knowledge_schema(db)
-    limit = max(1, min(limit, _env_int("HVHN_PDF_SEARCH_LIMIT_MAX", 8, minimum=4)))
+    evidence_limit = max(1, min(limit, _env_int("HVHN_PDF_EVIDENCE_LIMIT_MAX", 8, minimum=4)))
+    candidate_limit = _env_int("HVHN_PDF_SEARCH_CANDIDATE_LIMIT", PDF_SEARCH_CANDIDATE_LIMIT, minimum=80)
     terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:16]
     if not terms:
         rows = await db.fetch(
@@ -404,11 +405,10 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
             ORDER BY updated_at DESC
             LIMIT $1
             """,
-            limit,
+            candidate_limit,
         )
     else:
         patterns = [f"%{term}%" for term in terms]
-        candidate_limit = _env_int("HVHN_PDF_SEARCH_CANDIDATE_LIMIT", PDF_SEARCH_CANDIDATE_LIMIT, minimum=40)
         ts_query = " ".join(terms)
         try:
             rows = await db.fetch(
@@ -448,9 +448,10 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
         haystack = f"{row['title']} {row['content']}".lower()
         return sum(haystack.count(term) for term in terms) + sum(3 for term in terms if term in row["title"].lower())
 
-    ranked = sorted(rows, key=lambda row: (float(row["rank"] or 0), score(row)), reverse=True)[:limit]
+    ranked = sorted(rows, key=lambda row: (float(row["rank"] or 0), score(row)), reverse=True)
+    selected = ranked[:evidence_limit]
     doc_refs = {}
-    for row in ranked:
+    for row in selected:
         title = _source_label(row["source"] or "", row["title"])
         if title not in doc_refs:
             doc_refs[title] = len(doc_refs) + 1
@@ -464,12 +465,30 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
         blocks.append(
             "Quy uoc: [P...] la ma doan noi bo; [1], [2] la so tai lieu PDF co the neu trong ghi chu nguon neu can."
         )
+        blocks.append(f"Da quet va rerank {len(rows)} ung vien PDF; chi dua {len(selected)} bang chung gon nhat vao prompt.")
 
-    for index, row in enumerate(ranked, start=1):
+    def best_excerpt(content: str, max_chars: int) -> str:
+        if len(content) <= max_chars:
+            return content
+        lowered = content.lower()
+        hits = [lowered.find(term) for term in terms if term and lowered.find(term) >= 0]
+        if hits:
+            center = min(hits)
+            start = max(0, center - max_chars // 3)
+        else:
+            start = 0
+        end = min(len(content), start + max_chars)
+        excerpt = content[start:end].strip()
+        if start > 0:
+            excerpt = "..." + excerpt
+        if end < len(content):
+            excerpt += "..."
+        return excerpt
+
+    for index, row in enumerate(selected, start=1):
         content = row["content"]
         chunk_chars = _env_int("HVHN_PDF_SEARCH_CHUNK_CHARS", 850, minimum=500, maximum=1200)
-        if len(content) > chunk_chars:
-            content = content[:chunk_chars] + "..."
+        content = best_excerpt(content, chunk_chars)
         source = row["source"] or row["title"]
         ref_title = _source_label(source, row["title"])
         ref_no = doc_refs[ref_title]
