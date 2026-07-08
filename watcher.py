@@ -60,6 +60,7 @@ DB_POOL_MAX_SIZE = int(os.getenv("HVHN_DB_POOL_MAX_SIZE", "4"))
 _db_backoff_seconds = DB_RETRY_BASE_SECONDS
 _last_db_error = ""
 _db_pool = None
+_db_pool_loop_id = None
 _db_reconnect_count = 0
 _db_last_success = ""
 _db_last_latency_ms = 0.0
@@ -100,11 +101,17 @@ async def _resolve_db_host(context="db"):
 
 
 async def _get_db_pool(context="db"):
-    global _db_pool, _db_backoff_seconds, _last_db_error, _db_reconnect_count, _db_last_connect_ms
+    global _db_pool, _db_pool_loop_id, _db_backoff_seconds, _last_db_error, _db_reconnect_count, _db_last_connect_ms
     if not DATABASE_URL:
         _last_db_error = "DATABASE_URL is missing"
         print(f"[DB] {context}: DATABASE_URL is missing", flush=True)
         return None
+    loop_id = id(asyncio.get_running_loop())
+    if _db_pool is not None:
+        if _db_pool_loop_id != loop_id:
+            await _reset_db_pool(f"event_loop_changed old={_db_pool_loop_id} new={loop_id}")
+        else:
+            return _db_pool
     if _db_pool is not None:
         return _db_pool
     await _resolve_db_host(context)
@@ -117,12 +124,13 @@ async def _get_db_pool(context="db"):
             timeout=DB_CONNECT_TIMEOUT_SECONDS,
             command_timeout=DB_COMMAND_TIMEOUT_SECONDS,
         )
+        _db_pool_loop_id = loop_id
         _db_last_connect_ms = (time.perf_counter() - start) * 1000
         _db_reconnect_count += 1
         if _last_db_error:
-            print(f"[DB] reconnected host={_database_host(DATABASE_URL)} connect_ms={_db_last_connect_ms:.1f} reconnects={_db_reconnect_count}", flush=True)
+            print(f"[DB] reconnected host={_database_host(DATABASE_URL)} loop={loop_id} connect_ms={_db_last_connect_ms:.1f} reconnects={_db_reconnect_count}", flush=True)
         else:
-            print(f"[DB] pool_ready host={_database_host(DATABASE_URL)} connect_ms={_db_last_connect_ms:.1f} reconnects={_db_reconnect_count}", flush=True)
+            print(f"[DB] pool_created host={_database_host(DATABASE_URL)} loop={loop_id} connect_ms={_db_last_connect_ms:.1f} reconnects={_db_reconnect_count}", flush=True)
         _last_db_error = ""
         _db_backoff_seconds = DB_RETRY_BASE_SECONDS
         return _db_pool
@@ -150,10 +158,12 @@ async def _db_acquire(context="db"):
 
 
 async def _reset_db_pool(reason):
-    global _db_pool, _last_db_error
+    global _db_pool, _db_pool_loop_id, _last_db_error
     _last_db_error = str(reason)
     pool = _db_pool
     _db_pool = None
+    old_loop_id = _db_pool_loop_id
+    _db_pool_loop_id = None
     if pool is not None:
         try:
             await pool.close()
@@ -162,7 +172,7 @@ async def _reset_db_pool(reason):
                 pool.terminate()
             except Exception:
                 pass
-    print(f"[DB] pool_reset reason={reason}", flush=True)
+    print(f"[DB] pool_reset loop={old_loop_id} reason={reason}", flush=True)
 
 
 def _mark_db_success(context, started):
@@ -771,7 +781,7 @@ def xu_ly_don_them_khach():
             traceback.print_exc()
 
 
-def xu_ly_don_them_tai_lieu():
+async def xu_ly_don_them_tai_lieu():
     if not os.path.isdir(INCOMING_DOCS):
         return
     os.makedirs(PROCESSED_DOCS, exist_ok=True)
@@ -785,7 +795,7 @@ def xu_ly_don_them_tai_lieu():
             dest_doc = os.path.join(DOCS_DIR, pdf)
             os.makedirs(DOCS_DIR, exist_ok=True)
             shutil.copy2(path, dest_doc)  # lưu vào kho docs/ để khách mới sau này cũng nhận
-            asyncio.run(_index_pdf_for_ai(dest_doc))
+            await _index_pdf_for_ai(dest_doc)
 
             clients = load_clients()
             rows = render_batch([dest_doc], clients)
@@ -797,7 +807,7 @@ def xu_ly_don_them_tai_lieu():
             traceback.print_exc()
 
 
-def xu_ly_don_them_tai_lieu_bot():
+async def xu_ly_don_them_tai_lieu_bot():
     if not os.path.isdir(INCOMING_BOT_DOCS):
         return
     os.makedirs(BOT_DOCS_DIR, exist_ok=True)
@@ -810,7 +820,7 @@ def xu_ly_don_them_tai_lieu_bot():
             print(f"[TAI LIEU BOT] {pdf}", flush=True)
             target = _unique_path(BOT_DOCS_DIR, pdf)
             shutil.copy2(path, target)
-            asyncio.run(_index_pdf_for_ai(target))
+            await _index_pdf_for_ai(target)
             os.remove(path)
         except Exception:
             print("  LOI xu ly don tai lieu bot:", flush=True)
@@ -836,7 +846,7 @@ def xu_ly_don_xoa_khach():
             traceback.print_exc()
 
 
-def xu_ly_don_xoa_tai_lieu():
+async def xu_ly_don_xoa_tai_lieu():
     """Đơn xoá tài liệu: mỗi .txt chứa tên gốc (không đuôi) -> gỡ khỏi kho docs/."""
     if not os.path.isdir(XOA_TAILIEU):
         return
@@ -851,32 +861,39 @@ def xu_ly_don_xoa_tai_lieu():
                 removed = remove_doc(doc_base)
                 print(f"[XOÁ TÀI LIỆU] {doc_base} -> {'đã gỡ' if removed else 'không có trong docs/'}", flush=True)
                 if removed:
-                    asyncio.run(_remove_pdf_from_ai(doc_base))
+                    await _remove_pdf_from_ai(doc_base)
             os.remove(path)
         except Exception:
             print("  LỖI xử lý đơn xoá tài liệu:", flush=True)
             traceback.print_exc()
 
 
-def main():
-    print("=== HVHN watcher đang chạy. Nhấn Ctrl+C để dừng. ===", flush=True)
+
+async def main_async():
+    loop_id = id(asyncio.get_running_loop())
+    print("=== HVHN watcher dang chay. Nhan Ctrl+C de dung. ===", flush=True)
+    print(f"[watcher] event_loop={loop_id}", flush=True)
     print(f"DB: {_redact_database_url(DATABASE_URL)}", flush=True)
-    print(f"Hộp đơn khách:     {JOBS_KHACH}", flush=True)
-    print(f"Hộp đơn tài liệu:  {INCOMING_DOCS}\n", flush=True)
-    print(f"Hop don bot:        {INCOMING_BOT_DOCS}\n", flush=True)
+    print(f"Hop don khach:     {JOBS_KHACH}", flush=True)
+    print(f"Hop don tai lieu:  {INCOMING_DOCS}", flush=True)
+    print(f"Hop don bot:       {INCOMING_BOT_DOCS}", flush=True)
     while True:
         try:
-            asyncio.run(_xu_ly_don_discord())
+            await _xu_ly_don_discord()
             xu_ly_don_them_khach()
-            xu_ly_don_them_tai_lieu()
-            xu_ly_don_them_tai_lieu_bot()
+            await xu_ly_don_them_tai_lieu()
+            await xu_ly_don_them_tai_lieu_bot()
             xu_ly_don_xoa_khach()
-            xu_ly_don_xoa_tai_lieu()
-            asyncio.run(_sync_runtime_status())
-            asyncio.run(_sync_pdf_knowledge())
+            await xu_ly_don_xoa_tai_lieu()
+            await _sync_runtime_status()
+            await _sync_pdf_knowledge()
         except Exception:
             traceback.print_exc()
-        time.sleep(POLL_SECONDS)
+        await asyncio.sleep(POLL_SECONDS)
+
+
+def main():
+    asyncio.run(main_async())
 
 
 if __name__ == "__main__":
