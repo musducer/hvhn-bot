@@ -11,7 +11,7 @@ import asyncio
 import json
 import uuid
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlunparse
 
 import requests
 import asyncpg
@@ -49,6 +49,49 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_DOCS_DIR = os.getenv("HVHN_BOT_DOCS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_docs"))
 STALE_PROCESSING_MINUTES = int(os.getenv("HVHN_STALE_PROCESSING_MINUTES", "30"))
+
+DB_RETRY_BASE_SECONDS = 2
+DB_RETRY_MAX_SECONDS = 60
+_db_backoff_seconds = DB_RETRY_BASE_SECONDS
+_last_db_error = ""
+
+
+def _redact_database_url(url):
+    if not url:
+        return "<missing>"
+    parsed = urlparse(url)
+    host = parsed.hostname or "<no-host>"
+    port = f":{parsed.port}" if parsed.port else ""
+    user = parsed.username or "user"
+    return urlunparse((parsed.scheme, f"{user}:***@{host}{port}", parsed.path, "", "", ""))
+
+
+def _database_host(url):
+    try:
+        return urlparse(url).hostname or ""
+    except Exception:
+        return ""
+
+
+async def _connect_db(context="db"):
+    global _db_backoff_seconds, _last_db_error
+    if not DATABASE_URL:
+        _last_db_error = "DATABASE_URL is missing"
+        print(f"[DB] {context}: DATABASE_URL is missing")
+        return None
+    try:
+        conn = await asyncpg.connect(DATABASE_URL, timeout=20)
+        if _last_db_error:
+            print(f"[DB] reconnected host={_database_host(DATABASE_URL)}")
+        _last_db_error = ""
+        _db_backoff_seconds = DB_RETRY_BASE_SECONDS
+        return conn
+    except Exception as exc:
+        _last_db_error = f"{type(exc).__name__}: {exc}"
+        print(f"[DB] {context} failed host={_database_host(DATABASE_URL)} url={_redact_database_url(DATABASE_URL)} err={_last_db_error}; retry in {_db_backoff_seconds}s")
+        await asyncio.sleep(_db_backoff_seconds)
+        _db_backoff_seconds = min(DB_RETRY_MAX_SECONDS, _db_backoff_seconds * 2)
+        return None
 
 DOC_JOB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS hvhn_doc_jobs (
@@ -174,35 +217,52 @@ def _drive_direct_url(url):
 def _download_pdf(url, filename, target_folder):
     target = _unique_path(target_folder, filename or "tai_lieu.pdf")
     direct_url = _drive_direct_url(url)
-    with requests.Session() as session:
-        resp = session.get(direct_url, stream=True, timeout=120)
-        token = None
-        for key, value in session.cookies.items():
-            if key.startswith("download_warning"):
-                token = value
-                break
-        if token:
-            resp.close()
-            resp = session.get(direct_url, params={"confirm": token}, stream=True, timeout=120)
-        resp.raise_for_status()
+    headers = {"User-Agent": "Mozilla/5.0 HVHN-Watcher/1.0"}
+    last_error = None
+    for attempt in range(1, 5):
         tmp = target + ".part"
-        with open(tmp, "wb") as f:
-            for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                if chunk:
-                    f.write(chunk)
-        with open(tmp, "rb") as f:
-            head = f.read(5)
-        if head != b"%PDF-":
-            os.remove(tmp)
-            raise ValueError("Link không tải ra PDF thật. Hãy đặt file Google Drive ở chế độ 'Anyone with the link can view' hoặc dùng Google Form upload.")
-        os.replace(tmp, target)
-    return target
+        try:
+            with requests.Session() as session:
+                resp = session.get(direct_url, stream=True, timeout=(20, 180), headers=headers)
+                token = None
+                for key, value in session.cookies.items():
+                    if key.startswith("download_warning"):
+                        token = value
+                        break
+                if token:
+                    resp.close()
+                    resp = session.get(direct_url, params={"confirm": token}, stream=True, timeout=(20, 180), headers=headers)
+                resp.raise_for_status()
+                with open(tmp, "wb") as f:
+                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                with open(tmp, "rb") as f:
+                    head = f.read(5)
+                if head != b"%PDF-":
+                    raise ValueError("Link khong tai ra PDF that. Dat Google Drive 'Anyone with the link can view' hoac dung Google Form upload.")
+                os.replace(tmp, target)
+                print(f"[DOWNLOAD] ok attempt={attempt} file={os.path.basename(target)}")
+                return target
+        except Exception as exc:
+            last_error = exc
+            try:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
+            except OSError:
+                pass
+            wait = min(60, 2 ** attempt)
+            print(f"[DOWNLOAD] failed attempt={attempt} url={direct_url} err={type(exc).__name__}: {exc}; retry in {wait}s")
+            time.sleep(wait)
+    raise RuntimeError(f"download_failed: {type(last_error).__name__}: {last_error}")
 
 
 async def _fetch_discord_jobs():
     if not DATABASE_URL:
         return []
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await _connect_db("watcher")
+    if conn is None:
+        return []
     try:
         await conn.execute(DOC_JOB_SCHEMA)
         async with conn.transaction():
@@ -240,7 +300,9 @@ async def _fetch_discord_jobs():
 async def _mark_discord_job(job_id, status, error=None):
     if not DATABASE_URL:
         return
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await _connect_db("mark_job")
+    if conn is None:
+        return
     try:
         await conn.execute(
             """
@@ -262,16 +324,18 @@ def _materialize_discord_job(job):
         payload = (job["text_payload"] or "").strip()
         label = payload.split("\t")[-1] if payload else str(job["id"])
         _write_atomic(os.path.join(JOBS_KHACH, _job_name("discord_khach", label, ".txt")), payload.encode("utf-8"))
+        return None
     elif job_type == "add_document":
         filename = job["file_name"] or f"discord_tai_lieu_{job['id']}.pdf"
         if not filename.lower().endswith(".pdf"):
             raise ValueError("Tài liệu từ Discord không phải PDF")
         target = _unique_path(INCOMING_DOCS, filename)
         _write_atomic(target, bytes(job["file_data"] or b""))
+        return target
     elif job_type == "add_document_url":
         url = (job["text_payload"] or "").strip()
         filename = job["file_name"] or f"tai_lieu_{job['id']}.pdf"
-        _download_pdf(url, filename, INCOMING_DOCS)
+        return _download_pdf(url, filename, INCOMING_DOCS)
     elif job_type == "add_bot_document":
         filename = job["file_name"] or f"bot_tai_lieu_{job['id']}.pdf"
         if not filename.lower().endswith(".pdf"):
@@ -279,23 +343,27 @@ def _materialize_discord_job(job):
         os.makedirs(BOT_DOCS_DIR, exist_ok=True)
         target = _unique_path(BOT_DOCS_DIR, filename)
         _write_atomic(target, bytes(job["file_data"] or b""))
+        return target
     elif job_type == "add_bot_document_url":
         url = (job["text_payload"] or "").strip()
         filename = job["file_name"] or f"bot_tai_lieu_{job['id']}.pdf"
         os.makedirs(BOT_DOCS_DIR, exist_ok=True)
-        _download_pdf(url, filename, BOT_DOCS_DIR)
+        return _download_pdf(url, filename, BOT_DOCS_DIR)
     elif job_type == "remove_client":
         email = (job["text_payload"] or "").strip()
         _write_atomic(os.path.join(SHEET_XOA_KHACH, _job_name("discord_sheet_xoa_khach", email, ".txt")), email.encode("utf-8"))
         _write_atomic(os.path.join(XOA_KHACH, _job_name("discord_xoa_khach", email, ".txt")), email.encode("utf-8"))
+        return None
     elif job_type == "remove_document":
         doc_base = os.path.splitext((job["text_payload"] or "").strip())[0]
         _write_atomic(os.path.join(SHEET_XOA_TAILIEU, _job_name("discord_sheet_xoa_tailieu", doc_base, ".txt")), doc_base.encode("utf-8"))
         _write_atomic(os.path.join(XOA_TAILIEU, _job_name("discord_xoa_tailieu", doc_base, ".txt")), doc_base.encode("utf-8"))
+        return None
     elif job_type == "renew_client":
         payload = (job["text_payload"] or "").strip()
         label = payload.split("\t")[0] if payload else str(job["id"])
         _write_atomic(os.path.join(SHEET_GIAHAN_KHACH, _job_name("discord_giahan_khach", label, ".txt")), payload.encode("utf-8"))
+        return None
     else:
         raise ValueError(f"Loại đơn không hỗ trợ: {job_type}")
 
@@ -304,12 +372,16 @@ async def _xu_ly_don_discord():
     jobs = await _fetch_discord_jobs()
     for job in jobs:
         try:
-            _materialize_discord_job(job)
-            await _mark_discord_job(job["id"], "done")
-            print(f"[DISCORD] đơn #{job['id']} -> đã chuyển vào folder xử lý")
+            path = _materialize_discord_job(job)
+            final_status = "done"
+            if path and str(path).lower().endswith(".pdf"):
+                final_status = await _index_pdf_for_ai(path)
+            await _mark_discord_job(job["id"], final_status)
+            print(f"[DISCORD] don #{job['id']} -> {final_status}")
         except Exception as exc:
-            await _mark_discord_job(job["id"], "error", str(exc))
-            print(f"[DISCORD] LỖI đơn #{job['id']}: {exc}")
+            status = "download_failed" if "download_failed" in str(exc).lower() else "error"
+            await _mark_discord_job(job["id"], status, str(exc))
+            print(f"[DISCORD] LOI don #{job['id']} status={status}: {exc}")
 
 
 def _count_files(folder, suffix=None):
@@ -324,7 +396,9 @@ def _count_files(folder, suffix=None):
 async def _sync_runtime_status():
     if not DATABASE_URL:
         return
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await _connect_db("runtime_status")
+    if conn is None:
+        return
     try:
         await conn.execute(DOC_JOB_SCHEMA)
         clients = load_clients()
@@ -451,7 +525,9 @@ async def _sync_runtime_status():
 async def _set_runtime_status(key, value):
     if not DATABASE_URL:
         return
-    conn = await asyncpg.connect(DATABASE_URL)
+    conn = await _connect_db("set_status")
+    if conn is None:
+        return
     try:
         await conn.execute(DOC_JOB_SCHEMA)
         await conn.execute(
@@ -469,14 +545,17 @@ async def _set_runtime_status(key, value):
 
 async def _index_pdf_for_ai(path):
     if not DATABASE_URL:
-        return
+        return "db_failed"
     try:
         result = await index_pdf_path(DATABASE_URL, path)
-        print(f"[AI PDF] {os.path.basename(path)} -> {result['chunks']} đoạn")
-        await _set_runtime_status("ai_pdf_last_indexed", f"{result['title']} ({result['chunks']} đoạn)")
-    except Exception:
-        print("  LỖI nạp PDF vào kho tri thức AI:")
+        status = "zero_chunks" if result["chunks"] == 0 else "indexed"
+        print(f"[AI PDF] {os.path.basename(path)} -> {result['chunks']} doan status={status}")
+        await _set_runtime_status("ai_pdf_last_indexed", f"{result['title']} ({result['chunks']} doan, {status})")
+        return status
+    except Exception as exc:
+        print(f"[AI PDF] db_failed/index_failed file={os.path.basename(path)} err={type(exc).__name__}: {exc}")
         traceback.print_exc()
+        return "db_failed"
 
 
 async def _remove_pdf_from_ai(doc_base):
@@ -631,6 +710,7 @@ def xu_ly_don_xoa_tai_lieu():
 
 def main():
     print("=== HVHN watcher đang chạy. Nhấn Ctrl+C để dừng. ===")
+    print(f"DB: {_redact_database_url(DATABASE_URL)}")
     print(f"Hộp đơn khách:     {JOBS_KHACH}")
     print(f"Hộp đơn tài liệu:  {INCOMING_DOCS}\n")
     print(f"Hop don bot:        {INCOMING_BOT_DOCS}\n")

@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS ai_pdf_chunks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_ai_pdf_chunks_title_lower ON ai_pdf_chunks (lower(title));
+CREATE INDEX IF NOT EXISTS idx_ai_pdf_chunks_fts_simple
+ON ai_pdf_chunks USING GIN (to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(content, '')));
 """
 
 
@@ -218,6 +220,16 @@ def build_chunks(text: str) -> list[str]:
 
 async def ensure_pdf_knowledge_schema(db) -> None:
     await db.execute(PDF_KNOWLEDGE_SCHEMA)
+    try:
+        await db.execute("CREATE EXTENSION IF NOT EXISTS pg_trgm")
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_pdf_chunks_trgm_content ON ai_pdf_chunks USING GIN (content gin_trgm_ops)"
+        )
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_ai_pdf_chunks_trgm_title ON ai_pdf_chunks USING GIN (title gin_trgm_ops)"
+        )
+    except Exception as exc:
+        print(f"[AI PDF] pg_trgm unavailable; using FTS/keyword fallback: {exc}")
 
 
 async def index_pdf_bytes(db, title: str, data: bytes, *, source: str = "", created_by: int | None = None) -> dict:
@@ -383,11 +395,11 @@ async def sync_pdf_folder(database_url: str, folder: str | os.PathLike) -> dict:
 async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_DEFAULT) -> str:
     await ensure_pdf_knowledge_schema(db)
     limit = max(1, min(limit, _env_int("HVHN_PDF_SEARCH_LIMIT_MAX", 24, minimum=4)))
-    terms = [t.lower() for t in re.findall(r"[\wÀ-ỹA-Za-z0-9]{3,}", query, flags=re.UNICODE)][:12]
+    terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:16]
     if not terms:
         rows = await db.fetch(
             """
-            SELECT title, content, source, chunk_index
+            SELECT title, content, source, chunk_index, 0::float AS rank
             FROM ai_pdf_chunks
             ORDER BY updated_at DESC
             LIMIT $1
@@ -396,24 +408,47 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
         )
     else:
         patterns = [f"%{term}%" for term in terms]
-        rows = await db.fetch(
-            """
-            SELECT title, content, source, chunk_index
-            FROM ai_pdf_chunks
-            WHERE lower(title) LIKE ANY($1::text[])
-               OR lower(content) LIKE ANY($1::text[])
-            ORDER BY updated_at DESC
-            LIMIT $2
-            """,
-            patterns,
-            _env_int("HVHN_PDF_SEARCH_CANDIDATE_LIMIT", PDF_SEARCH_CANDIDATE_LIMIT, minimum=40),
-        )
+        candidate_limit = _env_int("HVHN_PDF_SEARCH_CANDIDATE_LIMIT", PDF_SEARCH_CANDIDATE_LIMIT, minimum=40)
+        ts_query = " ".join(terms)
+        try:
+            rows = await db.fetch(
+                """
+                WITH q AS (SELECT websearch_to_tsquery('simple', $1) AS query)
+                SELECT title, content, source, chunk_index,
+                       ts_rank_cd(
+                         to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(content, '')),
+                         q.query
+                       ) AS rank
+                FROM ai_pdf_chunks, q
+                WHERE to_tsvector('simple', coalesce(title, '') || ' ' || coalesce(content, '')) @@ q.query
+                   OR lower(title) LIKE ANY($2::text[])
+                   OR lower(content) LIKE ANY($2::text[])
+                ORDER BY rank DESC
+                LIMIT $3
+                """,
+                ts_query,
+                patterns,
+                candidate_limit,
+            )
+        except Exception as exc:
+            print(f"[AI PDF] FTS search fallback: {exc}")
+            rows = await db.fetch(
+                """
+                SELECT title, content, source, chunk_index, 0::float AS rank
+                FROM ai_pdf_chunks
+                WHERE lower(title) LIKE ANY($1::text[])
+                   OR lower(content) LIKE ANY($1::text[])
+                LIMIT $2
+                """,
+                patterns,
+                candidate_limit,
+            )
 
     def score(row) -> int:
         haystack = f"{row['title']} {row['content']}".lower()
         return sum(haystack.count(term) for term in terms) + sum(3 for term in terms if term in row["title"].lower())
 
-    ranked = sorted(rows, key=score, reverse=True)[:limit]
+    ranked = sorted(rows, key=lambda row: (float(row["rank"] or 0), score(row)), reverse=True)[:limit]
     doc_refs = {}
     for row in ranked:
         title = _source_label(row["source"] or "", row["title"])
@@ -423,11 +458,11 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
     blocks = []
     if doc_refs:
         blocks.append(
-            "TÀI LIỆU THAM KHẢO PDF LIÊN QUAN (chỉ nêu các tài liệu thật sự dùng):\n"
+            "TAI LIEU PDF LIEN QUAN (chi neu tai lieu that su dung):\n"
             + "\n".join(f"[{ref_no}] {title}" for title, ref_no in doc_refs.items())
         )
         blocks.append(
-            "Quy ước: [P...] là mã đoạn nội bộ. Khi trả lời người dùng, chỉ dẫn PDF bằng số tài liệu [1], [2]... và cuối câu trả lời chỉ nêu TÀI LIỆU THAM KHẢO liên quan đã dùng."
+            "Quy uoc: [P...] la ma doan noi bo; [1], [2] la so tai lieu PDF co the neu trong ghi chu nguon neu can."
         )
 
     for index, row in enumerate(ranked, start=1):
@@ -438,8 +473,8 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
         ref_title = _source_label(source, row["title"])
         ref_no = doc_refs[ref_title]
         blocks.append(
-            f"[P{index}] Tài liệu [{ref_no}] - {row['title']} - đoạn {row['chunk_index']}\n"
-            f"Nguồn PDF: {source}\n{content}"
+            f"[P{index}] Tai lieu [{ref_no}] - {row['title']} - doan {row['chunk_index']}\n"
+            f"Nguon PDF: {source}\n{content}"
         )
     return "\n\n".join(blocks)
 

@@ -19,7 +19,7 @@ DEFAULT_MIRROR_PARENT = Path(MIRROR_SOURCE).parent
 ADMIN_ROLE_ENV = "HVHN_ADMIN_ROLE"
 MIRROR_PARENT_ENV = "HVHN_MIRROR_PARENT"
 MAX_PDF_BYTES = int(os.getenv("HVHN_MAX_PDF_MB", "300")) * 1024 * 1024
-INLINE_INDEX_MAX_BYTES = int(os.getenv("HVHN_INLINE_INDEX_MAX_MB", "0")) * 1024 * 1024
+INLINE_INDEX_MAX_BYTES = int(os.getenv("HVHN_INLINE_INDEX_MAX_MB", "25")) * 1024 * 1024
 PDF_URL_PATTERN = re.compile(r"^https?://", re.I)
 
 
@@ -340,7 +340,7 @@ class DocumentStorage(commands.Cog):
         }
         pending = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'pending'")
         processing = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'processing'")
-        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'error'")
+        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status IN ('error', 'download_failed', 'db_failed', 'ocr_failed')")
         lines = [
             "queue DB: OK",
             f"đang chờ: {pending} | đang xử lý: {processing} | lỗi: {failed}",
@@ -358,14 +358,14 @@ class DocumentStorage(commands.Cog):
         status = await self._status_map()
         pending = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'pending'")
         processing = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'processing'")
-        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'error'")
+        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status IN ('error', 'download_failed', 'db_failed', 'ocr_failed')")
         sheet_clients = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients")
         sheet_docs = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_docs")
         failed_rows = await self.bot.db.fetch(
             """
             SELECT id, job_type, coalesce(error, '') AS error
             FROM hvhn_doc_jobs
-            WHERE status = 'error'
+            WHERE status IN ('error', 'download_failed', 'db_failed', 'ocr_failed', 'zero_chunks')
             ORDER BY id DESC
             LIMIT 5
             """
@@ -424,7 +424,7 @@ class DocumentStorage(commands.Cog):
         rows = await self.bot.db.fetch(
             """
             SELECT id FROM hvhn_doc_jobs
-            WHERE status = 'error'
+            WHERE status IN ('error', 'download_failed', 'db_failed', 'ocr_failed')
             ORDER BY id ASC
             LIMIT $1
             """,
@@ -541,7 +541,7 @@ class DocumentStorage(commands.Cog):
         expired = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients WHERE coalesce(status, '') LIKE 'Hết hạn%' OR coalesce(status, '') = 'Đã gỡ quyền'")
         docs = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_docs")
         pending = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'pending'")
-        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'error'")
+        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status IN ('error', 'download_failed', 'db_failed', 'ocr_failed')")
         soon = await self.bot.db.fetch(
             """
             SELECT name, email, days_left

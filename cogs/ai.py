@@ -11,8 +11,8 @@ from discord import app_commands
 from discord.ext import commands
 from pdf_knowledge import search_pdf_knowledge
 
-GROQ_MODEL = "llama-3.3-70b-versatile"
-GEMINI_MODEL = "gemini-2.0-flash"
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 MAX_DISCORD_LEN = 3800
 WEB_RESULT_LIMIT = 5
 WEB_CONTEXT_LIMIT = 7
@@ -130,6 +130,7 @@ class AI(commands.Cog):
         self.gemini_keys = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
         self.serper_key = os.getenv("SERPER_API_KEY", "").strip()
         self.tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
+        self.last_ai_errors: list[str] = []
 
     async def ask_groq(
         self,
@@ -154,7 +155,8 @@ class AI(commands.Cog):
             if resp.status == 429:
                 return False, "RATE_LIMIT"
             if resp.status != 200:
-                return False, f"HTTP {resp.status}"
+                detail = (await resp.text())[:500]
+                return False, f"HTTP {resp.status}: {detail}"
             data = await resp.json()
             return True, data["choices"][0]["message"]["content"].strip()
 
@@ -176,7 +178,8 @@ class AI(commands.Cog):
             if resp.status == 429:
                 return False, "RATE_LIMIT"
             if resp.status != 200:
-                return False, f"HTTP {resp.status}"
+                detail = (await resp.text())[:500]
+                return False, f"HTTP {resp.status}: {detail}"
             data = await resp.json()
             try:
                 return True, data["candidates"][0]["content"]["parts"][0]["text"].strip()
@@ -189,30 +192,59 @@ class AI(commands.Cog):
         system_prompt: str = SYSTEM_PROMPT,
         temperature: float = 0.2,
     ) -> str | None:
+        errors: list[str] = []
         async with aiohttp.ClientSession() as session:
             for key in self.groq_keys:
                 try:
                     ok, content = await self.ask_groq(session, key, prompt, system_prompt, temperature)
                     if ok:
+                        self.last_ai_errors = []
+                        print(f"[ai] model=groq/{GROQ_MODEL} ok")
                         return content
-                    if content != "RATE_LIMIT":
-                        print(f"[ai] Groq error: {content}")
+                    errors.append(f"Groq {content}")
+                    print(f"[ai] Groq error: {content}")
                 except Exception as exc:
-                    print(f"[ai] Groq exception: {exc}")
+                    msg = f"Groq exception: {type(exc).__name__}: {exc}"
+                    errors.append(msg)
+                    print(f"[ai] {msg}")
 
             for key in self.gemini_keys:
                 try:
                     ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature)
                     if ok:
+                        self.last_ai_errors = []
+                        print(f"[ai] model=gemini/{GEMINI_MODEL} ok")
                         return content
-                    if content != "RATE_LIMIT":
-                        print(f"[ai] Gemini error: {content}")
+                    errors.append(f"Gemini {content}")
+                    print(f"[ai] Gemini error: {content}")
                 except Exception as exc:
-                    print(f"[ai] Gemini exception: {exc}")
+                    msg = f"Gemini exception: {type(exc).__name__}: {exc}"
+                    errors.append(msg)
+                    print(f"[ai] {msg}")
+        self.last_ai_errors = errors[-8:]
         return None
+
 
     def _has_ai(self) -> bool:
         return bool(self.groq_keys or self.gemini_keys)
+
+    def _ai_error_message(self) -> str:
+        joined = " | ".join(self.last_ai_errors)
+        lowered = joined.lower()
+        if not joined:
+            return "AI loi API nhung chua co chi tiet trong log."
+        if "401" in lowered or "403" in lowered or "api key" in lowered:
+            reason = "API key sai hoac het quyen."
+        elif "429" in lowered or "rate_limit" in lowered:
+            reason = "API key het quota hoac bi rate limit."
+        elif "404" in lowered or "model" in lowered:
+            reason = "Ten model khong hop le hoac model da doi."
+        elif "timeout" in lowered:
+            reason = "API phan hoi qua cham/timeout."
+        else:
+            reason = "API provider tra loi."
+        return f"{reason} Xem Render logs dong `[ai] ...` de biet chi tiet."
+
 
     def _is_admin(self, interaction: discord.Interaction) -> bool:
         if not isinstance(interaction.user, discord.Member):
@@ -228,30 +260,55 @@ class AI(commands.Cog):
             return ""
 
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
-        terms = [t for t in query.lower().split() if len(t) >= 3][:8]
+        terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:12]
         if not terms:
             rows = await self.bot.db.fetch(
                 "SELECT category, title, content FROM ai_knowledge WHERE approved = TRUE ORDER BY created_at DESC LIMIT $1",
                 limit,
             )
         else:
-            patterns = [f"%{term}%" for term in terms[:5]]
-            rows = await self.bot.db.fetch(
-                """
-                SELECT category, title, content
-                FROM ai_knowledge
-                WHERE approved = TRUE
-                  AND (
-                    lower(title) LIKE ANY($1::text[])
-                    OR lower(content) LIKE ANY($1::text[])
-                    OR lower(category) LIKE ANY($1::text[])
-                  )
-                ORDER BY created_at DESC
-                LIMIT $2
-                """,
-                patterns,
-                limit,
-            )
+            patterns = [f"%{term}%" for term in terms]
+            try:
+                rows = await self.bot.db.fetch(
+                    """
+                    WITH q AS (SELECT websearch_to_tsquery('simple', $1) AS query)
+                    SELECT category, title, content,
+                           ts_rank_cd(
+                             to_tsvector('simple', coalesce(category, '') || ' ' || coalesce(title, '') || ' ' || coalesce(content, '')),
+                             q.query
+                           ) AS rank
+                    FROM ai_knowledge, q
+                    WHERE approved = TRUE
+                      AND (
+                        to_tsvector('simple', coalesce(category, '') || ' ' || coalesce(title, '') || ' ' || coalesce(content, '')) @@ q.query
+                        OR lower(title) LIKE ANY($2::text[])
+                        OR lower(content) LIKE ANY($2::text[])
+                        OR lower(category) LIKE ANY($2::text[])
+                      )
+                    ORDER BY rank DESC
+                    LIMIT $3
+                    """,
+                    " ".join(terms),
+                    patterns,
+                    limit,
+                )
+            except Exception as exc:
+                print(f"[ai] manual knowledge FTS fallback: {exc}")
+                rows = await self.bot.db.fetch(
+                    """
+                    SELECT category, title, content, 0::float AS rank
+                    FROM ai_knowledge
+                    WHERE approved = TRUE
+                      AND (
+                        lower(title) LIKE ANY($1::text[])
+                        OR lower(content) LIKE ANY($1::text[])
+                        OR lower(category) LIKE ANY($1::text[])
+                      )
+                    LIMIT $2
+                    """,
+                    patterns,
+                    limit,
+                )
         if not rows:
             return ""
 
@@ -262,6 +319,29 @@ class AI(commands.Cog):
                 content = content[:900] + "..."
             chunks.append(f"[S{index}] [{row['category']}] {row['title']}\n{content}")
         return "\n\n".join(chunks)
+
+    async def _feedback_context(self, query: str, limit: int = 4) -> str:
+        terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:8]
+        if not terms:
+            return ""
+        patterns = [f"%{term}%" for term in terms]
+        rows = await self.bot.db.fetch(
+            """
+            SELECT prompt, correction
+            FROM ai_feedback
+            WHERE rating = 'needs_fix'
+              AND correction IS NOT NULL
+              AND (lower(prompt) LIKE ANY($1::text[]) OR lower(correction) LIKE ANY($1::text[]))
+            ORDER BY id DESC
+            LIMIT $2
+            """,
+            patterns,
+            limit,
+        )
+        if not rows:
+            return ""
+        return "\n\n".join(f"[F{i}] Loi giao vien da sua:\n{row['correction']}" for i, row in enumerate(rows, 1))
+
 
     @staticmethod
     def _clean_text(text: str) -> str:
@@ -310,20 +390,13 @@ class AI(commands.Cog):
             "query": query,
             "search_depth": "basic",
             "max_results": WEB_RESULT_LIMIT,
-            "include_answer": True,
+            "include_answer": False,
         }
         async with session.post("https://api.tavily.com/search", json=payload, timeout=15) as resp:
             if resp.status != 200:
                 return []
             data = await resp.json()
         results = []
-        answer = self._clean_text(data.get("answer") or "")
-        if answer:
-            results.append({
-                "title": "Tavily tổng hợp nhanh",
-                "url": "https://tavily.com/",
-                "snippet": answer[:700],
-            })
         for item in data.get("results", [])[:WEB_RESULT_LIMIT]:
             link = item.get("url") or ""
             title = self._clean_text(item.get("title") or "")
@@ -356,8 +429,26 @@ class AI(commands.Cog):
                 break
         return results
 
-    async def _web_context(self, query: str, mode: str) -> str:
+    @staticmethod
+    def _plain_text(value: str) -> str:
+        value = unicodedata.normalize("NFD", value or "")
+        return "".join(ch for ch in value if unicodedata.category(ch) != "Mn").lower()
+
+    @staticmethod
+    def _needs_web(query: str, mode: str, has_local_context: bool) -> bool:
+        q = AI._plain_text(query)
         if mode == "user_text_only":
+            return False
+        current_markers = ("moi nhat", "hien nay", "hom nay", "2025", "2026", "tin", "luat", "diem chuan", "lich", "gia", "su kien")
+        source_markers = ("dan nguon", "nguon", "kiem chung", "tra cuu", "ai la", "khi nao", "o dau")
+        if any(marker in q for marker in current_markers + source_markers):
+            return True
+        return not has_local_context and len(q.split()) >= 6
+
+
+    async def _web_context(self, query: str, mode: str, has_local_context: bool = False) -> str:
+        if not self._needs_web(query, mode, has_local_context):
+            print(f"[ai] web=skip mode={mode} local={has_local_context}")
             return ""
 
         async with aiohttp.ClientSession() as session:
@@ -375,13 +466,15 @@ class AI(commands.Cog):
         for item in results:
             deduped.setdefault(item["url"], item)
         results = list(deduped.values())
+        print(f"[ai] web_results={len(results[:WEB_CONTEXT_LIMIT])}")
 
         chunks = []
         for index, item in enumerate(results[:WEB_CONTEXT_LIMIT], start=1):
             snippet = item["snippet"][:850]
-            trust = "nguồn có tín hiệu đáng tin" if self._source_score(item["url"]) else "cần kiểm chứng"
-            chunks.append(f"[W{index}] {item['title']}\nURL: {item['url']}\nĐộ tin cậy: {trust}\nTóm tắt: {snippet}")
+            trust = "nguon dang tin hon" if self._source_score(item["url"]) else "can kiem chung"
+            chunks.append(f"[W{index}] {item['title']}\nURL: {item['url']}\nDo tin cay: {trust}\nTom tat: {snippet}")
         return "\n\n".join(chunks)
+
 
     @staticmethod
     def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str) -> str:
@@ -393,25 +486,25 @@ class AI(commands.Cog):
             if LITERATURE_SYSTEM_INSTRUCTIONS else ""
         )
         return (
-            "DAY LA LENH CAN TRA LOI HAY, DUNG TRONG TAM, CO CAN CU.\n"
+            "Ban la Then, tro giang AI mon Ngu van cua HVHN. Luon tra loi bang tieng Viet co dau, tru khi nguoi dung yeu cau ngon ngu khac.\n"
             f"CHE DO: {mode}\n"
-            f"{literature_rules}\n"
-            "KHO PDF/TRI THUC HVHN DA TRUY XUAT (chi dung lam can cu noi bo, khong can neu ten nguon ra cau tra loi):\n"
+            f"{literature_rules}"
+            "KHO PDF/TRI THUC/FEEDBACK HVHN DA TRUY XUAT:\n"
             f"{source_block}\n\n"
-            "NGUON WEB VUA TRA CUU (chi dung lam can cu noi bo, khong can neu link ra cau tra loi):\n"
+            "NGUON WEB DA TRA CUU (neu co):\n"
             f"{web_block}\n\n"
-            "QUY TAC TRA LOI BAT BUOC:\n"
-            "- Tra loi thang vao cau hoi, khong mo bang danh sach nguon.\n"
-            "- Khong bia tac gia, tac pham, nhan vat, nhan dinh phe binh, trich dan, nam thang, hoan canh sang tac.\n"
-            "- Khong hien ma nguon noi bo nhu [P1], [1], [S1], [W1], URL, hoac muc TAI LIEU THAM KHAO, tru khi nguoi dung hoi rieng nguon.\n"
-            "- Van phai tu kiem chung bang kho PDF/tri thuc/web trong prompt. Neu du lieu khong du, noi ro 'chua du du lieu de khang dinh'.\n"
-            "- Khong dat trong ngoac kep bat ky cau nhan dinh/trich dan nao neu khong thay nguyen van trong du lieu duoc cung cap.\n"
-            "- Ba nguon PDF doc quyen, PDF rieng cho bot/tri thuc HVHN, va web ngang nhau; hay doi chieu va tong hop, khong khoa cung vao mot nguon.\n"
-            "- Khi phan tich van hoc, chia ro: luan diem chinh, noi dung, nghe thuat, lien he mo rong. Van phong giau hinh anh nhung lap luan phai sac.\n"
-            "- Cau don gian tra loi gon; cau can phan tich tra loi day dan, co lop lang.\n\n"
+            "QUY TAC BAT BUOC:\n"
+            "- Khong bia tac gia, tac pham, nhan vat, nam thang, hoan canh sang tac, trich dan, nhan dinh phe binh.\n"
+            "- Chi dat trong ngoac kep neu thay nguyen van trong van ban/context.\n"
+            "- Neu context khong du de khang dinh, phai noi ro: chua du du lieu de khang dinh.\n"
+            "- Duoc neu ghi chu nguon ngan gon khi cau tra loi mang tinh su kien/van hoc/can kiem chung.\n"
+            "- Khong hien ma noi bo [P1], [S1], [W1] hoac URL dai; neu can, chi neu ten tai lieu/nguon ngan gon.\n"
+            "- Tra loi thang vao cau hoi, sau do moi ghi can cu/nguon neu that su can.\n"
+            "- Khong dung web neu kho HVHN da du; web chi bo sung thong tin thoi su/kiem chung.\n\n"
             "YEU CAU NGUOI DUNG:\n"
             f"{prompt}"
         )
+
 
     @staticmethod
     def _has_grounding_footer(answer: str) -> bool:
@@ -474,16 +567,34 @@ class AI(commands.Cog):
         lines.extend(f"[{num}] {title}" for num, title in selected)
         return answer.rstrip() + "\n".join(lines)
 
+    async def _verify_answer(self, answer: str, prompt: str, knowledge: str, web_context: str, mode: str) -> str:
+        if not answer:
+            return answer
+        verifier_prompt = (
+            "Kiem chung cau tra loi sau bang dung context duoc cung cap. "
+            "Hay giu cau dung, xoa hoac viet lai moi khang dinh khong du can cu thanh 'chua du du lieu de khang dinh'. "
+            "Tuyet doi khong them tac gia/tac pham/nam/trich dan/nhan dinh moi. "
+            "Khong hien ma noi bo [P1]/[S1]/[W1] hoac URL dai. Tra lai ban da sua, tieng Viet.\n\n"
+            f"CAU HOI/PROMPT:\n{prompt}\n\n"
+            f"CONTEXT HVHN:\n{knowledge or 'KHONG CO'}\n\n"
+            f"WEB:\n{web_context or 'KHONG CO'}\n\n"
+            f"CAU TRA LOI CAN KIEM:\n{answer}"
+        )
+        verified = await self.generate(verifier_prompt, THEN_SYSTEM_PROMPT, temperature=0.0)
+        if verified:
+            print(f"[ai] verifier=ok mode={mode}")
+            return verified
+        print(f"[ai] verifier=skipped mode={mode}")
+        return answer
+
     async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
-        answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.08)
+        answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.05)
         needs_repair = bool(answer) and self._looks_like_source_dump(answer)
         if answer and needs_repair:
             repair_prompt = (
-                "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon, "
-                "khong hien citation/noi bo/URL/muc tai lieu tham khao. "
-                "Khong them thong tin moi ngoai KHO PDF/TRI THUC HVHN/NGUON WEB da cung cap. "
-                "Neu du lieu khong du, noi ro chua du du lieu de khang dinh.\n\n"
+                "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon. "
+                "Khong them thong tin moi ngoai context. Neu du lieu khong du, noi ro chua du du lieu de khang dinh.\n\n"
                 f"CAU TRA LOI CAN SUA:\n{answer}"
             )
             repaired = await self.generate(
@@ -494,31 +605,22 @@ class AI(commands.Cog):
             if repaired:
                 answer = repaired
         if answer:
-            answer = self._strip_visible_sources(answer)
+            answer = await self._verify_answer(answer, prompt, knowledge, web_context, mode)
+            answer = self._strip_internal_markers(answer)
         return answer, full_prompt
 
-    @staticmethod
-    def _strip_visible_sources(answer: str) -> str:
-        def plain(value: str) -> str:
-            value = unicodedata.normalize("NFD", value)
-            value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn")
-            return value.lower()
 
+    @staticmethod
+    def _strip_internal_markers(answer: str) -> str:
         lines = []
-        skip_rest = False
         for line in answer.splitlines():
-            lower = plain(line.strip())
-            if lower.startswith(("tai lieu tham khao", "nguon:")):
-                skip_rest = True
-                continue
-            if skip_rest:
-                if not line.strip():
-                    continue
-                if re.match(r"^\s*([#*_-]|\d+[.)])", line):
-                    continue
-            line = re.sub(r"\s*\[(?:P|S|W)?\d+\]", "", line)
-            lines.append(line)
+            line = re.sub(r"\s*\[(?:P|S|W)\d+\]", "", line)
+            line = re.sub(r"URL:\s*https?://\S+", "", line)
+            lines.append(line.rstrip())
         return "\n".join(lines).strip()
+
+    _strip_visible_sources = _strip_internal_markers
+
 
     async def _then_answer(self, interaction: discord.Interaction, title: str, user_prompt: str, prompt: str, mode: str):
         if not self._has_ai():
@@ -528,16 +630,21 @@ class AI(commands.Cog):
         await interaction.response.defer(thinking=True)
         pdf_knowledge = await self._pdf_knowledge_context(user_prompt)
         manual_knowledge = await self._knowledge_context(user_prompt)
+        feedback_knowledge = await self._feedback_context(user_prompt)
         knowledge_parts = []
         if pdf_knowledge:
             knowledge_parts.append("KHO PDF HVHN:\n" + pdf_knowledge)
         if manual_knowledge:
-            knowledge_parts.append("TRI THỨC HVHN THỦ CÔNG:\n" + manual_knowledge)
+            knowledge_parts.append("TRI THUC HVHN THU CONG:\n" + manual_knowledge)
+        if feedback_knowledge:
+            knowledge_parts.append("GOP Y GIAO VIEN DA SUA TRUOC DAY:\n" + feedback_knowledge)
         knowledge = "\n\n".join(knowledge_parts)
-        web_context = await self._web_context(user_prompt, mode)
+        has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
+        web_context = await self._web_context(user_prompt, mode, has_local_context)
+        print(f"[ai] query={user_prompt[:120]!r} mode={mode} pdf={bool(pdf_knowledge)} manual={bool(manual_knowledge)} feedback={bool(feedback_knowledge)} web={bool(web_context)}")
         answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode)
         if answer is None:
-            await interaction.followup.send("AI đang quá tải hoặc lỗi API. Thử lại sau ít phút.")
+            await interaction.followup.send(self._ai_error_message())
             return
 
         if len(answer) > MAX_DISCORD_LEN:
