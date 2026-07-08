@@ -453,10 +453,15 @@ async def sync_pdf_folder(database_url: str, folder: str | os.PathLike) -> dict:
 
 async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_DEFAULT) -> dict:
     await ensure_pdf_knowledge_schema(db)
-    evidence_limit = max(1, min(limit, _env_int("HVHN_PDF_EVIDENCE_LIMIT_MAX", 8, minimum=4)))
+    evidence_limit = max(1, min(limit, _env_int("HVHN_PDF_EVIDENCE_LIMIT_MAX", 20, minimum=4)))
     candidate_limit = _env_int("HVHN_PDF_SEARCH_CANDIDATE_LIMIT", PDF_SEARCH_CANDIDATE_LIMIT, minimum=80)
     features = _query_features(query)
     terms = features["terms"][:16]
+    raw_terms = []
+    for term in re.findall(r"[\wÀ-ỹ]{3,}", (query or "").lower(), flags=re.UNICODE):
+        if term not in raw_terms:
+            raw_terms.append(term)
+    raw_terms = raw_terms[:16]
     if not terms:
         rows = await db.fetch(
             """
@@ -468,8 +473,12 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
             candidate_limit,
         )
     else:
-        patterns = [f"%{term}%" for term in terms]
-        ts_query = " ".join(terms)
+        search_terms = []
+        for term in raw_terms + terms:
+            if term and term not in search_terms:
+                search_terms.append(term)
+        patterns = [f"%{term}%" for term in search_terms]
+        ts_query = " ".join(raw_terms or terms)
         try:
             rows = await db.fetch(
                 """
@@ -575,6 +584,7 @@ async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMI
                 "matched_keywords": score_info["matched_keywords"],
                 "missing_keywords": score_info["missing_keywords"],
                 "score": score_info["score"],
+                "content": raw_content,
                 "excerpt": content,
                 "first_500": raw_content[:500],
             }

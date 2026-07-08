@@ -26,6 +26,8 @@ VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 RETRIEVAL_DEBUG = os.getenv("HVHN_RETRIEVAL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_COMMAND_TIMEOUT_SECONDS = int(os.getenv("HVHN_DEBUG_COMMAND_TIMEOUT_SECONDS", "25"))
+PDF_DEFAULT_LIMIT = int(os.getenv("HVHN_PDF_DEFAULT_LIMIT", "7"))
+PDF_AGGREGATE_LIMIT = int(os.getenv("HVHN_PDF_AGGREGATE_LIMIT", "16"))
 TRUSTED_SOURCE_HINTS = (
     ".gov.vn",
     ".edu.vn",
@@ -557,6 +559,34 @@ class AI(commands.Cog):
         return [t for t in re.findall(r"[a-z0-9]{3,}", plain)[:limit]]
 
     @classmethod
+    def _important_query_terms(cls, query: str, limit: int = 10) -> list[str]:
+        stop = {
+            "hay", "theo", "tai", "lieu", "nap", "cho", "biet", "la", "gi", "ve", "cua", "mot", "cac",
+            "nhung", "moi", "can", "dung", "trong", "duoc", "voi", "neu", "hoi", "van", "chuong",
+            "nhan", "dinh", "tong", "hop", "trich", "dan", "nguyen", "van", "chep",
+        }
+        terms = []
+        for term in cls._query_terms(query, 32):
+            if term not in stop and term not in terms:
+                terms.append(term)
+        return terms[:limit]
+
+    @classmethod
+    def _request_profile(cls, query: str) -> dict:
+        q = cls._plain_text(query)
+        quote = any(marker in q for marker in (
+            "chep nguyen van", "nguyen van", "dung tung chu", "trich dan", "trich nguyen", "chep lai",
+        ))
+        aggregate = any(marker in q for marker in (
+            "tong hop", "tat ca", "moi nhan dinh", "toan bo", "liet ke", "gom lai", "he thong",
+        ))
+        document_only = any(marker in q for marker in (
+            "theo tai lieu", "tai lieu da nap", "trong tai lieu", "kho pdf", "da nap",
+            "chep nguyen van", "nguyen van", "trich dan",
+        ))
+        return {"quote": quote, "aggregate": aggregate, "document_only": document_only}
+
+    @classmethod
     def _retrieval_hit(cls, query: str, pdf_meta: dict) -> bool:
         terms = cls._query_terms(query)
         if not terms:
@@ -624,9 +654,9 @@ class AI(commands.Cog):
             print(f"[ai] PDF knowledge exception: {exc}", flush=True)
             return ""
 
-    async def _pdf_retrieval(self, query: str) -> dict:
+    async def _pdf_retrieval(self, query: str, *, limit: int = PDF_DEFAULT_LIMIT) -> dict:
         try:
-            return await retrieve_pdf_knowledge(self.bot.db, query, limit=5)
+            return await retrieve_pdf_knowledge(self.bot.db, query, limit=limit)
         except Exception as exc:
             print(f"[ai] PDF retrieval exception: {exc}", flush=True)
             return {"context": "", "candidate_count": 0, "selected_count": 0, "top_score": 0, "chunks": [], "error": str(exc)}
@@ -882,6 +912,10 @@ class AI(commands.Cog):
             f"{web_block}\n\n"
             "QUY TAC BAT BUOC:\n"
             "- Khong bia tac gia, tac pham, nhan vat, nam thang, hoan canh sang tac, trich dan, nhan dinh phe binh.\n"
+            "- Neu KHO PDF/TRI THUC co noi dung lien quan, chi duoc tra loi tu KHO PDF/TRI THUC do; khong dung tri nho ngoai.\n"
+            "- Neu nguoi dung hoi 'chep nguyen van', 'trich dan', 'nguyen van', phai giu dung tung chu tu context; khong dien giai/paraphrase.\n"
+            "- Neu nguoi dung hoi 'tong hop', 'tat ca', 'moi nhan dinh', phai di qua tat ca doan [P...] duoc cap va rut ra moi y/trich dan lien quan; khong dung sau 1 doan.\n"
+            "- Voi cau hoi theo tai lieu da nap, neu context co evidence thi khong duoc tra loi bang kien thuc chung hay tom tat chung chung.\n"
             "- Chi dat trong ngoac kep neu thay nguyen van trong van ban/context.\n"
             "- Neu context khong du de khang dinh, phai noi ro: chua du du lieu de khang dinh.\n"
             "- Neu KHO PDF/TRI THUC co bang chung lien quan, bat buoc tra loi dua tren bang chung do; khong duoc tu choi chung chung.\n"
@@ -1071,6 +1105,101 @@ class AI(commands.Cog):
         return "Chưa có evidence đủ rõ để trả lời."
 
 
+    @classmethod
+    def _sentence_units(cls, text: str) -> list[str]:
+        text = re.sub(r"\s+", " ", text or "").strip()
+        if not text:
+            return []
+        units = re.split(r"(?<=[.!?])\s+|(?<=\")\s+", text)
+        return [unit.strip() for unit in units if len(unit.strip()) >= 20]
+
+    @classmethod
+    def _quoted_units(cls, text: str) -> list[str]:
+        text = re.sub(r"\s+", " ", text or "").strip()
+        quotes = []
+        quote_pairs = [(chr(8220), chr(8221)), ('"', '"'), ("'", "'")]
+        for open_q, close_q in quote_pairs:
+            start = 0
+            while True:
+                left = text.find(open_q, start)
+                if left < 0:
+                    break
+                right = text.find(close_q, left + 1)
+                if right < 0:
+                    break
+                quote = text[left + 1:right].strip()
+                if 20 <= len(quote) <= 700 and quote not in quotes:
+                    quotes.append(quote)
+                start = right + 1
+        return quotes
+
+    @classmethod
+    def _unit_score(cls, query: str, text: str) -> int:
+        haystack = cls._plain_text(text)
+        return sum(1 for term in cls._important_query_terms(query, 16) if term in haystack)
+
+    @classmethod
+    def _extract_units_from_chunk(cls, query: str, chunk: dict, *, quote_mode: bool, max_units: int = 4) -> list[str]:
+        content = chunk.get("content") or chunk.get("excerpt") or chunk.get("first_500") or ""
+        candidates = cls._quoted_units(content) if quote_mode else []
+        if not candidates:
+            candidates = cls._sentence_units(content)
+        scored = []
+        for unit in candidates:
+            score = cls._unit_score(query, unit)
+            if score > 0 or quote_mode:
+                scored.append((score, unit))
+        if not scored and candidates:
+            scored = [(0, unit) for unit in candidates[:max_units]]
+        scored.sort(key=lambda item: (item[0], len(item[1])), reverse=True)
+        selected = []
+        seen = set()
+        for _, unit in scored:
+            key = cls._plain_text(unit)[:180]
+            if key in seen:
+                continue
+            seen.add(key)
+            selected.append(unit)
+            if len(selected) >= max_units:
+                break
+        return selected
+
+    @classmethod
+    def _deterministic_document_answer(cls, query: str, pdf_meta: dict, profile: dict) -> str | None:
+        chunks = pdf_meta.get("chunks") or []
+        if not chunks or not (profile.get("quote") or profile.get("aggregate")):
+            return None
+        max_chunks = 12 if profile.get("aggregate") else 5
+        lines = []
+        extracted_any = False
+        if profile.get("quote"):
+            lines.append("Nguyen van trong tai lieu da truy xuat:")
+        else:
+            lines.append("Cac nhan dinh/trich dan tim thay trong tai lieu da truy xuat:")
+        for chunk in chunks[:max_chunks]:
+            raw_quotes = cls._quoted_units(chunk.get("content") or "")
+            units = cls._extract_units_from_chunk(
+                query,
+                chunk,
+                quote_mode=bool(profile.get("quote") or profile.get("aggregate")),
+                max_units=3 if profile.get("aggregate") else 2,
+            )
+            if not units:
+                continue
+            extracted_any = True
+            lines.append(f"\n- {chunk.get('title')} (doan {chunk.get('chunk_index')}):")
+            for unit in units:
+                unit = unit.strip()
+                if profile.get("quote") or unit in raw_quotes:
+                    lines.append(f'  + "{unit}"')
+                else:
+                    lines.append(f"  + {unit}")
+        if not extracted_any:
+            return None
+        lines.append("\nGhi chu: phan tren chi lay tu cac doan PDF da truy xuat; khong bo sung bang tri nho ngoai tai lieu.")
+        return "\n".join(lines).strip()
+
+
     @staticmethod
     def _strip_internal_markers(answer: str) -> str:
         lines = []
@@ -1090,7 +1219,9 @@ class AI(commands.Cog):
 
         await interaction.response.defer(thinking=True)
         print(f"[debug] before_retrieval query={user_prompt[:220]!r} mode={mode}", flush=True)
-        pdf_meta = await self._pdf_retrieval(user_prompt)
+        profile = self._request_profile(user_prompt)
+        retrieval_limit = PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT
+        pdf_meta = await self._pdf_retrieval(user_prompt, limit=retrieval_limit)
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
@@ -1104,7 +1235,7 @@ class AI(commands.Cog):
             flush=True,
         )
         has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
-        web_context = await self._web_context(user_prompt, mode, has_local_context)
+        web_context = "" if profile["document_only"] and has_local_context else await self._web_context(user_prompt, mode, has_local_context)
         manual_count = self._retrieval_count(manual_knowledge, "S")
         feedback_count = self._retrieval_count(feedback_knowledge, "F")
         web_count = self._retrieval_count(web_context, "W")
@@ -1140,6 +1271,22 @@ class AI(commands.Cog):
             f"pdf_top_score={pdf_meta.get('top_score', 0)} manual={manual_count} feedback={feedback_count} web={web_count}",
             flush=True,
         )
+        deterministic = self._deterministic_document_answer(user_prompt, pdf_meta, profile)
+        if deterministic and retrieval_hit:
+            answer = deterministic
+            full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode + "_deterministic_extract")
+            print(
+                f"[debug] deterministic_answer mode={mode} quote={profile['quote']} aggregate={profile['aggregate']} "
+                f"chunks={pdf_meta.get('selected_count', 0)} chars={len(answer)}",
+                flush=True,
+            )
+            if len(answer) > MAX_DISCORD_LEN:
+                answer = answer[:MAX_DISCORD_LEN] + "\n\n*(đã rút gọn để vừa Discord; dùng /hvhn_debug_retrieval để xem thêm evidence)*"
+            embed = discord.Embed(title=title, description=answer, color=discord.Color.green())
+            embed.set_footer(text=f"Then tra loi cho {interaction.user.display_name}. Bam feedback neu can sua.")
+            await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
+            print(f"[debug] final_answer_sent deterministic=True chars={len(answer)}", flush=True)
+            return
         answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
@@ -1261,7 +1408,9 @@ class AI(commands.Cog):
 
     async def _run_debug_retrieval(self, query: str) -> list[str]:
         print(f"[debug] before_retrieval query={query[:220]!r} mode=debug_command", flush=True)
-        pdf_meta = await self._pdf_retrieval(query)
+        profile = self._request_profile(query)
+        retrieval_limit = PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT
+        pdf_meta = await self._pdf_retrieval(query, limit=retrieval_limit)
         manual_knowledge = await self._knowledge_context(query)
         feedback_knowledge = await self._feedback_context(query)
         retrieval_hit = self._retrieval_hit(query, pdf_meta)
