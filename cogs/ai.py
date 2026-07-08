@@ -131,6 +131,9 @@ class AI(commands.Cog):
         self.serper_key = os.getenv("SERPER_API_KEY", "").strip()
         self.tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
         self.last_ai_errors: list[str] = []
+        print(f"[ai] GROQ_MODEL={GROQ_MODEL}", flush=True)
+        print(f"[ai] GEMINI_MODEL={GEMINI_MODEL}", flush=True)
+        print(f"[ai] groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)}", flush=True)
 
     @staticmethod
     def _redact_key(key: str) -> str:
@@ -146,7 +149,7 @@ class AI(commands.Cog):
             "provider": provider,
             "model": model,
             "status": status,
-            "body": (body or "")[:2000],
+            "body": body or "",
             "exception": repr(exc) if exc else "",
         }
 
@@ -168,7 +171,8 @@ class AI(commands.Cog):
             f"event={event} provider={provider} model={model} "
             f"key_index={key_index}/{total_keys} key={self._redact_key(key)} key_exists={bool(key)} "
             f"groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)} "
-            f"status={status} body={(body or '')[:1000]!r} exception={repr(exc) if exc else ''}"
+            f"status={status} body={body!r} exception={repr(exc) if exc else ''}",
+            flush=True,
         )
 
     async def ask_groq(
@@ -193,6 +197,10 @@ class AI(commands.Cog):
         async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
             if resp.status != 200:
                 body = await resp.text()
+                print(
+                    f"[ai-api] provider=groq model={GROQ_MODEL} non_200 status={resp.status} body={body!r}",
+                    flush=True,
+                )
                 return False, self._api_error("groq", GROQ_MODEL, resp.status, body)
             data = await resp.json()
             return True, data["choices"][0]["message"]["content"].strip()
@@ -214,6 +222,10 @@ class AI(commands.Cog):
         async with session.post(url, json=payload, timeout=60) as resp:
             if resp.status != 200:
                 body = await resp.text()
+                print(
+                    f"[ai-api] provider=gemini model={GEMINI_MODEL} non_200 status={resp.status} body={body!r}",
+                    flush=True,
+                )
                 return False, self._api_error("gemini", GEMINI_MODEL, resp.status, body)
             data = await resp.json()
             try:
@@ -231,7 +243,8 @@ class AI(commands.Cog):
         print(
             "[ai-api] "
             f"event=generate_start groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)} "
-            f"groq_model={GROQ_MODEL} gemini_model={GEMINI_MODEL} prompt_chars={len(prompt)}"
+            f"groq_model={GROQ_MODEL} gemini_model={GEMINI_MODEL} prompt_chars={len(prompt)}",
+            flush=True,
         )
         async with aiohttp.ClientSession() as session:
             for index, key in enumerate(self.groq_keys, start=1):
@@ -267,7 +280,9 @@ class AI(commands.Cog):
                             status=content.get("status"),
                             body=content.get("body", ""),
                         )
-                        errors.append(f"Groq {content.get('status')}: {content.get('body', '')[:300]}")
+                        errors.append(
+                            f"provider=groq model={GROQ_MODEL} status={content.get('status')} body={content.get('body', '')}"
+                        )
                     else:
                         errors.append(f"Groq {content}")
                         self._log_api_event(
@@ -325,7 +340,9 @@ class AI(commands.Cog):
                             status=content.get("status"),
                             body=content.get("body", ""),
                         )
-                        errors.append(f"Gemini {content.get('status')}: {content.get('body', '')[:300]}")
+                        errors.append(
+                            f"provider=gemini model={GEMINI_MODEL} status={content.get('status')} body={content.get('body', '')}"
+                        )
                     else:
                         errors.append(f"Gemini {content}")
                         self._log_api_event(
@@ -353,7 +370,8 @@ class AI(commands.Cog):
         print(
             "[ai-api] "
             f"event=all_failed groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)} "
-            f"errors={self.last_ai_errors!r}"
+            f"errors={self.last_ai_errors!r}",
+            flush=True,
         )
         return None
 
@@ -363,20 +381,12 @@ class AI(commands.Cog):
 
     def _ai_error_message(self) -> str:
         joined = " | ".join(self.last_ai_errors)
-        lowered = joined.lower()
         if not joined:
             return "AI loi API nhung chua co chi tiet trong log."
-        if "401" in lowered or "403" in lowered or "api key" in lowered:
-            reason = "API key sai hoac het quyen."
-        elif "429" in lowered or "rate_limit" in lowered:
-            reason = "API key het quota hoac bi rate limit."
-        elif "404" in lowered or "model" in lowered:
-            reason = "Ten model khong hop le hoac model da doi."
-        elif "timeout" in lowered:
-            reason = "API phan hoi qua cham/timeout."
-        else:
-            reason = "API provider tra loi."
-        return f"{reason} Xem Render logs dong `[ai] ...` de biet chi tiet."
+        compact = re.sub(r"\s+", " ", joined).strip()
+        if len(compact) > 1500:
+            compact = compact[:1500] + "..."
+        return "AI API failed. Provider details: " + compact
 
 
     def _is_admin(self, interaction: discord.Interaction) -> bool:
@@ -389,7 +399,7 @@ class AI(commands.Cog):
         try:
             return await search_pdf_knowledge(self.bot.db, query, limit=16)
         except Exception as exc:
-            print(f"[ai] PDF knowledge exception: {exc}")
+            print(f"[ai] PDF knowledge exception: {exc}", flush=True)
             return ""
 
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
@@ -426,7 +436,7 @@ class AI(commands.Cog):
                     limit,
                 )
             except Exception as exc:
-                print(f"[ai] manual knowledge FTS fallback: {exc}")
+                print(f"[ai] manual knowledge FTS fallback: {exc}", flush=True)
                 rows = await self.bot.db.fetch(
                     """
                     SELECT category, title, content, 0::float AS rank
@@ -581,7 +591,7 @@ class AI(commands.Cog):
 
     async def _web_context(self, query: str, mode: str, has_local_context: bool = False) -> str:
         if not self._needs_web(query, mode, has_local_context):
-            print(f"[ai] web=skip mode={mode} local={has_local_context}")
+            print(f"[ai] web=skip mode={mode} local={has_local_context}", flush=True)
             return ""
 
         async with aiohttp.ClientSession() as session:
@@ -592,14 +602,14 @@ class AI(commands.Cog):
                 if not results:
                     results = await self._search_duckduckgo(session, query)
             except Exception as exc:
-                print(f"[ai] Web search exception: {exc}")
+                print(f"[ai] Web search exception: {exc}", flush=True)
                 return ""
 
         deduped = {}
         for item in results:
             deduped.setdefault(item["url"], item)
         results = list(deduped.values())
-        print(f"[ai] web_results={len(results[:WEB_CONTEXT_LIMIT])}")
+        print(f"[ai] web_results={len(results[:WEB_CONTEXT_LIMIT])}", flush=True)
 
         chunks = []
         for index, item in enumerate(results[:WEB_CONTEXT_LIMIT], start=1):
@@ -715,9 +725,9 @@ class AI(commands.Cog):
         )
         verified = await self.generate(verifier_prompt, THEN_SYSTEM_PROMPT, temperature=0.0)
         if verified:
-            print(f"[ai] verifier=ok mode={mode}")
+            print(f"[ai] verifier=ok mode={mode}", flush=True)
             return verified
-        print(f"[ai] verifier=skipped mode={mode}")
+        print(f"[ai] verifier=skipped mode={mode}", flush=True)
         return answer
 
     async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
@@ -774,7 +784,7 @@ class AI(commands.Cog):
         knowledge = "\n\n".join(knowledge_parts)
         has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
         web_context = await self._web_context(user_prompt, mode, has_local_context)
-        print(f"[ai] query={user_prompt[:120]!r} mode={mode} pdf={bool(pdf_knowledge)} manual={bool(manual_knowledge)} feedback={bool(feedback_knowledge)} web={bool(web_context)}")
+        print(f"[ai] query={user_prompt[:120]!r} mode={mode} pdf={bool(pdf_knowledge)} manual={bool(manual_knowledge)} feedback={bool(feedback_knowledge)} web={bool(web_context)}", flush=True)
         answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode)
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
