@@ -58,6 +58,7 @@ def _clean_text(text: str) -> str:
 def _plain_text(value: str) -> str:
     value = unicodedata.normalize("NFD", value or "")
     value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn")
+    value = value.replace("đ", "d").replace("Đ", "D")
     return re.sub(r"\s+", " ", value.lower()).strip()
 
 

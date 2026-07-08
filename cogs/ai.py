@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import unicodedata
+from dataclasses import dataclass
 from pathlib import Path
 from html import unescape
 from urllib.parse import parse_qs, unquote, urlparse
@@ -184,6 +185,211 @@ class FeedbackView(discord.ui.View):
     @discord.ui.button(label="Cần sửa", style=discord.ButtonStyle.danger)
     async def needs_fix(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_modal(FeedbackModal(self.bot, self.prompt, self.answer))
+
+
+def _rag_plain(value: str) -> str:
+    value = unicodedata.normalize("NFD", value or "")
+    value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn").lower()
+    return value.replace("đ", "d")
+
+
+@dataclass
+class RAGPlan:
+    intent: str
+    exact_quote: bool = False
+    aggregate: bool = False
+    document_only: bool = False
+    external_knowledge: bool = False
+    citations: bool = True
+    author_filter: str = ""
+    retrieval_limit: int = PDF_DEFAULT_LIMIT
+    use_llm: bool = True
+    reason: str = ""
+
+
+@dataclass
+class QuoteEvidence:
+    quote: str
+    author: str = ""
+    pdf_title: str = ""
+    source: str = ""
+    chunk: int | None = None
+    context: str = ""
+    score: int = 0
+
+
+class IntentClassifier:
+    @staticmethod
+    def classify(message: str) -> str:
+        q = _rag_plain(message)
+        if "debug" in q:
+            return "DEBUG"
+        quote_markers = ("chep nguyen van", "nguyen van", "dung tung chu", "trich dan", "trich nguyen")
+        aggregate_markers = ("tong hop", "tat ca", "moi nhan dinh", "toan bo", "liet ke", "cho minh 5", "5 nhan dinh")
+        if any(m in q for m in quote_markers):
+            return "QUOTE_COLLECTION" if any(m in q for m in aggregate_markers) else "QUOTE_SINGLE"
+        if any(m in q for m in aggregate_markers):
+            return "QUOTE_COLLECTION" if "nhan dinh" in q or "trich" in q else "SUMMARY"
+        if "so sanh" in q or "doi chieu" in q:
+            return "COMPARE"
+        if "dan y" in q or "lap dan y" in q:
+            return "OUTLINE"
+        if "phan tich" in q or "cam nhan" in q or "binh giang" in q:
+            return "ANALYSIS"
+        if "giai thich" in q or "la gi" in q or "khai niem" in q:
+            return "EXPLAIN"
+        if any(m in q for m in ("moi nhat", "hom nay", "hien nay", "tra cuu web", "tin tuc")):
+            return "WEB_SEARCH"
+        return "CHAT"
+
+
+class Planner:
+    @staticmethod
+    def author_filter(message: str) -> str:
+        patterns = [
+            r"(?:của|cua)\s+([A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*(?:\s+[A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*){0,4})",
+            r"(?:tác giả|tac gia)\s+([A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*(?:\s+[A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*){0,4})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, message or "")
+            if match:
+                value = re.sub(r"\s+", " ", match.group(1)).strip(" .,:;?!")
+                stop = re.search(r"\b(về|ve|trong|theo|là|la|và|va)\b", value, flags=re.I)
+                if stop:
+                    value = value[:stop.start()].strip()
+                return value
+        return ""
+
+    @classmethod
+    def build(cls, message: str) -> RAGPlan:
+        intent = IntentClassifier.classify(message)
+        q = _rag_plain(message)
+        author = cls.author_filter(message)
+        exact = intent == "QUOTE_SINGLE"
+        aggregate = intent == "QUOTE_COLLECTION"
+        document_only = any(m in q for m in ("theo tai lieu", "tai lieu da nap", "trong tai lieu", "kho pdf", "da nap")) or intent.startswith("QUOTE")
+        retrieval_limit = PDF_AGGREGATE_LIMIT if intent in {"QUOTE_COLLECTION", "COMPARE", "OUTLINE", "SUMMARY"} else PDF_DEFAULT_LIMIT
+        return RAGPlan(
+            intent=intent,
+            exact_quote=exact,
+            aggregate=aggregate,
+            document_only=document_only,
+            external_knowledge=(intent == "WEB_SEARCH"),
+            citations=True,
+            author_filter=author,
+            retrieval_limit=retrieval_limit,
+            use_llm=intent not in {"QUOTE_SINGLE", "QUOTE_COLLECTION"},
+            reason=f"intent={intent}; author={author or 'none'}",
+        )
+
+
+class QuoteExtractor:
+    QUOTE_PAIRS = ((chr(8220), chr(8221)), ('"', '"'), ("'", "'"))
+
+    @classmethod
+    def quoted_units(cls, text: str) -> list[str]:
+        text = re.sub(r"\s+", " ", text or "").strip()
+        out = []
+        for open_q, close_q in cls.QUOTE_PAIRS:
+            start = 0
+            while True:
+                left = text.find(open_q, start)
+                if left < 0:
+                    break
+                right = text.find(close_q, left + 1)
+                if right < 0:
+                    break
+                quote = text[left + 1:right].strip()
+                if 12 <= len(quote) <= 900 and quote not in out:
+                    out.append(quote)
+                start = right + 1
+        return out
+
+    @staticmethod
+    def infer_author(chunk_text: str, quote: str, requested_author: str = "") -> str:
+        if requested_author and _rag_plain(requested_author) in _rag_plain(chunk_text):
+            return requested_author
+        idx = chunk_text.find(quote)
+        window = chunk_text[max(0, idx - 180): idx + len(quote) + 80] if idx >= 0 else chunk_text[:260]
+        match = re.search(r"([A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*(?:\s+[A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*){1,4})\s*(?:cho rằng|viết|nói|khẳng định|nhận định|:)", window)
+        return match.group(1).strip() if match else ""
+
+    @classmethod
+    def extract(cls, pdf_meta: dict, plan: RAGPlan, query: str) -> list[QuoteEvidence]:
+        requested_plain = _rag_plain(plan.author_filter)
+        evidences: list[QuoteEvidence] = []
+        for chunk in pdf_meta.get("chunks") or []:
+            text = chunk.get("content") or chunk.get("excerpt") or ""
+            if requested_plain and requested_plain not in _rag_plain(text + " " + chunk.get("title", "")):
+                continue
+            quotes = cls.quoted_units(text)
+            if not quotes and plan.intent in {"QUOTE_COLLECTION", "COMPARE", "ANALYSIS"}:
+                quotes = AI._extract_units_from_chunk(query, chunk, quote_mode=False, max_units=2)
+            for quote in quotes:
+                author = cls.infer_author(text, quote, plan.author_filter)
+                score = 0
+                if plan.author_filter and _rag_plain(plan.author_filter) == _rag_plain(author):
+                    score += 100
+                if plan.author_filter and requested_plain in _rag_plain(text):
+                    score += 60
+                score += AI._unit_score(query, quote)
+                evidences.append(QuoteEvidence(
+                    quote=quote,
+                    author=author,
+                    pdf_title=chunk.get("title") or "",
+                    source=chunk.get("source") or "",
+                    chunk=chunk.get("chunk_index"),
+                    context=text[:700],
+                    score=score,
+                ))
+        return Aggregator.deduplicate(evidences)
+
+
+class Aggregator:
+    @staticmethod
+    def deduplicate(items: list[QuoteEvidence]) -> list[QuoteEvidence]:
+        seen = set()
+        out = []
+        for item in sorted(items, key=lambda x: x.score, reverse=True):
+            key = _rag_plain(item.quote)[:220]
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(item)
+        return out
+
+
+class Formatter:
+    @staticmethod
+    def quote_single(items: list[QuoteEvidence], plan: RAGPlan) -> str | None:
+        if not items:
+            who = f" của {plan.author_filter}" if plan.author_filter else ""
+            return f"Chưa tìm thấy nhận định nguyên văn{who} trong các tài liệu đã truy xuất. Không nên tự bịa hoặc chép theo trí nhớ."
+        item = items[0]
+        author = item.author or plan.author_filter or "Không rõ tác giả trong đoạn truy xuất"
+        source = f"\nNguồn: {item.pdf_title}" if item.pdf_title else ""
+        return f"\"{item.quote}\"\n\nTác giả/người được gán: {author}{source}"
+
+    @staticmethod
+    def quote_collection(items: list[QuoteEvidence], plan: RAGPlan) -> str | None:
+        if not items:
+            return "Chưa tìm thấy các nhận định nguyên văn phù hợp trong tài liệu đã truy xuất. Không bổ sung bằng trí nhớ ngoài tài liệu."
+        lines = ["Các nhận định/trích dẫn tìm thấy trong tài liệu đã truy xuất:"]
+        for index, item in enumerate(items, 1):
+            author = item.author or "Không rõ tác giả trong đoạn truy xuất"
+            source = f" — {item.pdf_title}" if item.pdf_title else ""
+            lines.append(f"{index}. \"{item.quote}\"\n   Tác giả/người được gán: {author}{source}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def compare_seed(items: list[QuoteEvidence], plan: RAGPlan) -> str:
+        if not items:
+            return ""
+        lines = ["TRICH DAN CAN DUNG TRUOC KHI PHAN TICH:"]
+        for item in items[:8]:
+            author = item.author or "khong ro"
+            lines.append(f"- {author}: \"{item.quote}\" ({item.pdf_title})")
+        return "\n".join(lines)
 
 
 class AI(commands.Cog):
@@ -849,7 +1055,8 @@ class AI(commands.Cog):
     @staticmethod
     def _plain_text(value: str) -> str:
         value = unicodedata.normalize("NFD", value or "")
-        return "".join(ch for ch in value if unicodedata.category(ch) != "Mn").lower()
+        value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn").lower()
+        return value.replace("đ", "d")
 
     @staticmethod
     def _needs_web(query: str, mode: str, has_local_context: bool) -> bool:
@@ -1219,23 +1426,26 @@ class AI(commands.Cog):
 
         await interaction.response.defer(thinking=True)
         print(f"[debug] before_retrieval query={user_prompt[:220]!r} mode={mode}", flush=True)
+        plan = Planner.build(user_prompt)
         profile = self._request_profile(user_prompt)
-        retrieval_limit = PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT
+        retrieval_limit = max(plan.retrieval_limit, PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT)
         pdf_meta = await self._pdf_retrieval(user_prompt, limit=retrieval_limit)
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
         retrieval_hit = self._retrieval_hit(user_prompt, pdf_meta)
+        quote_evidence = QuoteExtractor.extract(pdf_meta, plan, user_prompt)
         self._log_top_pdf_chunks(pdf_meta)
         print(
             f"[debug] after_retrieval pdf_candidates={pdf_meta.get('candidate_count', 0)} "
             f"pdf_selected={pdf_meta.get('selected_count', 0)} top_score={pdf_meta.get('top_score', 0)} "
             f"pdf_chars={len(pdf_knowledge)} manual_chars={len(manual_knowledge)} feedback_chars={len(feedback_knowledge)} "
-            f"feedback_preview={feedback_knowledge[:500]!r} RETRIEVAL_HIT={retrieval_hit}",
+            f"feedback_preview={feedback_knowledge[:500]!r} RETRIEVAL_HIT={retrieval_hit} "
+            f"plan={plan.intent} author_filter={plan.author_filter!r} quote_evidence={len(quote_evidence)}",
             flush=True,
         )
         has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
-        web_context = "" if profile["document_only"] and has_local_context else await self._web_context(user_prompt, mode, has_local_context)
+        web_context = "" if plan.document_only and has_local_context else await self._web_context(user_prompt, mode, has_local_context)
         manual_count = self._retrieval_count(manual_knowledge, "S")
         feedback_count = self._retrieval_count(feedback_knowledge, "F")
         web_count = self._retrieval_count(web_context, "W")
@@ -1271,13 +1481,19 @@ class AI(commands.Cog):
             f"pdf_top_score={pdf_meta.get('top_score', 0)} manual={manual_count} feedback={feedback_count} web={web_count}",
             flush=True,
         )
-        deterministic = self._deterministic_document_answer(user_prompt, pdf_meta, profile)
-        if deterministic and retrieval_hit:
+        deterministic = None
+        if plan.intent == "QUOTE_SINGLE":
+            deterministic = Formatter.quote_single(quote_evidence, plan)
+        elif plan.intent == "QUOTE_COLLECTION":
+            deterministic = Formatter.quote_collection(quote_evidence, plan)
+        elif profile["quote"] or profile["aggregate"]:
+            deterministic = self._deterministic_document_answer(user_prompt, pdf_meta, profile)
+        if deterministic and (retrieval_hit or quote_evidence or plan.intent.startswith("QUOTE")):
             answer = deterministic
             full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode + "_deterministic_extract")
             print(
-                f"[debug] deterministic_answer mode={mode} quote={profile['quote']} aggregate={profile['aggregate']} "
-                f"chunks={pdf_meta.get('selected_count', 0)} chars={len(answer)}",
+                f"[debug] deterministic_answer mode={mode} intent={plan.intent} quote={profile['quote']} aggregate={profile['aggregate']} "
+                f"chunks={pdf_meta.get('selected_count', 0)} quotes={len(quote_evidence)} chars={len(answer)}",
                 flush=True,
             )
             if len(answer) > MAX_DISCORD_LEN:
@@ -1287,6 +1503,16 @@ class AI(commands.Cog):
             await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
             print(f"[debug] final_answer_sent deterministic=True chars={len(answer)}", flush=True)
             return
+        seed = Formatter.compare_seed(quote_evidence, plan) if plan.intent in {"COMPARE", "ANALYSIS"} else ""
+        if seed:
+            knowledge = build_context_budget(
+                user_prompt,
+                seed + "\n\n" + pdf_knowledge,
+                manual_knowledge,
+                web_context,
+                CONTEXT_MAX_CHARS,
+                teacher_feedback=feedback_knowledge,
+            )
         answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
@@ -1408,11 +1634,13 @@ class AI(commands.Cog):
 
     async def _run_debug_retrieval(self, query: str) -> list[str]:
         print(f"[debug] before_retrieval query={query[:220]!r} mode=debug_command", flush=True)
+        plan = Planner.build(query)
         profile = self._request_profile(query)
-        retrieval_limit = PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT
+        retrieval_limit = max(plan.retrieval_limit, PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT)
         pdf_meta = await self._pdf_retrieval(query, limit=retrieval_limit)
         manual_knowledge = await self._knowledge_context(query)
         feedback_knowledge = await self._feedback_context(query)
+        quote_evidence = QuoteExtractor.extract(pdf_meta, plan, query)
         retrieval_hit = self._retrieval_hit(query, pdf_meta)
         self._log_top_pdf_chunks(pdf_meta)
         has_local_context = bool(pdf_meta.get("context") or manual_knowledge or feedback_knowledge)
@@ -1436,11 +1664,13 @@ class AI(commands.Cog):
 
         lines = [
             f"Query: `{query[:180]}`",
+            f"Plan: `{plan.intent}` | author_filter: `{plan.author_filter or 'none'}` | exact_quote: `{plan.exact_quote}` | aggregate: `{plan.aggregate}`",
             f"Reason code: `{decision}`",
             f"Verifier decision: `{decision}` (debug retrieval only; no LLM/verifier call)",
             f"PDF candidates: `{pdf_meta.get('candidate_count', 0)}` | selected sent to LLM: `{pdf_meta.get('selected_count', 0)}` | top_score: `{pdf_meta.get('top_score', 0)}`",
             f"RETRIEVAL_HIT: `{retrieval_hit}`",
             f"Manual: `{manual_count}` | Feedback: `{feedback_count}` | Web sources: `{web_count}`",
+            f"Quote evidence extracted: `{len(quote_evidence)}`",
             f"Prompt chars: `{len(prompt_preview)}` | est tokens: `{self._estimated_tokens(prompt_preview)}`",
             f"Chars PDF/manual/feedback/web/final: `{stats['pdf_chars']}` / `{stats['manual_chars']}` / `{stats['feedback_chars']}` / `{stats['web_chars']}` / `{stats['final_context_chars']}`",
             f"Context truncated: `{stats['context_truncated']}`",
@@ -1464,6 +1694,11 @@ class AI(commands.Cog):
                 f"  sent: {sent_excerpt}"
             )
         lines.append("")
+        if quote_evidence:
+            lines.append("Extracted quote objects:")
+            for item in quote_evidence[:12]:
+                lines.append(f"- author=`{item.author or 'unknown'}` doc=`{item.pdf_title}` quote={item.quote[:350]}")
+            lines.append("")
         lines.append("Selected context block sent to LLM:")
         lines.append(_clip_text(knowledge, 2200))
         text = "\n".join(lines)
