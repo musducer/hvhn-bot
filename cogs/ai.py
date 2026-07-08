@@ -9,7 +9,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from pdf_knowledge import search_pdf_knowledge
+from pdf_knowledge import retrieve_pdf_knowledge, search_pdf_knowledge
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -22,6 +22,7 @@ CONTEXT_MAX_CHARS = int(os.getenv("HVHN_CONTEXT_MAX_CHARS", "18000"))
 COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "9000"))
 SYSTEM_EXTRA_MAX_CHARS = 1500
 VERIFIER_EVIDENCE_MAX_CHARS = 6000
+LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 TRUSTED_SOURCE_HINTS = (
     ".gov.vn",
     ".edu.vn",
@@ -175,6 +176,7 @@ class AI(commands.Cog):
         self.serper_key = os.getenv("SERPER_API_KEY", "").strip()
         self.tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
         self.last_ai_errors: list[str] = []
+        self._last_verifier_rejected = False
         print(f"[ai] GROQ_MODEL={GROQ_MODEL}", flush=True)
         print(f"[ai] GEMINI_MODEL={GEMINI_MODEL}", flush=True)
         print(f"[ai] groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)}", flush=True)
@@ -524,6 +526,29 @@ class AI(commands.Cog):
             compact = compact[:1500] + "..."
         return "AI API failed. Provider details: " + compact
 
+    @staticmethod
+    def _retrieval_count(context: str, marker: str) -> int:
+        return len(re.findall(rf"^\[{re.escape(marker)}\d+\]", context or "", flags=re.M))
+
+    @staticmethod
+    def _insufficient_answer(answer: str) -> bool:
+        lowered = AI._plain_text(answer or "")
+        return "khong du du lieu de khang dinh" in lowered or "chua du du lieu de khang dinh" in lowered
+
+    @staticmethod
+    def _reason_code(pdf_meta: dict, manual_count: int, feedback_count: int, web_count: int, verifier_changed: bool = False) -> str:
+        if verifier_changed:
+            return "VERIFIER_REJECTED"
+        if not (pdf_meta.get("selected_count") or manual_count or feedback_count or web_count):
+            return "NO_RETRIEVAL"
+        if not (pdf_meta.get("context") or manual_count or feedback_count or web_count):
+            return "EMPTY_CONTEXT"
+        if pdf_meta.get("error") or (pdf_meta.get("candidate_count", 0) > 0 and pdf_meta.get("selected_count", 0) == 0):
+            return "OCR_FAILURE"
+        if pdf_meta.get("selected_count") and float(pdf_meta.get("top_score") or 0) < LOW_RETRIEVAL_SCORE:
+            return "LOW_RETRIEVAL_SCORE"
+        return ""
+
 
     def _is_admin(self, interaction: discord.Interaction) -> bool:
         if not isinstance(interaction.user, discord.Member):
@@ -537,6 +562,13 @@ class AI(commands.Cog):
         except Exception as exc:
             print(f"[ai] PDF knowledge exception: {exc}", flush=True)
             return ""
+
+    async def _pdf_retrieval(self, query: str) -> dict:
+        try:
+            return await retrieve_pdf_knowledge(self.bot.db, query, limit=5)
+        except Exception as exc:
+            print(f"[ai] PDF retrieval exception: {exc}", flush=True)
+            return {"context": "", "candidate_count": 0, "selected_count": 0, "top_score": 0, "chunks": [], "error": str(exc)}
 
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
         terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:12]
@@ -868,12 +900,14 @@ class AI(commands.Cog):
         )
         verified = await self.generate(verifier_prompt, THEN_SYSTEM_PROMPT, temperature=0.0)
         if verified:
+            self._last_verifier_rejected = (not self._insufficient_answer(answer)) and self._insufficient_answer(verified)
             print(f"[ai] verifier=ok mode={mode}", flush=True)
             return verified
         print(f"[ai] verifier=skipped mode={mode}", flush=True)
         return answer
 
     async def _safe_generate(self, prompt: str, knowledge: str, web_context: str, mode: str) -> tuple[str | None, str]:
+        self._last_verifier_rejected = False
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.05)
         needs_repair = bool(answer) and self._looks_like_source_dump(answer)
@@ -914,11 +948,15 @@ class AI(commands.Cog):
             return
 
         await interaction.response.defer(thinking=True)
-        pdf_knowledge = await self._pdf_knowledge_context(user_prompt)
+        pdf_meta = await self._pdf_retrieval(user_prompt)
+        pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
         has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
         web_context = await self._web_context(user_prompt, mode, has_local_context)
+        manual_count = self._retrieval_count(manual_knowledge, "S")
+        feedback_count = self._retrieval_count(feedback_knowledge, "F")
+        web_count = self._retrieval_count(web_context, "W")
         knowledge = build_context_budget(
             user_prompt,
             pdf_knowledge,
@@ -927,11 +965,21 @@ class AI(commands.Cog):
             CONTEXT_MAX_CHARS,
             teacher_feedback=feedback_knowledge,
         )
-        print(f"[ai] query={user_prompt[:120]!r} mode={mode} pdf={bool(pdf_knowledge)} manual={bool(manual_knowledge)} feedback={bool(feedback_knowledge)} web={bool(web_context)}", flush=True)
+        print(
+            "[ai-retrieval] "
+            f"query={user_prompt[:180]!r} mode={mode} "
+            f"pdf_chunks={pdf_meta.get('selected_count', 0)} pdf_candidates={pdf_meta.get('candidate_count', 0)} "
+            f"pdf_top_score={pdf_meta.get('top_score', 0)} manual={manual_count} feedback={feedback_count} web={web_count}",
+            flush=True,
+        )
         answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode)
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
             return
+        if self._insufficient_answer(answer):
+            reason = self._reason_code(pdf_meta, manual_count, feedback_count, web_count, self._last_verifier_rejected)
+            if reason and "REASON_CODE:" not in answer:
+                answer = answer.rstrip() + f"\n\n`REASON_CODE: {reason}`"
 
         if len(answer) > MAX_DISCORD_LEN:
             answer = answer[:MAX_DISCORD_LEN] + "\n\n*(đã rút gọn để vừa Discord)*"
@@ -1017,6 +1065,46 @@ class AI(commands.Cog):
             content = row["content"][:250] + ("..." if len(row["content"]) > 250 else "")
             embed.add_field(name=f"#{row['id']} [{row['category']}] {row['title']}", value=content, inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(name="hvhn_debug_retrieval", description="Debug retrieval PDF/manual/feedback/web cho Then (Admin)")
+    async def debug_retrieval(self, interaction: discord.Interaction, query: str):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Ban can role HVHN Admin hoac quyen Manage Server.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True)
+        pdf_meta = await self._pdf_retrieval(query)
+        manual_knowledge = await self._knowledge_context(query)
+        feedback_knowledge = await self._feedback_context(query)
+        has_local_context = bool(pdf_meta.get("context") or manual_knowledge or feedback_knowledge)
+        web_context = await self._web_context(query, "debug_retrieval", has_local_context)
+        manual_count = self._retrieval_count(manual_knowledge, "S")
+        feedback_count = self._retrieval_count(feedback_knowledge, "F")
+        web_count = self._retrieval_count(web_context, "W")
+        decision = self._reason_code(pdf_meta, manual_count, feedback_count, web_count) or "OK"
+
+        lines = [
+            f"Query: `{query[:180]}`",
+            f"PDF candidates: `{pdf_meta.get('candidate_count', 0)}` | selected: `{pdf_meta.get('selected_count', 0)}` | top_score: `{pdf_meta.get('top_score', 0)}`",
+            f"Manual: `{manual_count}` | Feedback: `{feedback_count}` | Web sources: `{web_count}`",
+            f"Verifier decision: `{decision}`",
+            "",
+            "Top PDF chunks:",
+        ]
+        chunks = pdf_meta.get("chunks") or []
+        if not chunks:
+            lines.append("- Khong co PDF chunk phu hop.")
+        for chunk in chunks[:5]:
+            excerpt = re.sub(r"\s+", " ", chunk.get("excerpt", "")).strip()
+            if len(excerpt) > 260:
+                excerpt = excerpt[:260] + "..."
+            lines.append(
+                f"- P{chunk.get('index')} score=`{chunk.get('score')}` rank=`{chunk.get('rank')}` kw=`{chunk.get('keyword_score')}` "
+                f"doc=`{chunk.get('title')}` chunk=`{chunk.get('chunk_index')}`\n  {excerpt}"
+            )
+        text = "\n".join(lines)
+        if len(text) > MAX_DISCORD_LEN:
+            text = text[:MAX_DISCORD_LEN] + "\n...(debug bi rut gon de vua Discord)"
+        await interaction.followup.send(text, ephemeral=True)
 
     @app_commands.command(name="ai_feedback_stats", description="Xem thống kê feedback AI (Admin)")
     async def feedback_stats(self, interaction: discord.Interaction):

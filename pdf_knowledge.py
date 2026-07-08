@@ -392,7 +392,7 @@ async def sync_pdf_folder(database_url: str, folder: str | os.PathLike) -> dict:
         await conn.close()
 
 
-async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_DEFAULT) -> str:
+async def retrieve_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_DEFAULT) -> dict:
     await ensure_pdf_knowledge_schema(db)
     evidence_limit = max(1, min(limit, _env_int("HVHN_PDF_EVIDENCE_LIMIT_MAX", 8, minimum=4)))
     candidate_limit = _env_int("HVHN_PDF_SEARCH_CANDIDATE_LIMIT", PDF_SEARCH_CANDIDATE_LIMIT, minimum=80)
@@ -485,6 +485,7 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
             excerpt += "..."
         return excerpt
 
+    selected_meta = []
     for index, row in enumerate(selected, start=1):
         content = row["content"]
         chunk_chars = _env_int("HVHN_PDF_SEARCH_CHUNK_CHARS", 850, minimum=500, maximum=1200)
@@ -492,11 +493,37 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
         source = row["source"] or row["title"]
         ref_title = _source_label(source, row["title"])
         ref_no = doc_refs[ref_title]
+        fts_rank = float(row["rank"] or 0)
+        keyword_score = score(row)
         blocks.append(
             f"[P{index}] Tai lieu [{ref_no}] - {row['title']} - doan {row['chunk_index']}\n"
             f"Nguon PDF: {source}\n{content}"
         )
-    return "\n\n".join(blocks)
+        selected_meta.append(
+            {
+                "index": index,
+                "title": row["title"],
+                "source": source,
+                "chunk_index": row["chunk_index"],
+                "rank": fts_rank,
+                "keyword_score": keyword_score,
+                "score": fts_rank + keyword_score,
+                "excerpt": content,
+            }
+        )
+    top_score = selected_meta[0]["score"] if selected_meta else 0
+    return {
+        "context": "\n\n".join(blocks),
+        "candidate_count": len(rows),
+        "selected_count": len(selected_meta),
+        "top_score": top_score,
+        "chunks": selected_meta,
+    }
+
+
+async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_DEFAULT) -> str:
+    result = await retrieve_pdf_knowledge(db, query, limit=limit)
+    return result["context"]
 
 
 async def pdf_knowledge_stats(db, *, limit_zero: int = 15) -> dict:
