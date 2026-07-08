@@ -160,7 +160,7 @@ class HVHNBot(commands.Bot):
             await self.load_extension(extension)
 
         await self.tree.sync()
-        print("Bot HVHN đã khởi động và đồng bộ hệ thống lệnh!")
+        print("Bot HVHN đã khởi động và đồng bộ hệ thống lệnh!", flush=True)
 
     async def close(self):
         if self.db is not None:

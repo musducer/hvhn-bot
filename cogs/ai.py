@@ -14,8 +14,14 @@ from pdf_knowledge import search_pdf_knowledge
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 MAX_DISCORD_LEN = 3800
-WEB_RESULT_LIMIT = 5
-WEB_CONTEXT_LIMIT = 7
+WEB_RESULT_LIMIT = 3
+WEB_CONTEXT_LIMIT = 3
+GROQ_MAX_PROMPT_CHARS = int(os.getenv("GROQ_MAX_PROMPT_CHARS", "24000"))
+GROQ_SAFE_PROMPT_CHARS = int(os.getenv("GROQ_SAFE_PROMPT_CHARS", "18000"))
+CONTEXT_MAX_CHARS = int(os.getenv("HVHN_CONTEXT_MAX_CHARS", "18000"))
+COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "9000"))
+SYSTEM_EXTRA_MAX_CHARS = 1500
+VERIFIER_EVIDENCE_MAX_CHARS = 6000
 TRUSTED_SOURCE_HINTS = (
     ".gov.vn",
     ".edu.vn",
@@ -35,12 +41,50 @@ def _load_literature_system_instructions() -> str:
         text = path.read_text(encoding="utf-8").strip()
     except Exception:
         return ""
-    if len(text) > 6000:
-        text = text[:6000] + "\n...(đã rút gọn chỉ thị hệ thống vì quá dài)"
+    if len(text) > SYSTEM_EXTRA_MAX_CHARS:
+        text = text[:SYSTEM_EXTRA_MAX_CHARS] + "\n...(da rut gon chi thi he thong vi qua dai)"
     return text
 
 
 LITERATURE_SYSTEM_INSTRUCTIONS = _load_literature_system_instructions()
+
+
+def _clip_text(value: str, max_chars: int) -> str:
+    value = (value or "").strip()
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars].rsplit(" ", 1)[0].rstrip() + "\n...(rut gon vi qua dai)"
+
+
+def _budget_append(parts: list[str], label: str, text: str, remaining: int) -> int:
+    text = (text or "").strip()
+    if not text or remaining <= len(label) + 20:
+        return remaining
+    block = f"{label}:\n{_clip_text(text, remaining - len(label) - 3)}"
+    if len(block) > remaining:
+        block = _clip_text(block, remaining)
+    parts.append(block)
+    return remaining - len(block) - 2
+
+
+def build_context_budget(
+    query: str,
+    pdf_chunks: str,
+    manual_knowledge: str,
+    web_results: str,
+    max_chars: int,
+    *,
+    teacher_feedback: str = "",
+) -> str:
+    parts: list[str] = []
+    remaining = max(1200, max_chars)
+    remaining = _budget_append(parts, "KHO PDF HVHN UU TIEN", pdf_chunks, remaining)
+    remaining = _budget_append(parts, "TRI THUC HVHN THU CONG", manual_knowledge, remaining)
+    remaining = _budget_append(parts, "GOP Y GIAO VIEN DA SUA", teacher_feedback, remaining)
+    remaining = _budget_append(parts, "NGUON WEB TIN CAY BO SUNG", web_results, remaining)
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
 
 SYSTEM_PROMPT = (
     "Bạn là trợ giảng môn Ngữ Văn cho cộng đồng HVHN. Trả lời bằng tiếng Việt có dấu, "
@@ -153,6 +197,28 @@ class AI(commands.Cog):
             "exception": repr(exc) if exc else "",
         }
 
+    @staticmethod
+    def _estimated_tokens(*texts: str) -> int:
+        chars = sum(len(text or "") for text in texts)
+        return max(1, chars // 4)
+
+    @staticmethod
+    def _is_request_too_large(error: dict | str) -> bool:
+        if isinstance(error, dict):
+            status = error.get("status")
+            body = str(error.get("body", "")).lower()
+            return status == 413 or "request too large" in body or "tpm" in body or "tokens per minute" in body
+        lowered = str(error).lower()
+        return "413" in lowered or "request too large" in lowered or "tpm" in lowered
+
+    @staticmethod
+    def _compress_prompt_for_groq(prompt: str) -> str:
+        head = (
+            "BAN RUT GON CONTEXT: Uu tien bang chung PDF/manual lien quan nhat. "
+            "Neu thieu du lieu, noi ro chua du du lieu de khang dinh.\n\n"
+        )
+        return head + _clip_text(prompt, COMPACT_CONTEXT_MAX_CHARS)
+
     def _log_api_event(
         self,
         event: str,
@@ -240,13 +306,58 @@ class AI(commands.Cog):
         temperature: float = 0.2,
     ) -> str | None:
         errors: list[str] = []
+        prompt_chars = len(prompt) + len(system_prompt)
+        prompt_tokens = self._estimated_tokens(prompt, system_prompt)
+        prefer_gemini = prompt_chars > GROQ_SAFE_PROMPT_CHARS and bool(self.gemini_keys)
         print(
             "[ai-api] "
             f"event=generate_start groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)} "
-            f"groq_model={GROQ_MODEL} gemini_model={GEMINI_MODEL} prompt_chars={len(prompt)}",
+            f"groq_model={GROQ_MODEL} gemini_model={GEMINI_MODEL} "
+            f"prompt_chars={prompt_chars} est_tokens={prompt_tokens} prefer_gemini={prefer_gemini}",
             flush=True,
         )
         async with aiohttp.ClientSession() as session:
+            if prefer_gemini:
+                for index, key in enumerate(self.gemini_keys, start=1):
+                    self._log_api_event(
+                        "try_long_context_first",
+                        provider="gemini",
+                        model=GEMINI_MODEL,
+                        key=key,
+                        key_index=index,
+                        total_keys=len(self.gemini_keys),
+                        body=f"prompt_chars={prompt_chars} est_tokens={prompt_tokens}",
+                    )
+                    try:
+                        ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature)
+                        if ok:
+                            self.last_ai_errors = []
+                            self._log_api_event(
+                                "ok",
+                                provider="gemini",
+                                model=GEMINI_MODEL,
+                                key=key,
+                                key_index=index,
+                                total_keys=len(self.gemini_keys),
+                            )
+                            return str(content)
+                        if isinstance(content, dict):
+                            errors.append(
+                                f"provider=gemini model={GEMINI_MODEL} status={content.get('status')} body={content.get('body', '')}"
+                            )
+                    except Exception as exc:
+                        errors.append(f"Gemini exception: {type(exc).__name__}: {exc}")
+
+            groq_prompt = prompt
+            if len(groq_prompt) + len(system_prompt) > GROQ_MAX_PROMPT_CHARS:
+                groq_prompt = self._compress_prompt_for_groq(prompt)
+                print(
+                    "[ai-api] "
+                    f"event=groq_prompt_compressed original_chars={len(prompt) + len(system_prompt)} "
+                    f"compressed_chars={len(groq_prompt) + len(system_prompt)} "
+                    f"est_tokens={self._estimated_tokens(groq_prompt, system_prompt)}",
+                    flush=True,
+                )
             for index, key in enumerate(self.groq_keys, start=1):
                 self._log_api_event(
                     "try",
@@ -255,9 +366,10 @@ class AI(commands.Cog):
                     key=key,
                     key_index=index,
                     total_keys=len(self.groq_keys),
+                    body=f"prompt_chars={len(groq_prompt) + len(system_prompt)} est_tokens={self._estimated_tokens(groq_prompt, system_prompt)}",
                 )
                 try:
-                    ok, content = await self.ask_groq(session, key, prompt, system_prompt, temperature)
+                    ok, content = await self.ask_groq(session, key, groq_prompt, system_prompt, temperature)
                     if ok:
                         self.last_ai_errors = []
                         self._log_api_event(
@@ -283,6 +395,26 @@ class AI(commands.Cog):
                         errors.append(
                             f"provider=groq model={GROQ_MODEL} status={content.get('status')} body={content.get('body', '')}"
                         )
+                        if self._is_request_too_large(content) and groq_prompt == prompt:
+                            retry_prompt = self._compress_prompt_for_groq(prompt)
+                            self._log_api_event(
+                                "retry_compressed_after_413",
+                                provider="groq",
+                                model=GROQ_MODEL,
+                                key=key,
+                                key_index=index,
+                                total_keys=len(self.groq_keys),
+                                status=content.get("status"),
+                                body=f"retry_chars={len(retry_prompt) + len(system_prompt)} est_tokens={self._estimated_tokens(retry_prompt, system_prompt)}",
+                            )
+                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, system_prompt, temperature)
+                            if ok2:
+                                self.last_ai_errors = []
+                                return str(content2)
+                            if isinstance(content2, dict):
+                                errors.append(
+                                    f"provider=groq model={GROQ_MODEL} retry status={content2.get('status')} body={content2.get('body', '')}"
+                                )
                     else:
                         errors.append(f"Groq {content}")
                         self._log_api_event(
@@ -307,7 +439,11 @@ class AI(commands.Cog):
                         exc=exc,
                     )
 
-            for index, key in enumerate(self.gemini_keys, start=1):
+            if prefer_gemini:
+                gemini_iter = []
+            else:
+                gemini_iter = list(enumerate(self.gemini_keys, start=1))
+            for index, key in gemini_iter:
                 self._log_api_event(
                     "try",
                     provider="gemini",
@@ -397,7 +533,7 @@ class AI(commands.Cog):
 
     async def _pdf_knowledge_context(self, query: str) -> str:
         try:
-            return await search_pdf_knowledge(self.bot.db, query, limit=16)
+            return await search_pdf_knowledge(self.bot.db, query, limit=5)
         except Exception as exc:
             print(f"[ai] PDF knowledge exception: {exc}", flush=True)
             return ""
@@ -613,7 +749,7 @@ class AI(commands.Cog):
 
         chunks = []
         for index, item in enumerate(results[:WEB_CONTEXT_LIMIT], start=1):
-            snippet = item["snippet"][:850]
+            snippet = item["snippet"][:500]
             trust = "nguon dang tin hon" if self._source_score(item["url"]) else "can kiem chung"
             chunks.append(f"[W{index}] {item['title']}\nURL: {item['url']}\nDo tin cay: {trust}\nTom tat: {snippet}")
         return "\n\n".join(chunks)
@@ -713,15 +849,22 @@ class AI(commands.Cog):
     async def _verify_answer(self, answer: str, prompt: str, knowledge: str, web_context: str, mode: str) -> str:
         if not answer:
             return answer
+        compact_evidence = build_context_budget(
+            prompt,
+            knowledge,
+            "",
+            web_context,
+            VERIFIER_EVIDENCE_MAX_CHARS,
+        )
+        compact_answer = _clip_text(answer, 4000)
         verifier_prompt = (
             "Kiem chung cau tra loi sau bang dung context duoc cung cap. "
             "Hay giu cau dung, xoa hoac viet lai moi khang dinh khong du can cu thanh 'chua du du lieu de khang dinh'. "
             "Tuyet doi khong them tac gia/tac pham/nam/trich dan/nhan dinh moi. "
             "Khong hien ma noi bo [P1]/[S1]/[W1] hoac URL dai. Tra lai ban da sua, tieng Viet.\n\n"
             f"CAU HOI/PROMPT:\n{prompt}\n\n"
-            f"CONTEXT HVHN:\n{knowledge or 'KHONG CO'}\n\n"
-            f"WEB:\n{web_context or 'KHONG CO'}\n\n"
-            f"CAU TRA LOI CAN KIEM:\n{answer}"
+            f"BANG CHUNG RUT GON:\n{compact_evidence or 'KHONG CO'}\n\n"
+            f"CAU TRA LOI CAN KIEM:\n{compact_answer}"
         )
         verified = await self.generate(verifier_prompt, THEN_SYSTEM_PROMPT, temperature=0.0)
         if verified:
@@ -774,16 +917,16 @@ class AI(commands.Cog):
         pdf_knowledge = await self._pdf_knowledge_context(user_prompt)
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
-        knowledge_parts = []
-        if pdf_knowledge:
-            knowledge_parts.append("KHO PDF HVHN:\n" + pdf_knowledge)
-        if manual_knowledge:
-            knowledge_parts.append("TRI THUC HVHN THU CONG:\n" + manual_knowledge)
-        if feedback_knowledge:
-            knowledge_parts.append("GOP Y GIAO VIEN DA SUA TRUOC DAY:\n" + feedback_knowledge)
-        knowledge = "\n\n".join(knowledge_parts)
         has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
         web_context = await self._web_context(user_prompt, mode, has_local_context)
+        knowledge = build_context_budget(
+            user_prompt,
+            pdf_knowledge,
+            manual_knowledge,
+            web_context,
+            CONTEXT_MAX_CHARS,
+            teacher_feedback=feedback_knowledge,
+        )
         print(f"[ai] query={user_prompt[:120]!r} mode={mode} pdf={bool(pdf_knowledge)} manual={bool(manual_knowledge)} feedback={bool(feedback_knowledge)} web={bool(web_context)}", flush=True)
         answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode)
         if answer is None:
@@ -888,3 +1031,4 @@ class AI(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AI(bot))
+

@@ -12,7 +12,7 @@ PDF_CHUNK_SIZE = 1800
 PDF_CHUNK_OVERLAP = 220
 PDF_MAX_CHUNKS_PER_DOC = 2200
 OCR_MIN_TEXT_CHARS = 350
-PDF_SEARCH_LIMIT_DEFAULT = 16
+PDF_SEARCH_LIMIT_DEFAULT = 5
 PDF_SEARCH_CANDIDATE_LIMIT = 220
 
 PDF_KNOWLEDGE_SCHEMA = """
@@ -186,7 +186,7 @@ def extract_pdf_text_from_bytes(data: bytes) -> str:
     try:
         ocr_text = _ocr_pdf_text_from_bytes(data)
     except Exception as exc:
-        print(f"[AI PDF] OCR chưa chạy được: {exc}")
+        print(f"[AI PDF] OCR chưa chạy được: {exc}", flush=True)
         return native_text
     return ocr_text if len(ocr_text) > len(native_text) else native_text
 
@@ -229,7 +229,7 @@ async def ensure_pdf_knowledge_schema(db) -> None:
             "CREATE INDEX IF NOT EXISTS idx_ai_pdf_chunks_trgm_title ON ai_pdf_chunks USING GIN (title gin_trgm_ops)"
         )
     except Exception as exc:
-        print(f"[AI PDF] pg_trgm unavailable; using FTS/keyword fallback: {exc}")
+        print(f"[AI PDF] pg_trgm unavailable; using FTS/keyword fallback: {exc}", flush=True)
 
 
 async def index_pdf_bytes(db, title: str, data: bytes, *, source: str = "", created_by: int | None = None) -> dict:
@@ -394,7 +394,7 @@ async def sync_pdf_folder(database_url: str, folder: str | os.PathLike) -> dict:
 
 async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_DEFAULT) -> str:
     await ensure_pdf_knowledge_schema(db)
-    limit = max(1, min(limit, _env_int("HVHN_PDF_SEARCH_LIMIT_MAX", 24, minimum=4)))
+    limit = max(1, min(limit, _env_int("HVHN_PDF_SEARCH_LIMIT_MAX", 8, minimum=4)))
     terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:16]
     if not terms:
         rows = await db.fetch(
@@ -431,7 +431,7 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
                 candidate_limit,
             )
         except Exception as exc:
-            print(f"[AI PDF] FTS search fallback: {exc}")
+            print(f"[AI PDF] FTS search fallback: {exc}", flush=True)
             rows = await db.fetch(
                 """
                 SELECT title, content, source, chunk_index, 0::float AS rank
@@ -467,8 +467,9 @@ async def search_pdf_knowledge(db, query: str, *, limit: int = PDF_SEARCH_LIMIT_
 
     for index, row in enumerate(ranked, start=1):
         content = row["content"]
-        if len(content) > 1200:
-            content = content[:1200] + "..."
+        chunk_chars = _env_int("HVHN_PDF_SEARCH_CHUNK_CHARS", 850, minimum=500, maximum=1200)
+        if len(content) > chunk_chars:
+            content = content[:chunk_chars] + "..."
         source = row["source"] or row["title"]
         ref_title = _source_label(source, row["title"])
         ref_no = doc_refs[ref_title]

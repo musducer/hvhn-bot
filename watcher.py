@@ -77,18 +77,18 @@ async def _connect_db(context="db"):
     global _db_backoff_seconds, _last_db_error
     if not DATABASE_URL:
         _last_db_error = "DATABASE_URL is missing"
-        print(f"[DB] {context}: DATABASE_URL is missing")
+        print(f"[DB] {context}: DATABASE_URL is missing", flush=True)
         return None
     try:
         conn = await asyncpg.connect(DATABASE_URL, timeout=20)
         if _last_db_error:
-            print(f"[DB] reconnected host={_database_host(DATABASE_URL)}")
+            print(f"[DB] reconnected host={_database_host(DATABASE_URL)}", flush=True)
         _last_db_error = ""
         _db_backoff_seconds = DB_RETRY_BASE_SECONDS
         return conn
     except Exception as exc:
         _last_db_error = f"{type(exc).__name__}: {exc}"
-        print(f"[DB] {context} failed host={_database_host(DATABASE_URL)} url={_redact_database_url(DATABASE_URL)} err={_last_db_error}; retry in {_db_backoff_seconds}s")
+        print(f"[DB] {context} failed host={_database_host(DATABASE_URL)} url={_redact_database_url(DATABASE_URL)} err={_last_db_error}; retry in {_db_backoff_seconds}s", flush=True)
         await asyncio.sleep(_db_backoff_seconds)
         _db_backoff_seconds = min(DB_RETRY_MAX_SECONDS, _db_backoff_seconds * 2)
         return None
@@ -242,7 +242,7 @@ def _download_pdf(url, filename, target_folder):
                 if head != b"%PDF-":
                     raise ValueError("Link khong tai ra PDF that. Dat Google Drive 'Anyone with the link can view' hoac dung Google Form upload.")
                 os.replace(tmp, target)
-                print(f"[DOWNLOAD] ok attempt={attempt} file={os.path.basename(target)}")
+                print(f"[DOWNLOAD] ok attempt={attempt} file={os.path.basename(target)}", flush=True)
                 return target
         except Exception as exc:
             last_error = exc
@@ -252,7 +252,7 @@ def _download_pdf(url, filename, target_folder):
             except OSError:
                 pass
             wait = min(60, 2 ** attempt)
-            print(f"[DOWNLOAD] failed attempt={attempt} url={direct_url} err={type(exc).__name__}: {exc}; retry in {wait}s")
+            print(f"[DOWNLOAD] failed attempt={attempt} url={direct_url} err={type(exc).__name__}: {exc}; retry in {wait}s", flush=True)
             time.sleep(wait)
     raise RuntimeError(f"download_failed: {type(last_error).__name__}: {last_error}")
 
@@ -377,11 +377,11 @@ async def _xu_ly_don_discord():
             if path and str(path).lower().endswith(".pdf"):
                 final_status = await _index_pdf_for_ai(path)
             await _mark_discord_job(job["id"], final_status)
-            print(f"[DISCORD] don #{job['id']} -> {final_status}")
+            print(f"[DISCORD] don #{job['id']} -> {final_status}", flush=True)
         except Exception as exc:
             status = "download_failed" if "download_failed" in str(exc).lower() else "error"
             await _mark_discord_job(job["id"], status, str(exc))
-            print(f"[DISCORD] LOI don #{job['id']} status={status}: {exc}")
+            print(f"[DISCORD] LOI don #{job['id']} status={status}: {exc}", flush=True)
 
 
 def _count_files(folder, suffix=None):
@@ -516,7 +516,7 @@ async def _sync_runtime_status():
                 str(snapshot.get("exported_at") or ""),
             )
     except Exception:
-        print("  LỖI đồng bộ trạng thái watcher:")
+        print("  LỖI đồng bộ trạng thái watcher:", flush=True)
         traceback.print_exc()
     finally:
         await conn.close()
@@ -549,11 +549,11 @@ async def _index_pdf_for_ai(path):
     try:
         result = await index_pdf_path(DATABASE_URL, path)
         status = "zero_chunks" if result["chunks"] == 0 else "indexed"
-        print(f"[AI PDF] {os.path.basename(path)} -> {result['chunks']} doan status={status}")
+        print(f"[AI PDF] {os.path.basename(path)} -> {result['chunks']} doan status={status}", flush=True)
         await _set_runtime_status("ai_pdf_last_indexed", f"{result['title']} ({result['chunks']} doan, {status})")
         return status
     except Exception as exc:
-        print(f"[AI PDF] db_failed/index_failed file={os.path.basename(path)} err={type(exc).__name__}: {exc}")
+        print(f"[AI PDF] db_failed/index_failed file={os.path.basename(path)} err={type(exc).__name__}: {exc}", flush=True)
         traceback.print_exc()
         return "db_failed"
 
@@ -566,7 +566,7 @@ async def _remove_pdf_from_ai(doc_base):
         await remove_pdf_document_by_title(DATABASE_URL, doc_base + ".pdf")
         await _set_runtime_status("ai_pdf_last_removed", doc_base)
     except Exception:
-        print("  LỖI xóa PDF khỏi kho tri thức AI:")
+        print("  LỖI xóa PDF khỏi kho tri thức AI:", flush=True)
         traceback.print_exc()
 
 
@@ -587,9 +587,9 @@ async def _sync_pdf_knowledge(force=False):
         await _set_runtime_status("ai_pdf_last_sync", time.strftime("%Y-%m-%d %H:%M:%S"))
         changed = exclusive["changed"] + bot_only["changed"]
         if changed:
-            print(f"[AI PDF] đồng bộ kho AI: doc quyen {exclusive['indexed']} file, bot {bot_only['indexed']} file, cap nhat {changed} file")
+            print(f"[AI PDF] đồng bộ kho AI: doc quyen {exclusive['indexed']} file, bot {bot_only['indexed']} file, cap nhat {changed} file", flush=True)
     except Exception:
-        print("  LỖI đồng bộ kho PDF AI:")
+        print("  LỖI đồng bộ kho PDF AI:", flush=True)
         traceback.print_exc()
 
 
@@ -606,18 +606,18 @@ def xu_ly_don_them_khach():
                 line = f.read().strip()
             parts = line.replace(",", "\t").split("\t")
             name, email = parts[0].strip(), parts[1].strip()
-            print(f"[KHÁCH] {name} - {email}")
+            print(f"[KHÁCH] {name} - {email}", flush=True)
 
             try:
                 append_client(name, email)
             except ValueError:
-                print("  (email đã có trong clients.csv, chỉ render lại)")
+                print("  (email đã có trong clients.csv, chỉ render lại)", flush=True)
 
             rows = render_batch(list_docs(), [{"name": name, "email": email}])
             write_new_rows_csv(rows, filename=f"new_rows_khach_{_ts()}.csv")
             os.remove(path)
         except Exception:
-            print("  LỖI xử lý đơn khách:")
+            print("  LỖI xử lý đơn khách:", flush=True)
             traceback.print_exc()
 
 
@@ -631,7 +631,7 @@ def xu_ly_don_them_tai_lieu():
         if not _stable(path):
             continue
         try:
-            print(f"[TÀI LIỆU] {pdf}")
+            print(f"[TÀI LIỆU] {pdf}", flush=True)
             dest_doc = os.path.join(DOCS_DIR, pdf)
             os.makedirs(DOCS_DIR, exist_ok=True)
             shutil.copy2(path, dest_doc)  # lưu vào kho docs/ để khách mới sau này cũng nhận
@@ -643,7 +643,7 @@ def xu_ly_don_them_tai_lieu():
 
             shutil.move(path, os.path.join(PROCESSED_DOCS, pdf))  # dọn khỏi hộp đơn
         except Exception:
-            print("  LỖI xử lý đơn tài liệu:")
+            print("  LỖI xử lý đơn tài liệu:", flush=True)
             traceback.print_exc()
 
 
@@ -657,13 +657,13 @@ def xu_ly_don_them_tai_lieu_bot():
         if not _stable(path):
             continue
         try:
-            print(f"[TAI LIEU BOT] {pdf}")
+            print(f"[TAI LIEU BOT] {pdf}", flush=True)
             target = _unique_path(BOT_DOCS_DIR, pdf)
             shutil.copy2(path, target)
             asyncio.run(_index_pdf_for_ai(target))
             os.remove(path)
         except Exception:
-            print("  LOI xu ly don tai lieu bot:")
+            print("  LOI xu ly don tai lieu bot:", flush=True)
             traceback.print_exc()
 
 
@@ -679,10 +679,10 @@ def xu_ly_don_xoa_khach():
             with open(path, encoding="utf-8") as f:
                 email = f.read().strip()
             if email:
-                print(f"[XOÁ KHÁCH] {email} -> {'đã gỡ' if remove_client(email) else 'không có trong csv'}")
+                print(f"[XOÁ KHÁCH] {email} -> {'đã gỡ' if remove_client(email) else 'không có trong csv'}", flush=True)
             os.remove(path)
         except Exception:
-            print("  LỖI xử lý đơn xoá khách:")
+            print("  LỖI xử lý đơn xoá khách:", flush=True)
             traceback.print_exc()
 
 
@@ -699,21 +699,21 @@ def xu_ly_don_xoa_tai_lieu():
                 doc_base = f.read().strip()
             if doc_base:
                 removed = remove_doc(doc_base)
-                print(f"[XOÁ TÀI LIỆU] {doc_base} -> {'đã gỡ' if removed else 'không có trong docs/'}")
+                print(f"[XOÁ TÀI LIỆU] {doc_base} -> {'đã gỡ' if removed else 'không có trong docs/'}", flush=True)
                 if removed:
                     asyncio.run(_remove_pdf_from_ai(doc_base))
             os.remove(path)
         except Exception:
-            print("  LỖI xử lý đơn xoá tài liệu:")
+            print("  LỖI xử lý đơn xoá tài liệu:", flush=True)
             traceback.print_exc()
 
 
 def main():
-    print("=== HVHN watcher đang chạy. Nhấn Ctrl+C để dừng. ===")
-    print(f"DB: {_redact_database_url(DATABASE_URL)}")
-    print(f"Hộp đơn khách:     {JOBS_KHACH}")
-    print(f"Hộp đơn tài liệu:  {INCOMING_DOCS}\n")
-    print(f"Hop don bot:        {INCOMING_BOT_DOCS}\n")
+    print("=== HVHN watcher đang chạy. Nhấn Ctrl+C để dừng. ===", flush=True)
+    print(f"DB: {_redact_database_url(DATABASE_URL)}", flush=True)
+    print(f"Hộp đơn khách:     {JOBS_KHACH}", flush=True)
+    print(f"Hộp đơn tài liệu:  {INCOMING_DOCS}\n", flush=True)
+    print(f"Hop don bot:        {INCOMING_BOT_DOCS}\n", flush=True)
     while True:
         try:
             asyncio.run(_xu_ly_don_discord())
