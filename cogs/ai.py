@@ -12,6 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 from pdf_knowledge import retrieve_pdf_knowledge, search_pdf_knowledge
+from md_knowledge import retrieve_md_knowledge, search_md_knowledge
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -1107,17 +1108,16 @@ class AI(commands.Cog):
 
     async def _pdf_knowledge_context(self, query: str) -> str:
         try:
-            return await search_pdf_knowledge(self.bot.db, query, limit=5)
-        except Exception as exc:
-            print(f"[ai] PDF knowledge exception: {exc}", flush=True)
+            return await search_md_knowledge(self.bot.db, query, limit=5)
+        except Exception:
             return ""
 
     async def _pdf_retrieval(self, query: str, *, limit: int = PDF_DEFAULT_LIMIT) -> dict:
         try:
-            return await retrieve_pdf_knowledge(self.bot.db, query, limit=limit)
+            return await retrieve_md_knowledge(self.bot.db, query, limit=limit)
         except Exception as exc:
-            print(f"[ai] PDF retrieval exception: {exc}", flush=True)
-            return {"context": "", "candidate_count": 0, "selected_count": 0, "top_score": 0, "chunks": [], "error": str(exc)}
+            print(f"[ai] md_retrieval_error {exc}", flush=True)
+            return {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
 
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
         terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:12]

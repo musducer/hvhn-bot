@@ -185,3 +185,8 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     top = float(rows[0]["rank"]) if rows else 0.0
     return {"context": build_md_context(chunks), "chunks": chunks, "quotes": quotes,
             "selected_count": len(chunks), "candidate_count": len(chunks), "top_score": top}
+
+
+async def search_md_knowledge(db, query: str, *, limit: int = 5) -> str:
+    result = await retrieve_md_knowledge(db, query, limit=limit)
+    return result.get("context", "")
