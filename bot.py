@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 
 from keep_alive import keep_alive
 from pdf_knowledge import PDF_KNOWLEDGE_SCHEMA
+from md_knowledge import MD_KNOWLEDGE_SCHEMA
 
 load_dotenv()
 
@@ -141,6 +142,7 @@ CREATE TABLE IF NOT EXISTS ai_feedback (
 """
 
 SCHEMA += PDF_KNOWLEDGE_SCHEMA
+SCHEMA += MD_KNOWLEDGE_SCHEMA
 
 
 DAN_LANG_ROLE = "Dân làng Hua Tát"
