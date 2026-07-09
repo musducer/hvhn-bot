@@ -52,6 +52,15 @@ class QuoteExtractorAttributionTest(unittest.TestCase):
         quotes = QuoteExtractor.extract(meta, plan, "Cho một nhận định")
         self.assertEqual(quotes[0].author, "UNKNOWN")
 
+    def test_no_quote_marks_yields_no_evidence(self):
+        meta = {"chunks": [{"title": "prose.pdf", "chunk_index": 3, "content": (
+            "Nam Cao miêu tả Cí Phèo như một bi kịch bị từ chối quyền làm người, "
+            "không hề có câu trích dẫn nguyên văn nào ở đây."
+        )}]}
+        plan = Planner.build("Những nhận định về Cí Phèo")
+        quotes = QuoteExtractor.extract(meta, plan, "Những nhận định về Cí Phèo")
+        self.assertEqual(quotes, [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -386,9 +386,6 @@ class QuoteExtractor:
         for chunk in pdf_meta.get("chunks") or []:
             text = re.sub(r"\s+", " ", chunk.get("content") or chunk.get("excerpt") or "").strip()
             spans = cls.quote_spans(text)
-            if not spans and plan.intent in {"QUOTE_COLLECTION", "COMPARE", "ANALYSIS"}:
-                units = AI._extract_units_from_chunk(query, chunk, quote_mode=False, max_units=2)
-                spans = [QuoteSpan(unit, text.find(unit) if text.find(unit) >= 0 else 0, (text.find(unit) if text.find(unit) >= 0 else 0) + len(unit)) for unit in units]
             for span in spans:
                 author, confidence = cls.infer_author(text, span)
                 if requested_plain and _rag_plain(author) != requested_plain:
