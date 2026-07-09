@@ -22,7 +22,7 @@ GROQ_MAX_PROMPT_CHARS = int(os.getenv("GROQ_MAX_PROMPT_CHARS", "24000"))
 GROQ_SAFE_PROMPT_CHARS = int(os.getenv("GROQ_SAFE_PROMPT_CHARS", "18000"))
 CONTEXT_MAX_CHARS = int(os.getenv("HVHN_CONTEXT_MAX_CHARS", "18000"))
 COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "9000"))
-SYSTEM_EXTRA_MAX_CHARS = 1500
+SYSTEM_EXTRA_MAX_CHARS = 20000
 VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 RETRIEVAL_DEBUG = os.getenv("HVHN_RETRIEVAL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -54,6 +54,26 @@ def _load_literature_system_instructions() -> str:
 
 
 LITERATURE_SYSTEM_INSTRUCTIONS = _load_literature_system_instructions()
+
+
+def _plain_ascii(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value or "")
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return text.replace("đ", "d").replace("Đ", "D")
+
+
+def _load_bonus_fewshot() -> str:
+    path = Path(__file__).resolve().parents[1] / "BONUS.txt"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if len(text) > SYSTEM_EXTRA_MAX_CHARS:
+        text = text[:SYSTEM_EXTRA_MAX_CHARS] + "\n...(rut gon BONUS vi qua dai)"
+    return text
+
+
+BONUS_FEWSHOT = _load_bonus_fewshot()
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -128,6 +148,14 @@ THEN_SYSTEM_PROMPT = (
     "Nguồn web chỉ là căn cứ để tổng hợp thành câu trả lời.\n"
     "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ. Câu hỏi đơn giản thì trả lời gọn; "
     "câu hỏi cần phân tích thì đi sâu có lớp lang, tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
+)
+
+THEN_SYSTEM_PROMPT = THEN_SYSTEM_PROMPT + (
+    ("\n\n=== CHI THI VAN PHONG & CHONG AO GIAC (BAT BUOC TUAN THU) ===\n"
+     + LITERATURE_SYSTEM_INSTRUCTIONS) if LITERATURE_SYSTEM_INSTRUCTIONS else ""
+) + (
+    ("\n\n=== VI DU XAU -> TOT (tranh dung cac loi nay: chen chu Trung, bia chi tiet, hoi hot) ===\n"
+     + BONUS_FEWSHOT) if BONUS_FEWSHOT else ""
 )
 
 
@@ -1173,15 +1201,9 @@ class AI(commands.Cog):
     def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str) -> str:
         source_block = knowledge or "KHONG CO KHO PDF/TRI THUC HVHN PHU HOP DUOC NAP."
         web_block = web_context or "KHONG CO NGUON WEB DUOC TRUY XUAT."
-        literature_rules = (
-            "\n\nCHI THI NGU VAN BO SUNG TU SYSTEM INSTRUCTIONS.txt:\n"
-            f"{LITERATURE_SYSTEM_INSTRUCTIONS}\n"
-            if LITERATURE_SYSTEM_INSTRUCTIONS else ""
-        )
         return (
             "Ban la Then, tro giang AI mon Ngu van cua HVHN. Luon tra loi bang tieng Viet co dau, tru khi nguoi dung yeu cau ngon ngu khac.\n"
             f"CHE DO: {mode}\n"
-            f"{literature_rules}"
             "KHO PDF/TRI THUC/FEEDBACK HVHN DA TRUY XUAT:\n"
             f"{source_block}\n\n"
             "NGUON WEB DA TRA CUU (neu co):\n"
