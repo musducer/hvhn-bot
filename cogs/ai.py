@@ -444,12 +444,20 @@ class Formatter:
 
     @staticmethod
     def compare_seed(items: list[QuoteEvidence], plan: RAGPlan) -> str:
+        return Formatter.evidence_block(items)
+
+    @staticmethod
+    def evidence_block(items: list[QuoteEvidence]) -> str:
         if not items:
             return ""
-        lines = ["TRICH DAN CAN DUNG TRUOC KHI PHAN TICH:"]
+        lines = ["TRICH DAN DA XAC MINH (chi dung nguyen van cac cau nay, dung gan sai tac gia):"]
         for item in items[:8]:
-            author = item.author or "khong ro"
-            lines.append(f"- {author}: \"{item.quote}\" ({item.pdf_title})")
+            if item.author and item.author != QuoteExtractor.UNKNOWN:
+                who = item.author
+            else:
+                who = "CHUA XAC DINH TAC GIA (khong duoc tu gan ten)"
+            src = f" | nguon: {item.pdf_title}" if item.pdf_title else ""
+            lines.append(f"- TAC GIA: {who} | TRICH: \"{item.quote}\"{src}")
         return "\n".join(lines)
 
 
