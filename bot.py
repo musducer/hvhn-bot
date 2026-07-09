@@ -4,6 +4,7 @@ import asyncio
 import asyncpg
 import discord
 from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 
 from keep_alive import keep_alive
@@ -142,13 +143,47 @@ CREATE TABLE IF NOT EXISTS ai_feedback (
 SCHEMA += PDF_KNOWLEDGE_SCHEMA
 
 
+DAN_LANG_ROLE = "Dân làng Hua Tát"
+
+
+def can_use_bot(user) -> bool:
+    perms = getattr(user, "guild_permissions", None)
+    if perms is not None and getattr(perms, "administrator", False):
+        return True
+    roles = getattr(user, "roles", None) or []
+    return any(getattr(role, "name", None) == DAN_LANG_ROLE for role in roles)
+
+
+class GatedCommandTree(app_commands.CommandTree):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if can_use_bot(interaction.user):
+            return True
+        guide = None
+        if interaction.guild is not None:
+            guide = discord.utils.get(interaction.guild.text_channels, name="hướng-dẫn-dùng-bot")
+        where = guide.mention if guide else "#hướng-dẫn-dùng-bot"
+        try:
+            await interaction.response.send_message(
+                f"Bạn cần đọc {where} và bấm xác nhận để nhận vai trò \"{DAN_LANG_ROLE}\" trước khi dùng bot.",
+                ephemeral=True,
+            )
+        except discord.InteractionResponded:
+            pass
+        return False
+
+    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        if isinstance(error, app_commands.CheckFailure):
+            return
+        await super().on_error(interaction, error)
+
+
 class HVHNBot(commands.Bot):
     def __init__(self, database_url: str):
         intents = discord.Intents.default()
         intents.members = True
         intents.message_content = True
         intents.voice_states = True
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(command_prefix="!", intents=intents, tree_cls=GatedCommandTree)
         self.database_url = database_url
         self.db: asyncpg.Pool | None = None
 
