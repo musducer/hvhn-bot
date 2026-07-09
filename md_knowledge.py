@@ -109,29 +109,30 @@ async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", creat
     if current and current["content_hash"] == content_hash:
         return {"doc_key": doc_key, "title": doc_title, "passages": 0, "quotes": 0, "changed": False}
     async with db.acquire() if hasattr(db, "acquire") else _null_ctx(db) as conn:
-        await conn.execute("DELETE FROM ai_md_passages WHERE doc_key = $1", doc_key)
-        await conn.execute("DELETE FROM ai_md_quotes WHERE doc_key = $1", doc_key)
-        for i, p in enumerate(parsed["passages"]):
+        async with conn.transaction():
+            await conn.execute("DELETE FROM ai_md_passages WHERE doc_key = $1", doc_key)
+            await conn.execute("DELETE FROM ai_md_quotes WHERE doc_key = $1", doc_key)
+            for i, p in enumerate(parsed["passages"]):
+                await conn.execute(
+                    "INSERT INTO ai_md_passages (doc_key, passage_index, title, content, source) VALUES ($1,$2,$3,$4,$5)",
+                    doc_key, i, p["title"], p["content"], doc_source,
+                )
+            for q in parsed["quotes"]:
+                await conn.execute(
+                    "INSERT INTO ai_md_quotes (doc_key, quote, author, passage_title, source) VALUES ($1,$2,$3,$4,$5)",
+                    doc_key, q["quote"], q["author"], q["passage_title"], doc_source,
+                )
             await conn.execute(
-                "INSERT INTO ai_md_passages (doc_key, passage_index, title, content, source) VALUES ($1,$2,$3,$4,$5)",
-                doc_key, i, p["title"], p["content"], doc_source,
+                """
+                INSERT INTO ai_md_documents (doc_key, title, source, content_hash, passage_count, updated_at)
+                VALUES ($1,$2,$3,$4,$5, now())
+                ON CONFLICT (doc_key) DO UPDATE SET
+                    title = EXCLUDED.title, source = EXCLUDED.source,
+                    content_hash = EXCLUDED.content_hash, passage_count = EXCLUDED.passage_count,
+                    updated_at = now()
+                """,
+                doc_key, doc_title, doc_source, content_hash, len(parsed["passages"]),
             )
-        for q in parsed["quotes"]:
-            await conn.execute(
-                "INSERT INTO ai_md_quotes (doc_key, quote, author, passage_title, source) VALUES ($1,$2,$3,$4,$5)",
-                doc_key, q["quote"], q["author"], q["passage_title"], doc_source,
-            )
-        await conn.execute(
-            """
-            INSERT INTO ai_md_documents (doc_key, title, source, content_hash, passage_count, updated_at)
-            VALUES ($1,$2,$3,$4,$5, now())
-            ON CONFLICT (doc_key) DO UPDATE SET
-                title = EXCLUDED.title, source = EXCLUDED.source,
-                content_hash = EXCLUDED.content_hash, passage_count = EXCLUDED.passage_count,
-                updated_at = now()
-            """,
-            doc_key, doc_title, doc_source, content_hash, len(parsed["passages"]),
-        )
     return {"doc_key": doc_key, "title": doc_title,
             "passages": len(parsed["passages"]), "quotes": len(parsed["quotes"]), "changed": True}
 
