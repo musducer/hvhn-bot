@@ -57,8 +57,10 @@ class QuoteExtractorAttributionTest(unittest.TestCase):
             "Nam Cao miêu tả Cí Phèo như một bi kịch bị từ chối quyền làm người, "
             "không hề có câu trích dẫn nguyên văn nào ở đây."
         )}]}
-        plan = Planner.build("Những nhận định về Cí Phèo")
-        quotes = QuoteExtractor.extract(meta, plan, "Những nhận định về Cí Phèo")
+        query = "Phân tích nhân vật Chí Phèo trong truyện"
+        plan = Planner.build(query)
+        self.assertEqual(plan.intent, "ANALYSIS")
+        quotes = QuoteExtractor.extract(meta, plan, query)
         self.assertEqual(quotes, [])
 
 
