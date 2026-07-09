@@ -1,5 +1,6 @@
 import unittest
 from md_knowledge import parse_markdown
+from md_knowledge import MD_KNOWLEDGE_SCHEMA
 
 
 SAMPLE = """---
@@ -50,6 +51,12 @@ class ParseMarkdownTest(unittest.TestCase):
     def test_quote_carries_passage_title(self):
         q = next(q for q in self.doc["quotes"] if q["author"] == "Nguyễn Minh Châu")
         self.assertEqual(q["passage_title"], "Nhận định mở rộng")
+
+
+class SchemaShapeTest(unittest.TestCase):
+    def test_schema_has_tables(self):
+        for tbl in ("ai_md_documents", "ai_md_passages", "ai_md_quotes"):
+            self.assertIn(tbl, MD_KNOWLEDGE_SCHEMA)
 
 
 if __name__ == "__main__":
