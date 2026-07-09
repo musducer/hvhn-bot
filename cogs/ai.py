@@ -1155,7 +1155,7 @@ class AI(commands.Cog):
             return {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
 
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
-        terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:12]
+        terms = expand_query_terms(query)[:24]
         if not terms:
             rows = await self.bot.db.fetch(
                 "SELECT category, title, content FROM ai_knowledge WHERE approved = TRUE ORDER BY created_at DESC LIMIT $1",
