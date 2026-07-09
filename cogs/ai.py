@@ -22,7 +22,7 @@ GROQ_MAX_PROMPT_CHARS = int(os.getenv("GROQ_MAX_PROMPT_CHARS", "24000"))
 GROQ_SAFE_PROMPT_CHARS = int(os.getenv("GROQ_SAFE_PROMPT_CHARS", "18000"))
 CONTEXT_MAX_CHARS = int(os.getenv("HVHN_CONTEXT_MAX_CHARS", "18000"))
 COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "9000"))
-SYSTEM_EXTRA_MAX_CHARS = 1500
+SYSTEM_EXTRA_MAX_CHARS = 32000
 VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 RETRIEVAL_DEBUG = os.getenv("HVHN_RETRIEVAL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -54,6 +54,26 @@ def _load_literature_system_instructions() -> str:
 
 
 LITERATURE_SYSTEM_INSTRUCTIONS = _load_literature_system_instructions()
+
+
+def _plain_ascii(value: str) -> str:
+    text = unicodedata.normalize("NFKD", value or "")
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return text.replace("đ", "d").replace("Đ", "D")
+
+
+def _load_bonus_fewshot() -> str:
+    path = Path(__file__).resolve().parents[1] / "BONUS.txt"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if len(text) > SYSTEM_EXTRA_MAX_CHARS:
+        text = text[:SYSTEM_EXTRA_MAX_CHARS] + "\n...(rut gon BONUS vi qua dai)"
+    return text
+
+
+BONUS_FEWSHOT = _load_bonus_fewshot()
 
 
 def _clip_text(value: str, max_chars: int) -> str:
@@ -129,6 +149,33 @@ THEN_SYSTEM_PROMPT = (
     "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ. Câu hỏi đơn giản thì trả lời gọn; "
     "câu hỏi cần phân tích thì đi sâu có lớp lang, tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
 )
+
+_THEN_SYSTEM_PROMPT_CORE = THEN_SYSTEM_PROMPT
+
+THEN_SYSTEM_PROMPT = _THEN_SYSTEM_PROMPT_CORE + (
+    ("\n\n=== CHI THI VAN PHONG & CHONG AO GIAC (BAT BUOC TUAN THU) ===\n"
+     + LITERATURE_SYSTEM_INSTRUCTIONS) if LITERATURE_SYSTEM_INSTRUCTIONS else ""
+) + (
+    ("\n\n=== VI DU XAU -> TOT (tranh dung cac loi nay: chen chu Trung, bia chi tiet, hoi hot) ===\n"
+     + BONUS_FEWSHOT) if BONUS_FEWSHOT else ""
+)
+
+# Compact system prompt used for the Groq path only. Groq has a much smaller
+# effective context budget than Gemini, so the full THEN_SYSTEM_PROMPT
+# (which can grow to ~35k chars once LITERATURE_SYSTEM_INSTRUCTIONS and
+# BONUS_FEWSHOT are appended) never fits and previously caused unrecoverable
+# 413 errors even after prompt compression. This trimmed variant keeps the
+# core rules plus a short head of the literary style instructions, dropping
+# BONUS_FEWSHOT entirely, while still enforcing Vietnamese output and the
+# anti-fabrication / no-fake-quote rules.
+_GROQ_INSTRUCTIONS_HEAD_CHARS = 2500
+THEN_SYSTEM_PROMPT_GROQ = _THEN_SYSTEM_PROMPT_CORE + (
+    ("\n\n=== STYLE & ANTI-HALLUCINATION NOTES (SUMMARY) ===\n"
+     + LITERATURE_SYSTEM_INSTRUCTIONS[:_GROQ_INSTRUCTIONS_HEAD_CHARS])
+    if LITERATURE_SYSTEM_INSTRUCTIONS else ""
+)
+if len(THEN_SYSTEM_PROMPT_GROQ) > GROQ_SAFE_PROMPT_CHARS:
+    THEN_SYSTEM_PROMPT_GROQ = THEN_SYSTEM_PROMPT_GROQ[:GROQ_SAFE_PROMPT_CHARS]
 
 
 class FeedbackModal(discord.ui.Modal, title="Sửa câu trả lời cho Then"):
@@ -356,31 +403,28 @@ class QuoteExtractor:
 
     @classmethod
     def infer_author(cls, chunk_text: str, span: QuoteSpan) -> tuple[str, float]:
-        before_start = max(0, span.start - 240)
-        after_end = min(len(chunk_text), span.end + 140)
-        before = chunk_text[before_start:span.start]
-        after = chunk_text[span.end:after_end]
-        near_before = cls._candidate_names(before)
-        near_after = cls._candidate_names(after)
-        best: tuple[str, float] = (cls.UNKNOWN, 0.0)
-        for name, start, end in near_before:
-            tail = _rag_plain(before[end:])
-            distance = len(before) - end
-            verb_bonus = 0.45 if any(verb in tail[-80:] for verb in cls.AUTHOR_VERBS) else 0.0
-            colon_bonus = 0.25 if ":" in tail[-30:] else 0.0
-            score = max(0.0, 0.65 - distance / 300) + verb_bonus + colon_bonus
-            if score > best[1]:
-                best = (name, min(score, 1.0))
-        for name, start, end in near_after:
-            head = _rag_plain(after[:start])
-            distance = start
-            verb_bonus = 0.35 if any(verb in head[:80] for verb in cls.AUTHOR_VERBS) else 0.0
-            score = max(0.0, 0.35 - distance / 300) + verb_bonus
-            if score > best[1]:
-                best = (name, min(score, 0.85))
-        if best[1] < 0.55:
-            return cls.UNKNOWN, best[1]
-        return best
+        # Chi gan tac gia khi co gan tuong minh NGAY SAT truoc quote:
+        # "<Ten> <verb>:" hoac "<Ten>:" trong cua so hep truoc dau mo ngoac.
+        window_start = max(0, span.start - 120)
+        before = chunk_text[window_start:span.start]
+        names = cls._candidate_names(before)
+        if not names:
+            return cls.UNKNOWN, 0.0
+        name, _n_start, n_end = names[-1]  # ten gan quote nhat
+        tail = before[n_end:]              # doan giua ten va quote
+        tail_plain = _rag_plain(tail)
+        # Phai chi con verb attribution +/hoac dau hai cham, khong chen cau khac.
+        if len(tail.strip()) > 40 or any(p in tail for p in ".!?…;\n"):
+            return cls.UNKNOWN, 0.0
+        has_verb = any(verb in tail_plain for verb in cls.AUTHOR_VERBS)
+        has_colon = ":" in tail
+        if has_verb and has_colon:
+            return name, 0.95
+        if has_colon:
+            return name, 0.8
+        if has_verb:
+            return name, 0.7
+        return cls.UNKNOWN, 0.0
 
     @classmethod
     def extract(cls, pdf_meta: dict, plan: RAGPlan, query: str) -> list[QuoteEvidence]:
@@ -389,9 +433,6 @@ class QuoteExtractor:
         for chunk in pdf_meta.get("chunks") or []:
             text = re.sub(r"\s+", " ", chunk.get("content") or chunk.get("excerpt") or "").strip()
             spans = cls.quote_spans(text)
-            if not spans and plan.intent in {"QUOTE_COLLECTION", "COMPARE", "ANALYSIS"}:
-                units = AI._extract_units_from_chunk(query, chunk, quote_mode=False, max_units=2)
-                spans = [QuoteSpan(unit, text.find(unit) if text.find(unit) >= 0 else 0, (text.find(unit) if text.find(unit) >= 0 else 0) + len(unit)) for unit in units]
             for span in spans:
                 author, confidence = cls.infer_author(text, span)
                 if requested_plain and _rag_plain(author) != requested_plain:
@@ -450,12 +491,20 @@ class Formatter:
 
     @staticmethod
     def compare_seed(items: list[QuoteEvidence], plan: RAGPlan) -> str:
+        return Formatter.evidence_block(items)
+
+    @staticmethod
+    def evidence_block(items: list[QuoteEvidence]) -> str:
         if not items:
             return ""
-        lines = ["TRICH DAN CAN DUNG TRUOC KHI PHAN TICH:"]
+        lines = ["TRICH DAN DA XAC MINH (chi dung nguyen van cac cau nay, dung gan sai tac gia):"]
         for item in items[:8]:
-            author = item.author or "khong ro"
-            lines.append(f"- {author}: \"{item.quote}\" ({item.pdf_title})")
+            if item.author and item.author != QuoteExtractor.UNKNOWN:
+                who = item.author
+            else:
+                who = "CHUA XAC DINH TAC GIA (khong duoc tu gan ten)"
+            src = f" | nguon: {item.pdf_title}" if item.pdf_title else ""
+            lines.append(f"- TAC GIA: {who} | TRICH: \"{item.quote}\"{src}")
         return "\n".join(lines)
 
 
@@ -641,14 +690,23 @@ class AI(commands.Cog):
                     except Exception as exc:
                         errors.append(f"Gemini exception: {type(exc).__name__}: {exc}")
 
+            # Groq has a much tighter effective context budget than Gemini.
+            # If the caller's system prompt is the large THEN_SYSTEM_PROMPT
+            # (instructions + BONUS examples appended), swap in the compact
+            # Groq-only variant so the request can actually fit and the 413
+            # retry below has a real chance of succeeding.
+            groq_system_prompt = system_prompt
+            if len(system_prompt) > GROQ_SAFE_PROMPT_CHARS:
+                groq_system_prompt = THEN_SYSTEM_PROMPT_GROQ
+
             groq_prompt = prompt
-            if len(groq_prompt) + len(system_prompt) > GROQ_MAX_PROMPT_CHARS:
+            if len(groq_prompt) + len(groq_system_prompt) > GROQ_MAX_PROMPT_CHARS:
                 groq_prompt = self._compress_prompt_for_groq(prompt)
                 print(
                     "[ai-api] "
-                    f"event=groq_prompt_compressed original_chars={len(prompt) + len(system_prompt)} "
-                    f"compressed_chars={len(groq_prompt) + len(system_prompt)} "
-                    f"est_tokens={self._estimated_tokens(groq_prompt, system_prompt)}",
+                    f"event=groq_prompt_compressed original_chars={len(prompt) + len(groq_system_prompt)} "
+                    f"compressed_chars={len(groq_prompt) + len(groq_system_prompt)} "
+                    f"est_tokens={self._estimated_tokens(groq_prompt, groq_system_prompt)}",
                     flush=True,
                 )
             for index, key in enumerate(self.groq_keys, start=1):
@@ -659,10 +717,10 @@ class AI(commands.Cog):
                     key=key,
                     key_index=index,
                     total_keys=len(self.groq_keys),
-                    body=f"prompt_chars={len(groq_prompt) + len(system_prompt)} est_tokens={self._estimated_tokens(groq_prompt, system_prompt)}",
+                    body=f"prompt_chars={len(groq_prompt) + len(groq_system_prompt)} est_tokens={self._estimated_tokens(groq_prompt, groq_system_prompt)}",
                 )
                 try:
-                    ok, content = await self.ask_groq(session, key, groq_prompt, system_prompt, temperature)
+                    ok, content = await self.ask_groq(session, key, groq_prompt, groq_system_prompt, temperature)
                     if ok:
                         self.last_ai_errors = []
                         self._log_api_event(
@@ -698,9 +756,9 @@ class AI(commands.Cog):
                                 key_index=index,
                                 total_keys=len(self.groq_keys),
                                 status=content.get("status"),
-                                body=f"retry_chars={len(retry_prompt) + len(system_prompt)} est_tokens={self._estimated_tokens(retry_prompt, system_prompt)}",
+                                body=f"retry_chars={len(retry_prompt) + len(groq_system_prompt)} est_tokens={self._estimated_tokens(retry_prompt, groq_system_prompt)}",
                             )
-                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, system_prompt, temperature)
+                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, groq_system_prompt, temperature)
                             if ok2:
                                 self.last_ai_errors = []
                                 return str(content2)
@@ -1171,15 +1229,9 @@ class AI(commands.Cog):
     def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str) -> str:
         source_block = knowledge or "KHONG CO KHO PDF/TRI THUC HVHN PHU HOP DUOC NAP."
         web_block = web_context or "KHONG CO NGUON WEB DUOC TRUY XUAT."
-        literature_rules = (
-            "\n\nCHI THI NGU VAN BO SUNG TU SYSTEM INSTRUCTIONS.txt:\n"
-            f"{LITERATURE_SYSTEM_INSTRUCTIONS}\n"
-            if LITERATURE_SYSTEM_INSTRUCTIONS else ""
-        )
         return (
             "Ban la Then, tro giang AI mon Ngu van cua HVHN. Luon tra loi bang tieng Viet co dau, tru khi nguoi dung yeu cau ngon ngu khac.\n"
             f"CHE DO: {mode}\n"
-            f"{literature_rules}"
             "KHO PDF/TRI THUC/FEEDBACK HVHN DA TRUY XUAT:\n"
             f"{source_block}\n\n"
             "NGUON WEB DA TRA CUU (neu co):\n"

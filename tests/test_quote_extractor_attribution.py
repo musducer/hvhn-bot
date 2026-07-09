@@ -43,6 +43,26 @@ class QuoteExtractorAttributionTest(unittest.TestCase):
         self.assertEqual(quotes[0].author, "UNKNOWN")
         self.assertLess(quotes[0].confidence, 0.55)
 
+    def test_far_name_without_adjacent_verb_is_unknown(self):
+        meta = {"chunks": [{"title": "far.pdf", "chunk_index": 2, "content": (
+            "Nam Cao là nhà văn hiện thực. Trong một đoạn khác, xuất hiện câu: "
+            "“Hạnh phúc là một tấm chăn quá hẹp.”"
+        )}]}
+        plan = Planner.build("Cho một nhận định")
+        quotes = QuoteExtractor.extract(meta, plan, "Cho một nhận định")
+        self.assertEqual(quotes[0].author, "UNKNOWN")
+
+    def test_no_quote_marks_yields_no_evidence(self):
+        meta = {"chunks": [{"title": "prose.pdf", "chunk_index": 3, "content": (
+            "Nam Cao miêu tả Cí Phèo như một bi kịch bị từ chối quyền làm người, "
+            "không hề có câu trích dẫn nguyên văn nào ở đây."
+        )}]}
+        query = "Phân tích nhân vật Chí Phèo trong truyện"
+        plan = Planner.build(query)
+        self.assertEqual(plan.intent, "ANALYSIS")
+        quotes = QuoteExtractor.extract(meta, plan, query)
+        self.assertEqual(quotes, [])
+
 
 if __name__ == "__main__":
     unittest.main()
