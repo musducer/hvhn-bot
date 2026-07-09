@@ -22,7 +22,7 @@ GROQ_MAX_PROMPT_CHARS = int(os.getenv("GROQ_MAX_PROMPT_CHARS", "24000"))
 GROQ_SAFE_PROMPT_CHARS = int(os.getenv("GROQ_SAFE_PROMPT_CHARS", "18000"))
 CONTEXT_MAX_CHARS = int(os.getenv("HVHN_CONTEXT_MAX_CHARS", "18000"))
 COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "9000"))
-SYSTEM_EXTRA_MAX_CHARS = 20000
+SYSTEM_EXTRA_MAX_CHARS = 32000
 VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 RETRIEVAL_DEBUG = os.getenv("HVHN_RETRIEVAL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
@@ -150,13 +150,32 @@ THEN_SYSTEM_PROMPT = (
     "câu hỏi cần phân tích thì đi sâu có lớp lang, tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
 )
 
-THEN_SYSTEM_PROMPT = THEN_SYSTEM_PROMPT + (
+_THEN_SYSTEM_PROMPT_CORE = THEN_SYSTEM_PROMPT
+
+THEN_SYSTEM_PROMPT = _THEN_SYSTEM_PROMPT_CORE + (
     ("\n\n=== CHI THI VAN PHONG & CHONG AO GIAC (BAT BUOC TUAN THU) ===\n"
      + LITERATURE_SYSTEM_INSTRUCTIONS) if LITERATURE_SYSTEM_INSTRUCTIONS else ""
 ) + (
     ("\n\n=== VI DU XAU -> TOT (tranh dung cac loi nay: chen chu Trung, bia chi tiet, hoi hot) ===\n"
      + BONUS_FEWSHOT) if BONUS_FEWSHOT else ""
 )
+
+# Compact system prompt used for the Groq path only. Groq has a much smaller
+# effective context budget than Gemini, so the full THEN_SYSTEM_PROMPT
+# (which can grow to ~35k chars once LITERATURE_SYSTEM_INSTRUCTIONS and
+# BONUS_FEWSHOT are appended) never fits and previously caused unrecoverable
+# 413 errors even after prompt compression. This trimmed variant keeps the
+# core rules plus a short head of the literary style instructions, dropping
+# BONUS_FEWSHOT entirely, while still enforcing Vietnamese output and the
+# anti-fabrication / no-fake-quote rules.
+_GROQ_INSTRUCTIONS_HEAD_CHARS = 2500
+THEN_SYSTEM_PROMPT_GROQ = _THEN_SYSTEM_PROMPT_CORE + (
+    ("\n\n=== STYLE & ANTI-HALLUCINATION NOTES (SUMMARY) ===\n"
+     + LITERATURE_SYSTEM_INSTRUCTIONS[:_GROQ_INSTRUCTIONS_HEAD_CHARS])
+    if LITERATURE_SYSTEM_INSTRUCTIONS else ""
+)
+if len(THEN_SYSTEM_PROMPT_GROQ) > GROQ_SAFE_PROMPT_CHARS:
+    THEN_SYSTEM_PROMPT_GROQ = THEN_SYSTEM_PROMPT_GROQ[:GROQ_SAFE_PROMPT_CHARS]
 
 
 class FeedbackModal(discord.ui.Modal, title="Sửa câu trả lời cho Then"):
@@ -395,7 +414,7 @@ class QuoteExtractor:
         tail = before[n_end:]              # doan giua ten va quote
         tail_plain = _rag_plain(tail)
         # Phai chi con verb attribution +/hoac dau hai cham, khong chen cau khac.
-        if len(tail.strip(" \t")) > 40 or "." in tail:
+        if len(tail.strip()) > 40 or any(p in tail for p in ".!?…;\n"):
             return cls.UNKNOWN, 0.0
         has_verb = any(verb in tail_plain for verb in cls.AUTHOR_VERBS)
         has_colon = ":" in tail
@@ -671,14 +690,23 @@ class AI(commands.Cog):
                     except Exception as exc:
                         errors.append(f"Gemini exception: {type(exc).__name__}: {exc}")
 
+            # Groq has a much tighter effective context budget than Gemini.
+            # If the caller's system prompt is the large THEN_SYSTEM_PROMPT
+            # (instructions + BONUS examples appended), swap in the compact
+            # Groq-only variant so the request can actually fit and the 413
+            # retry below has a real chance of succeeding.
+            groq_system_prompt = system_prompt
+            if len(system_prompt) > GROQ_SAFE_PROMPT_CHARS:
+                groq_system_prompt = THEN_SYSTEM_PROMPT_GROQ
+
             groq_prompt = prompt
-            if len(groq_prompt) + len(system_prompt) > GROQ_MAX_PROMPT_CHARS:
+            if len(groq_prompt) + len(groq_system_prompt) > GROQ_MAX_PROMPT_CHARS:
                 groq_prompt = self._compress_prompt_for_groq(prompt)
                 print(
                     "[ai-api] "
-                    f"event=groq_prompt_compressed original_chars={len(prompt) + len(system_prompt)} "
-                    f"compressed_chars={len(groq_prompt) + len(system_prompt)} "
-                    f"est_tokens={self._estimated_tokens(groq_prompt, system_prompt)}",
+                    f"event=groq_prompt_compressed original_chars={len(prompt) + len(groq_system_prompt)} "
+                    f"compressed_chars={len(groq_prompt) + len(groq_system_prompt)} "
+                    f"est_tokens={self._estimated_tokens(groq_prompt, groq_system_prompt)}",
                     flush=True,
                 )
             for index, key in enumerate(self.groq_keys, start=1):
@@ -689,10 +717,10 @@ class AI(commands.Cog):
                     key=key,
                     key_index=index,
                     total_keys=len(self.groq_keys),
-                    body=f"prompt_chars={len(groq_prompt) + len(system_prompt)} est_tokens={self._estimated_tokens(groq_prompt, system_prompt)}",
+                    body=f"prompt_chars={len(groq_prompt) + len(groq_system_prompt)} est_tokens={self._estimated_tokens(groq_prompt, groq_system_prompt)}",
                 )
                 try:
-                    ok, content = await self.ask_groq(session, key, groq_prompt, system_prompt, temperature)
+                    ok, content = await self.ask_groq(session, key, groq_prompt, groq_system_prompt, temperature)
                     if ok:
                         self.last_ai_errors = []
                         self._log_api_event(
@@ -728,9 +756,9 @@ class AI(commands.Cog):
                                 key_index=index,
                                 total_keys=len(self.groq_keys),
                                 status=content.get("status"),
-                                body=f"retry_chars={len(retry_prompt) + len(system_prompt)} est_tokens={self._estimated_tokens(retry_prompt, system_prompt)}",
+                                body=f"retry_chars={len(retry_prompt) + len(groq_system_prompt)} est_tokens={self._estimated_tokens(retry_prompt, groq_system_prompt)}",
                             )
-                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, system_prompt, temperature)
+                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, groq_system_prompt, temperature)
                             if ok2:
                                 self.last_ai_errors = []
                                 return str(content2)
