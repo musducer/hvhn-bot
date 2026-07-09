@@ -143,6 +143,16 @@ class _null_ctx:
     async def __aexit__(self, *a): return False
 
 
+def build_md_context(chunks: list[dict]) -> str:
+    blocks = []
+    for i, c in enumerate(chunks, start=1):
+        title = c.get("title") or ""
+        source = c.get("source") or title
+        content = c.get("excerpt") or c.get("content") or ""
+        blocks.append(f"[P{i}] Tai lieu MD - {title} - doan {c.get('chunk_index')}\nNguon MD: {source}\n{content}")
+    return "\n\n".join(blocks)
+
+
 async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     await ensure_md_schema(db)
     rows = await db.fetch(
@@ -158,8 +168,8 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
         """,
         query, limit,
     )
-    chunks = [{"title": r["title"], "content": r["content"], "source": r["source"],
-               "chunk_index": i, "page": None} for i, r in enumerate(rows)]
+    chunks = [{"title": r["title"], "content": r["content"], "excerpt": r["content"],
+               "source": r["source"], "chunk_index": i, "page": None} for i, r in enumerate(rows)]
     qrows = await db.fetch(
         """
         SELECT q.quote, q.author, q.source, d.title
@@ -173,5 +183,5 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     quotes = [{"quote": r["quote"], "author": r["author"] or "", "source": r["source"], "title": r["title"]}
               for r in qrows]
     top = float(rows[0]["rank"]) if rows else 0.0
-    return {"chunks": chunks, "quotes": quotes, "selected_count": len(chunks),
-            "candidate_count": len(chunks), "top_score": top}
+    return {"context": build_md_context(chunks), "chunks": chunks, "quotes": quotes,
+            "selected_count": len(chunks), "candidate_count": len(chunks), "top_score": top}

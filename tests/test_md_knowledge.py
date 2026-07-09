@@ -1,6 +1,7 @@
 import unittest
 from md_knowledge import parse_markdown
 from md_knowledge import MD_KNOWLEDGE_SCHEMA
+from md_knowledge import build_md_context
 
 
 SAMPLE = """---
@@ -57,6 +58,22 @@ class SchemaShapeTest(unittest.TestCase):
     def test_schema_has_tables(self):
         for tbl in ("ai_md_documents", "ai_md_passages", "ai_md_quotes"):
             self.assertIn(tbl, MD_KNOWLEDGE_SCHEMA)
+
+
+class BuildMdContextTest(unittest.TestCase):
+    def test_context_lists_passages_with_source(self):
+        chunks = [
+            {"title": "Bi kịch", "content": "Chí Phèo bị ruồng bỏ.", "source": "sgk11", "chunk_index": 0},
+            {"title": "Mở rộng", "content": "Vòng tròn đồng tâm.", "source": "sgk11", "chunk_index": 1},
+        ]
+        ctx = build_md_context(chunks)
+        self.assertIn("Chí Phèo bị ruồng bỏ.", ctx)
+        self.assertIn("Bi kịch", ctx)
+        self.assertIn("[P1]", ctx)
+        self.assertIn("[P2]", ctx)
+
+    def test_empty_chunks_empty_context(self):
+        self.assertEqual(build_md_context([]), "")
 
 
 if __name__ == "__main__":
