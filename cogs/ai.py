@@ -252,6 +252,9 @@ class RAGPlan:
     retrieval_limit: int = PDF_DEFAULT_LIMIT
     use_llm: bool = True
     reason: str = ""
+    genre: str = "NONE"
+    level: str = "THUONG"
+    write_essay: bool = False
 
 
 @dataclass
@@ -317,11 +320,53 @@ class Planner:
                 return value
         return ""
 
+    NLVH_MARKERS = (
+        "nghi luan van hoc", "nlvh", "tac pham", "nhan vat", "doan tho", "bai tho",
+        "doan trich", "kho tho", "hinh tuong", "chi tiet nghe thuat", "gia tri nhan dao",
+        "binh giang", "cam nhan ve", "phan tich bai", "phan tich doan", "phan tich nhan vat",
+    )
+    NLXH_MARKERS = (
+        "nghi luan xa hoi", "nlxh", "tu tuong dao li", "hien tuong doi song", "hien tuong",
+        "quan niem song", "loi song", "y kien cho rang", "cham ngon", "ve cuoc song",
+        "gia tri song", "vo cam", "suy nghi ve", "ban ve", "y nghia cua",
+    )
+    HSG_MARKERS = (
+        "hsg", "hoc sinh gioi", "doi tuyen", "chuyen", "cap tinh", "khu vuc",
+        "quoc gia", "olympic", "chuyen de",
+    )
+    ESSAY_MARKERS = (
+        "viet bai", "viet thanh bai", "viet doan", "viet mo bai", "viet ket bai",
+        "viet hoan chinh", "viet mot bai", "viet giup minh bai", "viet giup toi bai",
+    )
+    NHAN_DINH_MARKERS = ("nhan dinh", "y kien", "quan niem", "cho rang")
+    CHUNG_MINH_MARKERS = ("chung minh", "lam sang to", "ban ve", "binh luan y kien", "lam ro")
+
+    @classmethod
+    def classify_composition(cls, message: str, intent: str, author: str) -> tuple[str, str, bool]:
+        q = _rag_plain(message)
+        if any(m in q for m in cls.NLVH_MARKERS):
+            genre = "NLVH"
+        elif any(m in q for m in cls.NLXH_MARKERS):
+            genre = "NLXH"
+        elif intent in {"OUTLINE", "ANALYSIS", "COMPARE"} and author:
+            genre = "NLVH"
+        else:
+            genre = "NONE"
+        level = "THUONG"
+        if genre != "NONE":
+            if any(m in q for m in cls.HSG_MARKERS):
+                level = "HSG"
+            elif genre == "NLVH" and any(m in q for m in cls.NHAN_DINH_MARKERS) and any(m in q for m in cls.CHUNG_MINH_MARKERS):
+                level = "HSG"
+        write_essay = any(m in q for m in cls.ESSAY_MARKERS)
+        return genre, level, write_essay
+
     @classmethod
     def build(cls, message: str) -> RAGPlan:
         intent = IntentClassifier.classify(message)
         q = _rag_plain(message)
         author = cls.author_filter(message)
+        genre, level, write_essay = cls.classify_composition(message, intent, author)
         exact = intent == "QUOTE_SINGLE"
         aggregate = intent == "QUOTE_COLLECTION"
         document_only = any(m in q for m in ("theo tai lieu", "tai lieu da nap", "trong tai lieu", "kho pdf", "da nap")) or intent.startswith("QUOTE")
@@ -337,6 +382,9 @@ class Planner:
             retrieval_limit=retrieval_limit,
             use_llm=intent not in {"QUOTE_SINGLE", "QUOTE_COLLECTION"},
             reason=f"intent={intent}; author={author or 'none'}",
+            genre=genre,
+            level=level,
+            write_essay=write_essay,
         )
 
 
