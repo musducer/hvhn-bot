@@ -556,6 +556,66 @@ class Formatter:
         return "\n".join(lines)
 
 
+class Scaffold:
+    _NLXH_THUONG = (
+        "Mở bài: dẫn dắt tự nhiên rồi nêu thẳng vấn đề nghị luận.\n"
+        "Thân bài: (1) Giải thích từ khóa/khái niệm cốt lõi; (2) Bàn luận — khẳng định "
+        "đúng/sai, mỗi ý kèm lí lẽ sắc và dẫn chứng thực tế cụ thể; (3) Phản biện & mở rộng "
+        "— lật ngược vấn đề, phê phán biểu hiện trái; (4) Bài học nhận thức và hành động.\n"
+        "Kết bài: khẳng định lại và liên hệ bản thân."
+    )
+    _NLXH_HSG = (
+        "Đây là đề nghị luận xã hội mức HSG: thường trừu tượng, đa nghĩa.\n"
+        "Mở bài: dẫn dắt có chiều sâu, nêu vấn đề.\n"
+        "Thân bài: (1) Giải mã nhiều lớp nghĩa của từ khóa; (2) Bàn luận với chiều sâu "
+        "nhân sinh và triết lí, lí lẽ chặt; (3) Phản biện đa tầng — giới hạn vấn đề, điều "
+        "kiện đúng/sai, mặt trái; (4) Dẫn chứng đa dạng: đời sống + văn học + nhân vật lịch "
+        "sử; (5) Bài học nhận thức và hành động.\n"
+        "Kết bài: nâng vấn đề, để lại dư âm. Hành văn giàu hình ảnh, có dấu ấn tư duy riêng."
+    )
+    _NLVH_THUONG = (
+        "Mở bài: giới thiệu tác giả — tác phẩm — vấn đề nghị luận (nêu nhận định nếu đề có).\n"
+        "Thân bài: (1) Khái quát hoàn cảnh sáng tác/vị trí đoạn; (2) Hệ thống luận điểm — "
+        "mỗi luận điểm phân tích cả nội dung và nghệ thuật, có dẫn chứng và lời bình; "
+        "(3) Đánh giá giá trị nội dung, nghệ thuật, phong cách.\n"
+        "Kết bài: khẳng định và nêu cảm nghĩ. Liên hệ/mở rộng khi hợp lí."
+    )
+    _NLVH_HSG = (
+        "Đây là đề nghị luận văn học mức HSG, thường là một nhận định lý luận văn học cần "
+        "chứng minh.\n"
+        "Mở bài: giới thiệu và trích nhận định làm trục.\n"
+        "Thân bài: (1) Giải thích nhận định (vận dụng thuật ngữ lý luận văn học: thi pháp, "
+        "điểm nhìn, tình huống, giá trị nhân đạo...); (2) Chứng minh qua tác phẩm bằng hệ "
+        "thống luận điểm sâu (nội dung + nghệ thuật + dẫn chứng + bình); (3) So sánh, liên "
+        "hệ rộng với tác phẩm cùng đề tài/thời kỳ; (4) Phản biện đa chiều, bàn giới hạn của "
+        "nhận định; (5) Đánh giá đóng góp và phong cách tác giả.\n"
+        "Kết bài: khẳng định, nâng tầm. Hành văn giàu chất văn, có sáng tạo."
+    )
+
+    @classmethod
+    def _skeleton(cls, plan: RAGPlan) -> str:
+        if plan.genre == "NLXH":
+            return cls._NLXH_HSG if plan.level == "HSG" else cls._NLXH_THUONG
+        return cls._NLVH_HSG if plan.level == "HSG" else cls._NLVH_THUONG
+
+    @classmethod
+    def for_plan(cls, plan: RAGPlan) -> str:
+        if plan.genre == "NONE":
+            return ""
+        skeleton = cls._skeleton(plan)
+        if plan.write_essay:
+            mode_line = (
+                "Nhiệm vụ: viết thành bài văn hoàn chỉnh, mạch lạc, các phần nối liền thành "
+                "văn xuôi (không gạch đầu dòng), giữ nguyên chiều sâu lập luận theo khung dưới."
+            )
+        else:
+            mode_line = (
+                "Nhiệm vụ: lập dàn ý chi tiết theo khung dưới; đào sâu từng ý — lí lẽ, dẫn "
+                "chứng, phản biện, liên hệ mở rộng — không liệt kê hời hợt."
+            )
+        return f"KHUNG TƯ DUY LẬP LUẬN:\n{mode_line}\n{skeleton}"
+
+
 class AI(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
