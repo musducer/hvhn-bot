@@ -241,6 +241,41 @@ def _rag_plain(value: str) -> str:
     return value.replace("đ", "d")
 
 
+CONCEPT_CLUSTERS = [
+    ["mo bai", "gioi thieu", "dan dat", "vao bai", "dat van de", "mo doan", "cau mo dau"],
+    ["ket bai", "ket luan", "khep lai", "tong ket", "chot van de", "ket doan"],
+    ["than bai", "trien khai", "phat trien y", "phan tich", "trien khai luan diem"],
+    ["dan y", "bo cuc", "suon bai", "khung bai", "luan diem", "he thong luan diem", "y chinh"],
+    ["dan chung", "bang chung", "vi du", "lieu chung", "minh chung"],
+    ["ly le", "lap luan", "ly luan", "bien luan"],
+    ["nghi luan xa hoi", "nlxh", "tu tuong dao li", "hien tuong doi song"],
+    ["nghi luan van hoc", "nlvh", "phan tich tac pham", "cam nhan"],
+    ["bien phap tu tu", "nghe thuat", "an du", "so sanh", "nhan hoa", "diep ngu"],
+    ["nhan vat", "hinh tuong", "nhan vat van hoc"],
+    ["van phong", "giong van", "loi van", "hanh van"],
+    ["nhan dinh", "y kien", "trich dan", "cau noi"],
+]
+
+
+def expand_query_terms(query: str) -> list[str]:
+    base = _rag_plain(query)
+    tokens = [t for t in re.findall(r"[a-z0-9]{2,}", base) if t]
+    out: list[str] = []
+
+    def _add(t: str):
+        if t and t not in out:
+            out.append(t)
+
+    for t in tokens:
+        _add(t)
+    # no cum: neu chuoi query cham toi bat ky phrase nao trong cum -> them ca cum
+    for cluster in CONCEPT_CLUSTERS:
+        if any(phrase in base for phrase in cluster):
+            for phrase in cluster:
+                _add(phrase)
+    return out
+
+
 @dataclass
 class RAGPlan:
     intent: str
