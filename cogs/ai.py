@@ -569,8 +569,8 @@ class Scaffold:
         "Mở bài: dẫn dắt có chiều sâu, nêu vấn đề.\n"
         "Thân bài: (1) Giải mã nhiều lớp nghĩa của từ khóa; (2) Bàn luận với chiều sâu "
         "nhân sinh và triết lí, lí lẽ chặt; (3) Phản biện đa tầng — giới hạn vấn đề, điều "
-        "kiện đúng/sai, mặt trái; (4) Dẫn chứng đa dạng: đời sống + văn học + nhân vật lịch "
-        "sử; (5) Bài học nhận thức và hành động.\n"
+        "kiện đúng/sai, mặt trái; (4) Dẫn chứng phong phú từ thực tế đời sống và nhân vật "
+        "lịch sử/người thật (không dùng dẫn chứng văn học); (5) Bài học nhận thức và hành động.\n"
         "Kết bài: nâng vấn đề, để lại dư âm. Hành văn giàu hình ảnh, có dấu ấn tư duy riêng."
     )
     _NLVH_THUONG = (

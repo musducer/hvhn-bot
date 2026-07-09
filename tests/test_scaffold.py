@@ -28,6 +28,11 @@ class ScaffoldTest(unittest.TestCase):
         block = Scaffold.for_plan(_plan("NLXH", level="HSG"))
         self.assertIn("đa tầng", block)
 
+    def test_nlxh_has_no_literary_evidence(self):
+        for lvl in ("THUONG", "HSG"):
+            block = Scaffold.for_plan(_plan("NLXH", level=lvl))
+            self.assertNotIn("dẫn chứng văn học", block.replace("không dùng dẫn chứng văn học", ""))
+
     def test_default_is_outline(self):
         block = Scaffold.for_plan(_plan("NLVH"))
         self.assertIn("dàn ý chi tiết", block)
