@@ -2,6 +2,68 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
+from bot import DAN_LANG_ROLE
+
+
+def build_guide_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="📖 HƯỚNG DẪN DÙNG BOT THEN",
+        description=(
+            "Đọc hết trước khi bấm nút cuối để nhận quyền dùng bot. "
+            "Hiểu đúng khả năng và giới hạn của Then giúp bạn khai thác tối đa sức mạnh AI."
+        ),
+        color=0x1abc9c,
+    )
+    embed.add_field(
+        name="Then làm được gì",
+        value=(
+            "• Hỏi đáp, phân tích tác phẩm, tác giả, nhận định văn học.\n"
+            "• Lập dàn ý chi tiết cho nghị luận xã hội và nghị luận văn học (cả mức HSG).\n"
+            "• Gợi ý hệ thống luận điểm, lí lẽ, dẫn chứng và hướng phản biện.\n"
+            "• Tra nhận định/trích dẫn trong kho tài liệu đã nạp."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Hạn chế — đọc kỹ",
+        value=(
+            "• AI có thể sai hoặc \"ảo giác\": luôn tự kiểm chứng lại kiến thức trước khi dùng.\n"
+            "• Không chép nguyên văn trích dẫn nếu không có trong tài liệu; đừng tin tuyệt đối trí nhớ của AI.\n"
+            "• Then hỗ trợ tư duy, KHÔNG làm thay bài của bạn; hãy tự viết dựa trên gợi ý.\n"
+            "• Kiến thức ngoài kho tài liệu có thể thiếu chính xác."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Mẹo đặt prompt khai thác tối đa",
+        value=(
+            "• Nêu rõ dạng đề: nghị luận xã hội hay văn học, mức thường hay HSG.\n"
+            "• Nói rõ bạn cần gì: dàn ý hay viết bài, phân tích khía cạnh nào.\n"
+            "• Cung cấp ngữ liệu/đoạn trích khi hỏi về một văn bản cụ thể.\n"
+            "• Hỏi từng bước, đào sâu dần thay vì một câu chung chung."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="Bấm nút bên dưới để xác nhận đã đọc và mở khóa quyền dùng bot.")
+    return embed
+
+
+class BotGuideView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="Tôi đã đọc — Nhận quyền dùng bot", style=discord.ButtonStyle.success, emoji="🤖", custom_id="confirm_bot_guide")
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        role = discord.utils.get(interaction.guild.roles, name=DAN_LANG_ROLE)
+        if not role:
+            await interaction.response.send_message(f"Lỗi hệ thống: chưa có vai trò \"{DAN_LANG_ROLE}\". Nhờ admin chạy /setup.", ephemeral=True)
+            return
+        if role in interaction.user.roles:
+            await interaction.response.send_message("Bạn đã có quyền dùng bot Then rồi!", ephemeral=True)
+        else:
+            await interaction.user.add_roles(role)
+            await interaction.response.send_message(f"🤖 Đã mở khóa quyền dùng bot Then. Chào mừng \"Dân làng Hua Tát\"!", ephemeral=True)
+
 
 class VerifyView(discord.ui.View):
     def __init__(self):
@@ -37,7 +99,8 @@ class Setup(commands.Cog):
             {"name": "Diễn giả", "color": discord.Color.gold(), "hoist": True, "perms": discord.Permissions.none()},
             {"name": "Thành viên", "color": discord.Color.blue(), "hoist": True, "perms": discord.Permissions.none()},
             {"name": "Nhà thơ mộng mơ", "color": discord.Color.purple(), "hoist": False, "perms": discord.Permissions.none()},
-            {"name": "Chiến thần Nghị luận", "color": discord.Color.dark_orange(), "hoist": False, "perms": discord.Permissions.none()}
+            {"name": "Chiến thần Nghị luận", "color": discord.Color.dark_orange(), "hoist": False, "perms": discord.Permissions.none()},
+            {"name": "Dân làng Hua Tát", "color": discord.Color.teal(), "hoist": False, "perms": discord.Permissions.none()}
         ]
 
         created_roles = {}
@@ -112,6 +175,10 @@ class Setup(commands.Cog):
         rules_channel = await get_or_create_text(info_cat, "luật-lệ")
         verify_channel = await get_or_create_text(info_cat, "cổng-xác-nhận")
         await get_or_create_text(info_cat, "bảng-tin-thông-báo")
+        guide_channel = await get_or_create_text(info_cat, "hướng-dẫn-dùng-bot", overwrites=welcome_perms)
+        guide_history = [msg async for msg in guide_channel.history(limit=5)]
+        if not any(msg.author == guild.me for msg in guide_history):
+            await guide_channel.send(embed=build_guide_embed(), view=BotGuideView())
 
         study_cat = await get_or_create_category("📚 GÓC HỌC TẬP - NGỮ VĂN", member_only)
         await get_or_create_forum(study_cat, "hỏi-đáp-bài-tập")
@@ -211,4 +278,5 @@ class Setup(commands.Cog):
 
 async def setup(bot: commands.Bot):
     bot.add_view(VerifyView())
+    bot.add_view(BotGuideView())
     await bot.add_cog(Setup(bot))
