@@ -48,6 +48,25 @@ def build_guide_embed() -> discord.Embed:
     return embed
 
 
+def build_welcome_embed(member_mention: str, rules_mention: str, verify_mention: str, guide_mention: str) -> discord.Embed:
+    embed = discord.Embed(
+        title="🎉 Chào mừng đến với Hồn Văn - Hồn Người!",
+        description=f"Rất vui được đón {member_mention}. Hoàn thành 2 bước sau để mở khóa đầy đủ:",
+        color=0x2ecc71,
+    )
+    embed.add_field(
+        name="Bước 1 — Mở khóa các kênh",
+        value=f"Đọc luật ở {rules_mention}, rồi vào {verify_mention} bấm nút để nhận vai trò **Thành viên**.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Bước 2 — Mở khóa quyền dùng bot Then",
+        value=f"Đọc {guide_mention}, rồi bấm nút xác nhận để nhận vai trò **Dân làng Hua Tát** và bắt đầu dùng bot.",
+        inline=False,
+    )
+    return embed
+
+
 class BotGuideView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -86,6 +105,26 @@ class VerifyView(discord.ui.View):
 class Setup(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        guild = member.guild
+        welcome = discord.utils.get(guild.text_channels, name="sảnh-chào-mừng")
+        if welcome is None:
+            return
+        rules = discord.utils.get(guild.text_channels, name="luật-lệ")
+        verify = discord.utils.get(guild.text_channels, name="cổng-xác-nhận")
+        guide = discord.utils.get(guild.text_channels, name="hướng-dẫn-dùng-bot")
+        embed = build_welcome_embed(
+            member.mention,
+            rules.mention if rules else "#luật-lệ",
+            verify.mention if verify else "#cổng-xác-nhận",
+            guide.mention if guide else "#hướng-dẫn-dùng-bot",
+        )
+        try:
+            await welcome.send(content=member.mention, embed=embed)
+        except discord.Forbidden:
+            pass
 
     @app_commands.command(name="setup", description="Kiểm tra và khôi phục các kênh gốc (Không tạo kênh rác)")
     @app_commands.checks.has_permissions(administrator=True)
@@ -202,6 +241,14 @@ class Setup(commands.Cog):
         for msg in old_rules_messages:
             await msg.delete()
 
+        qa_ch = discord.utils.get(guild.text_channels, name="hỏi-đáp-bài-tập") or discord.utils.get(guild.forums, name="hỏi-đáp-bài-tập")
+        share_ch = discord.utils.get(guild.text_channels, name="chia-sẻ-tài-liệu") or discord.utils.get(guild.forums, name="chia-sẻ-tài-liệu")
+        discuss_ch = discord.utils.get(guild.text_channels, name="thảo-luận-văn-học")
+        news_ch = discord.utils.get(guild.text_channels, name="bảng-tin-thông-báo")
+
+        def _m(ch, fallback):
+            return ch.mention if ch else fallback
+
         rules_embed = discord.Embed(
             title="Bộ luật chính thức - Nhóm học tập HVHN",
             description="Đọc hết trước khi tham gia thảo luận hoặc dùng lệnh bot. Vi phạm bị xử lý theo Chương V.",
@@ -219,8 +266,8 @@ class Setup(commands.Cog):
         rules_embed.add_field(
             name="Chương II. Đăng bài đúng kênh",
             value=(
-                "Câu hỏi bài tập đăng ở hỏi-đáp-bài-tập. Tài liệu, đề thi, dàn ý chia sẻ ở chia-sẻ-tài-liệu. "
-                "Thảo luận tự do về tác phẩm dùng thảo-luận-văn-học. "
+                f"Câu hỏi bài tập đăng ở {_m(qa_ch, 'hỏi-đáp-bài-tập')}. Tài liệu, đề thi, dàn ý chia sẻ ở {_m(share_ch, 'chia-sẻ-tài-liệu')}. "
+                f"Thảo luận tự do về tác phẩm dùng {_m(discuss_ch, 'thảo-luận-văn-học')}. "
                 "Đăng sai kênh, quản trị viên có quyền xoá và nhắc lại mà không cần giải thích thêm."
             ),
             inline=False
@@ -263,7 +310,7 @@ class Setup(commands.Cog):
         )
         rules_embed.add_field(
             name="Chương VII. Điều chỉnh luật",
-            value="Quản trị viên có quyền cập nhật bộ luật này khi cần. Thay đổi sẽ được thông báo ở bảng-tin-thông-báo.",
+            value=f"Quản trị viên có quyền cập nhật bộ luật này khi cần. Thay đổi sẽ được thông báo ở {_m(news_ch, 'bảng-tin-thông-báo')}.",
             inline=False
         )
         await rules_channel.send(embed=rules_embed)
