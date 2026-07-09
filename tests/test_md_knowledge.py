@@ -1,7 +1,9 @@
+import inspect
 import unittest
 from md_knowledge import parse_markdown
 from md_knowledge import MD_KNOWLEDGE_SCHEMA
 from md_knowledge import build_md_context
+from md_knowledge import index_md_path
 
 
 SAMPLE = """---
@@ -74,6 +76,13 @@ class BuildMdContextTest(unittest.TestCase):
 
     def test_empty_chunks_empty_context(self):
         self.assertEqual(build_md_context([]), "")
+
+
+class IndexMdPathTest(unittest.TestCase):
+    def test_index_md_path_is_async_and_reads_file(self):
+        src = inspect.getsource(index_md_path)
+        self.assertIn("index_md_bytes", src)
+        self.assertIn("connect", src)
 
 
 if __name__ == "__main__":

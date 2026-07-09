@@ -1,6 +1,9 @@
 import hashlib
 import re
 
+import asyncpg
+import os as _os
+
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 # blockquote chua trich dan trong ngoac kep, kem attribution tuy chon: — Tac gia | (Tac gia)
 _QUOTE = re.compile(
@@ -190,3 +193,14 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
 async def search_md_knowledge(db, query: str, *, limit: int = 5) -> str:
     result = await retrieve_md_knowledge(db, query, limit=limit)
     return result.get("context", "")
+
+
+async def index_md_path(database_url: str, path) -> dict:
+    with open(path, "rb") as f:
+        data = f.read()
+    title = _os.path.splitext(_os.path.basename(str(path)))[0]
+    conn = await asyncpg.connect(database_url)
+    try:
+        return await index_md_bytes(conn, title, data, source=str(path))
+    finally:
+        await conn.close()
