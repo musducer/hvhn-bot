@@ -12,10 +12,13 @@ const DOCS_NAME = 'Tài liệu';         // tab danh sách tài liệu
 const LOG_NAME = 'Nhật ký';           // tab lịch sử thao tác
 const SEARCH_CELL = 'B1';
 
-const SUB_DAYS = 30;   // 1 gói = 30 ngày
+const SUB_DAYS = 30;   // 1 gói = 30 ngày (chỉ để suy ra SUB_HOURS mặc định)
+const SUB_HOURS = SUB_DAYS * 24; // gói mặc định tính theo GIỜ = 720h
 const WARN_DAYS = 3;   // cảnh báo "sắp hết" khi còn <= 3 ngày
-const RENEW_COL = 7;   // cột G ở tab Khách hàng: ô tick "Gia hạn +1 tháng"
+const WARN_HOURS = WARN_DAYS * 24; // ngưỡng cảnh báo tính theo GIỜ = 72h
+const RENEW_COL = 7;   // cột G ở tab Khách hàng: ô tick "Gia hạn"
 const DEL_COL = 8;     // cột H ở tab Khách hàng: ô tick "Xóa khách"
+const HOURS_COL = 9;   // cột I ở tab Khách hàng: số giờ gia hạn (trống = SUB_HOURS)
 
 const HVHN_PARENT_FOLDER_ID_EARLY = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs';
 const XOA_KHACH_NAME = '_don_xoa_khach';
@@ -442,7 +445,9 @@ function xuatTrangThaiSheet() {
           email: String(r[1]).toLowerCase(),
           grant_date: _fmtDate(r[2]),
           expiry_date: _fmtDate(r[3]),
-          days_left: r[4] === '' ? null : Number(r[4]),
+          // days_left suy TỪ mốc hết hạn (cột "Còn lại" nay là chuỗi giờ, không parse được).
+          days_left: r[3] ? Math.floor(_hoursBetween(_now(), new Date(r[3])) / 24) : null,
+          hours_left: r[3] ? Math.floor(_hoursBetween(_now(), new Date(r[3]))) : null,
           status: String(r[5] || ''),
           doc_count: docCount,
         });
@@ -556,10 +561,10 @@ function ensureRegistry() {
   let reg = ss.getSheetByName(REGISTRY_NAME);
   const isNew = !reg;
   if (isNew) reg = ss.insertSheet(REGISTRY_NAME, 2);
-  // LUÔN ghi lại header 8 cột (nâng cấp tab cũ 7 cột -> có cột "Xóa khách")
-  reg.getRange(1, 1, 1, 8).setValues([[
+  // LUÔN ghi lại header 9 cột (nâng cấp tab cũ -> có cột "Số giờ gia hạn")
+  reg.getRange(1, 1, 1, 9).setValues([[
     'Tên khách', 'Email', 'Ngày cấp quyền', 'Ngày hết hạn',
-    'Còn lại (ngày)', 'Trạng thái', 'Gia hạn +1 tháng', 'Xóa khách',
+    'Còn lại', 'Trạng thái', 'Gia hạn (tick)', 'Xóa khách', 'Số giờ gia hạn (trống=720)',
   ]]);
   if (isNew) decorateRegistry(reg);
   return reg;
@@ -578,6 +583,30 @@ function _addDays(date, days) {
 
 function _daysBetween(a, b) {
   return Math.round((b.getTime() - a.getTime()) / 86400000);
+}
+
+// Mốc thời gian hiện tại ĐẦY ĐỦ (có giờ) - dùng cho hệ hạn theo giờ.
+function _now() { return new Date(); }
+
+function _addHours(date, hours) {
+  const d = new Date(date);
+  d.setTime(d.getTime() + Math.round(hours * 3600000));
+  return d;
+}
+
+// Số giờ còn lại (có thể âm) giữa now và mốc hết hạn.
+function _hoursBetween(a, b) {
+  return (b.getTime() - a.getTime()) / 3600000;
+}
+
+// Hiển thị thời lượng còn lại thân thiện: <48h -> "Xh"; >=48h -> "Yn Zh".
+function _fmtRemaining(hoursLeft) {
+  if (hoursLeft < 0) return 'Hết hạn';
+  const h = Math.floor(hoursLeft);
+  if (h < 48) return h + 'h';
+  const days = Math.floor(h / 24);
+  const rem = h % 24;
+  return rem ? (days + 'n ' + rem + 'h') : (days + 'n');
 }
 
 // Quét các tab khách -> đảm bảo mỗi khách có 1 dòng trong tab "Khách hàng".
@@ -606,12 +635,12 @@ function dongBoKhachHang() {
     }
   });
 
-  const today = _today();
+  const now = _now();
   Object.keys(clients).forEach(name => {
-    if (existing[name]) return; // đã có -> giữ nguyên ngày
-    const grant = today;
-    const expiry = _addDays(today, SUB_DAYS);
-    reg.appendRow([name, clients[name], grant, expiry, '', 'Còn hạn', false, false]);
+    if (existing[name]) return; // đã có -> giữ nguyên mốc
+    const grant = now;
+    const expiry = _addHours(now, SUB_HOURS);
+    reg.appendRow([name, clients[name], grant, expiry, '', 'Còn hạn', false, false, '']);
     ghiLog('Thêm khách vào danh sách', name + ' - ' + clients[name]);
   });
 
@@ -623,18 +652,18 @@ function dongBoKhachHang() {
 function capNhatTrangThaiHan(reg) {
   const last = reg.getLastRow();
   if (last < 2) return;
-  const today = _today();
+  const now = _now();
   const rng = reg.getRange(2, 1, last - 1, 7);
   const vals = rng.getValues();
 
   vals.forEach(row => {
     const expiry = row[3] ? new Date(row[3]) : null;
     if (!expiry) { row[4] = ''; return; }
-    const left = _daysBetween(today, new Date(expiry.getFullYear(), expiry.getMonth(), expiry.getDate()));
-    row[4] = left;
+    const hoursLeft = _hoursBetween(now, expiry);
+    row[4] = _fmtRemaining(hoursLeft);
     if (row[5] === 'Đã gỡ quyền') return; // đã gỡ -> chờ gia hạn, không tự đổi
-    if (left < 0) row[5] = 'Hết hạn - chờ gỡ';
-    else if (left <= WARN_DAYS) row[5] = 'Sắp hết';
+    if (hoursLeft < 0) row[5] = 'Hết hạn - chờ gỡ';
+    else if (hoursLeft <= WARN_HOURS) row[5] = 'Sắp hết';
     else row[5] = 'Còn hạn';
   });
   rng.setValues(vals);
@@ -648,16 +677,14 @@ function kiemTraHetHan() {
   const last = reg.getLastRow();
   if (last < 2) { capNhatDashboard(); return; }
 
-  const today = _today();
+  const now = _now();
   const vals = reg.getRange(2, 1, last - 1, 7).getValues();
   let revoked = 0;
 
   for (let i = 0; i < vals.length; i++) {
     const [name, email, grant, expiry, , status] = vals[i];
     if (!name || !expiry || status === 'Đã gỡ quyền') continue;
-    const exp = new Date(expiry);
-    const expDay = new Date(exp.getFullYear(), exp.getMonth(), exp.getDate());
-    if (_daysBetween(today, expDay) >= 0) continue; // còn hạn
+    if (new Date(expiry).getTime() > now.getTime()) continue; // còn hạn (so tới GIỜ)
 
     // Quá hạn: xoá toàn bộ file trong folder khách + reset trạng thái các dòng của khách ở tab
     const folders = destRoot.getFoldersByName(name);
@@ -694,19 +721,22 @@ function kiemTraHetHan() {
 // Gia hạn 1 dòng. Cộng thêm SUB_DAYS; nếu đã gỡ -> chuẩn bị phân phối lại.
 // runNow=true (từ menu, đủ quyền): chạy phanPhoi ngay. runNow=false (từ onEdit): để trigger lo.
 function giaHanMotDong(reg, rowIndex, runNow) {
-  const row = reg.getRange(rowIndex, 1, 1, 7).getValues()[0];
+  const row = reg.getRange(rowIndex, 1, 1, HOURS_COL).getValues()[0];
   const [name, email, grant, expiry, , status] = row;
   if (!name) return;
 
-  const today = _today();
-  const curExp = expiry ? new Date(expiry) : today;
-  const base = curExp.getTime() > today.getTime() ? curExp : today; // còn hạn: nối tiếp; hết hạn: từ hôm nay
-  const newExp = _addDays(base, SUB_DAYS);
+  const rawHours = parseInt(row[HOURS_COL - 1], 10);
+  const hours = (rawHours && rawHours > 0) ? rawHours : SUB_HOURS; // ô trống -> gói mặc định
+  const now = _now();
+  const curExp = expiry ? new Date(expiry) : now;
+  const base = curExp.getTime() > now.getTime() ? curExp : now; // còn hạn: nối tiếp; hết hạn: từ bây giờ
+  const newExp = _addHours(base, hours);
 
   reg.getRange(rowIndex, 4).setValue(newExp);
   reg.getRange(rowIndex, RENEW_COL).setValue(false); // bỏ tick
+  reg.getRange(rowIndex, HOURS_COL).setValue(''); // xoá ô giờ sau khi dùng
   reg.getRange(rowIndex, 6).setValue('Còn hạn');
-  ghiLog('Gia hạn +' + SUB_DAYS + ' ngày', name + ' -> ' + newExp.toLocaleDateString());
+  ghiLog('Gia hạn +' + hours + ' giờ', name + ' -> ' + newExp.toLocaleString());
 
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   if (status === 'Đã gỡ quyền') {
@@ -720,12 +750,12 @@ function giaHanMotDong(reg, rowIndex, runNow) {
     }
     if (runNow) {
       phanPhoi(); // menu: phân phối lại ngay
-      ss.toast(`Đã gia hạn + phân phối lại cho ${name}. Hết hạn: ${newExp.toLocaleDateString()}`);
+      ss.toast(`Đã gia hạn + phân phối lại cho ${name}. Hết hạn: ${newExp.toLocaleString()}`);
     } else {
       ss.toast(`Đã gia hạn ${name}. Tài liệu sẽ được gửi lại trong ít phút.`);
     }
   } else {
-    ss.toast(`Đã gia hạn ${name}. Hết hạn mới: ${newExp.toLocaleDateString()}`);
+    ss.toast(`Đã gia hạn ${name}. Hết hạn mới: ${newExp.toLocaleString()}`);
   }
 }
 
@@ -763,7 +793,8 @@ function xuLyGiaHanTuDong() {
   }
 }
 
-// Discord -> watcher -> _don_sheet_giahan_khach: mỗi file chứa "email<TAB>số_ngày".
+// Discord -> watcher -> _don_sheet_giahan_khach: mỗi file chứa "email<TAB>số_lượng<TAB>đơn_vị".
+// đơn_vị = 'h' (giờ) hoặc 'd' (ngày). Thiếu đơn_vị -> hiểu là NGÀY (tương thích đơn cũ).
 function xuLyLenhGiaHanDiscordTuDong() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const reg = ensureRegistry();
@@ -773,7 +804,9 @@ function xuLyLenhGiaHanDiscordTuDong() {
     try {
       const parts = job.text.replace(',', '\t').split('\t');
       const email = String(parts[0] || '').trim().toLowerCase();
-      const days = Math.max(1, parseInt(parts[1] || SUB_DAYS, 10) || SUB_DAYS);
+      const amount = Math.max(1, parseInt(parts[1], 10) || 0);
+      const unit = String(parts[2] || 'd').trim().toLowerCase();
+      const hours = amount > 0 ? (unit === 'h' ? amount : amount * 24) : SUB_HOURS;
       const found = _timKhachTheoEmail(ss, email);
       if (!found) {
         ghiLog('Discord gia hạn - không tìm thấy', email);
@@ -783,14 +816,14 @@ function xuLyLenhGiaHanDiscordTuDong() {
 
       let rowIndex = found.registryRow;
       if (!rowIndex) {
-        reg.appendRow([found.name, found.email || email, _today(), _addDays(_today(), days), '', 'Còn hạn', false, false]);
+        reg.appendRow([found.name, found.email || email, _now(), _addHours(_now(), hours), '', 'Còn hạn', false, false, '']);
         rowIndex = reg.getLastRow();
       }
 
       const row = reg.getRange(rowIndex, 1, 1, 7).getValues()[0];
-      const currentExpiry = row[3] ? new Date(row[3]) : _today();
-      const base = currentExpiry.getTime() > _today().getTime() ? currentExpiry : _today();
-      const newExpiry = _addDays(base, days);
+      const currentExpiry = row[3] ? new Date(row[3]) : _now();
+      const base = currentExpiry.getTime() > _now().getTime() ? currentExpiry : _now();
+      const newExpiry = _addHours(base, hours);
       reg.getRange(rowIndex, 4).setValue(newExpiry);
       reg.getRange(rowIndex, 6).setValue('Còn hạn');
       reg.getRange(rowIndex, RENEW_COL).setValue(false);
@@ -803,7 +836,7 @@ function xuLyLenhGiaHanDiscordTuDong() {
         }
       }
 
-      ghiLog('Discord gia hạn +' + days + ' ngày', found.name + ' - ' + (found.email || email));
+      ghiLog('Discord gia hạn +' + hours + ' giờ', found.name + ' - ' + (found.email || email));
       job.file.setTrashed(true);
       changed++;
     } catch (e) {

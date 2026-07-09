@@ -519,18 +519,29 @@ class DocumentStorage(commands.Cog):
             )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-    @app_commands.command(name="hvhn_giahan", description="Gia hạn khách từ Discord")
-    async def renew_client(self, interaction: discord.Interaction, email: str, so_ngay: int = 30):
+    @app_commands.command(name="hvhn_giahan", description="Gia hạn khách từ Discord (theo ngày hoặc giờ)")
+    @app_commands.describe(
+        so_ngay="Số ngày gia hạn (mặc định 30). Bỏ qua nếu dùng so_gio.",
+        so_gio="Số GIỜ gia hạn tùy ý. Nếu điền, sẽ dùng giờ thay cho ngày.",
+    )
+    async def renew_client(self, interaction: discord.Interaction, email: str, so_ngay: int = 30, so_gio: int = 0):
         if not await self._require_admin(interaction):
             return
         email = self._clean_email(email)
         if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
             await interaction.response.send_message("Email không hợp lệ.", ephemeral=True)
             return
-        so_ngay = max(1, min(so_ngay, 365))
-        job_id = await self._enqueue("renew_client", text_payload=f"{email}\t{so_ngay}", requested_by=interaction.user.id)
+        if so_gio and so_gio > 0:
+            amount = max(1, min(so_gio, 365 * 24))
+            unit = "h"
+            human = f"{amount} giờ"
+        else:
+            amount = max(1, min(so_ngay, 365))
+            unit = "d"
+            human = f"{amount} ngày"
+        job_id = await self._enqueue("renew_client", text_payload=f"{email}\t{amount}\t{unit}", requested_by=interaction.user.id)
         await interaction.response.send_message(
-            f"Đã xếp hàng đơn #{job_id}: gia hạn `{email}` thêm `{so_ngay}` ngày.",
+            f"Đã xếp hàng đơn #{job_id}: gia hạn `{email}` thêm `{human}`.",
             ephemeral=True,
         )
 
