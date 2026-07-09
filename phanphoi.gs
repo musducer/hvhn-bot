@@ -71,7 +71,7 @@ function onOpen() {
     .addSeparator()
     .addItem('📅 Đồng bộ danh sách khách + hạn dùng', 'dongBoKhachHang')
     .addItem('⏰ Kiểm tra & gỡ quyền khách hết hạn (ngay)', 'kiemTraHetHan')
-    .addItem('♻️ Xử lý gia hạn (các ô đã tích)', 'xuLyGiaHan')
+    .addItem('♻️ Gia hạn khách đã tích (theo cột "Số giờ", trống=720h)', 'xuLyGiaHan')
     .addSeparator()
     .addItem('📄 Cập nhật danh sách Tài liệu', 'capNhatTaiLieu')
     .addItem('🗑️ Xóa TÀI LIỆU đã tích', 'xoaTaiLieuDaTich')
@@ -852,12 +852,13 @@ function xuLyLenhGiaHanDiscordTuDong() {
 }
 
 function decorateRegistry(reg) {
-  const lastCol = 8;
+  const lastCol = HOURS_COL; // 9 cột (đã có "Số giờ gia hạn")
   const lastRow = reg.getLastRow();
   const header = reg.getRange(1, 1, 1, lastCol);
   header.setBackground('#0b8043').setFontColor('#ffffff').setFontWeight('bold')
-    .setHorizontalAlignment('center').setVerticalAlignment('middle');
-  reg.getRange(1, DEL_COL).setBackground('#990000'); // ô "Xóa khách" đỏ cảnh báo
+    .setHorizontalAlignment('center').setVerticalAlignment('middle').setWrap(true);
+  reg.getRange(1, DEL_COL).setBackground('#990000');   // ô "Xóa khách" đỏ cảnh báo
+  reg.getRange(1, HOURS_COL).setBackground('#1155cc'); // ô "Số giờ gia hạn" xanh dương nhập liệu
   reg.setFrozenRows(1);
   reg.setRowHeight(1, 32);
   reg.setColumnWidth(1, 200);
@@ -866,12 +867,14 @@ function decorateRegistry(reg) {
   reg.setColumnWidth(4, 120);
   reg.setColumnWidth(5, 110);
   reg.setColumnWidth(6, 130);
-  reg.setColumnWidth(7, 130);
+  reg.setColumnWidth(7, 110);
   reg.setColumnWidth(8, 100);
+  reg.setColumnWidth(9, 150);
 
   if (lastRow > 1) {
     const n = lastRow - 1;
-    reg.getRange(2, 3, n, 2).setNumberFormat('dd/mm/yyyy');   // cột ngày
+    reg.getRange(2, 3, n, 2).setNumberFormat('dd/mm/yyyy hh:mm'); // cột ngày (có giờ)
+    reg.getRange(2, HOURS_COL, n, 1).setNumberFormat('0').setHorizontalAlignment('center'); // số giờ nguyên
     reg.getRange(2, RENEW_COL, n, 1).insertCheckboxes();      // ô gia hạn
     reg.getRange(2, DEL_COL, n, 1).insertCheckboxes();        // ô xóa khách
 
