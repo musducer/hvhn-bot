@@ -356,31 +356,28 @@ class QuoteExtractor:
 
     @classmethod
     def infer_author(cls, chunk_text: str, span: QuoteSpan) -> tuple[str, float]:
-        before_start = max(0, span.start - 240)
-        after_end = min(len(chunk_text), span.end + 140)
-        before = chunk_text[before_start:span.start]
-        after = chunk_text[span.end:after_end]
-        near_before = cls._candidate_names(before)
-        near_after = cls._candidate_names(after)
-        best: tuple[str, float] = (cls.UNKNOWN, 0.0)
-        for name, start, end in near_before:
-            tail = _rag_plain(before[end:])
-            distance = len(before) - end
-            verb_bonus = 0.45 if any(verb in tail[-80:] for verb in cls.AUTHOR_VERBS) else 0.0
-            colon_bonus = 0.25 if ":" in tail[-30:] else 0.0
-            score = max(0.0, 0.65 - distance / 300) + verb_bonus + colon_bonus
-            if score > best[1]:
-                best = (name, min(score, 1.0))
-        for name, start, end in near_after:
-            head = _rag_plain(after[:start])
-            distance = start
-            verb_bonus = 0.35 if any(verb in head[:80] for verb in cls.AUTHOR_VERBS) else 0.0
-            score = max(0.0, 0.35 - distance / 300) + verb_bonus
-            if score > best[1]:
-                best = (name, min(score, 0.85))
-        if best[1] < 0.55:
-            return cls.UNKNOWN, best[1]
-        return best
+        # Chi gan tac gia khi co gan tuong minh NGAY SAT truoc quote:
+        # "<Ten> <verb>:" hoac "<Ten>:" trong cua so hep truoc dau mo ngoac.
+        window_start = max(0, span.start - 120)
+        before = chunk_text[window_start:span.start]
+        names = cls._candidate_names(before)
+        if not names:
+            return cls.UNKNOWN, 0.0
+        name, _n_start, n_end = names[-1]  # ten gan quote nhat
+        tail = before[n_end:]              # doan giua ten va quote
+        tail_plain = _rag_plain(tail)
+        # Phai chi con verb attribution +/hoac dau hai cham, khong chen cau khac.
+        if len(tail.strip(" \t")) > 40 or "." in tail:
+            return cls.UNKNOWN, 0.0
+        has_verb = any(verb in tail_plain for verb in cls.AUTHOR_VERBS)
+        has_colon = ":" in tail
+        if has_verb and has_colon:
+            return name, 0.95
+        if has_colon:
+            return name, 0.8
+        if has_verb:
+            return name, 0.7
+        return cls.UNKNOWN, 0.0
 
     @classmethod
     def extract(cls, pdf_meta: dict, plan: RAGPlan, query: str) -> list[QuoteEvidence]:
