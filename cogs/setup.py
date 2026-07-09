@@ -9,7 +9,8 @@ def build_guide_embed() -> discord.Embed:
     embed = discord.Embed(
         title="📖 HƯỚNG DẪN DÙNG BOT THEN",
         description=(
-            "Đọc hết trước khi bấm nút cuối để nhận quyền dùng bot. "
+            "Chào bạn, trước khi cùng Then rong ruổi trên những trang văn, hãy dành một chút thời gian đọc hết nội dung "
+            "bên dưới rồi bấm nút cuối để nhận quyền dùng bot nhé. "
             "Hiểu đúng khả năng và giới hạn của Then giúp bạn khai thác tối đa sức mạnh AI."
         ),
         color=0x1abc9c,
@@ -50,18 +51,29 @@ def build_guide_embed() -> discord.Embed:
 
 def build_welcome_embed(member_mention: str, rules_mention: str, verify_mention: str, guide_mention: str) -> discord.Embed:
     embed = discord.Embed(
-        title="🎉 Chào mừng đến với Hồn Văn - Hồn Người!",
-        description=f"Rất vui được đón {member_mention}. Hoàn thành 2 bước sau để mở khóa đầy đủ:",
+        title="🌾 Chào mừng đến với Hồn Văn - Hồn Người!",
+        description=(
+            f"Xin chào {member_mention}, thật vui vì bạn đã tìm đến ngôi nhà nhỏ này của những người yêu chữ nghĩa. 📖✨\n"
+            "Ở đây có những trang văn được nâng niu, những buổi thảo luận say sưa và cả một cộng đồng luôn sẵn lòng "
+            "lắng nghe từng cảm nhận của bạn. Chỉ cần 2 bước nhỏ nữa thôi là bạn có thể an tâm dạo bước khắp mọi góc nhỏ nơi đây:"
+        ),
         color=0x2ecc71,
     )
     embed.add_field(
-        name="Bước 1 — Mở khóa các kênh",
-        value=f"Đọc luật ở {rules_mention}, rồi vào {verify_mention} bấm nút để nhận vai trò **Thành viên**.",
+        name="🚪 Bước 1 — Mở cánh cửa vào nhà",
+        value=(
+            f"Ghé đọc vài dòng tâm tình ở {rules_mention} để hiểu thêm về nếp nhà mình, "
+            f"rồi thong thả bước sang {verify_mention} và bấm nút để chính thức trở thành **Thành viên** nhé."
+        ),
         inline=False,
     )
     embed.add_field(
-        name="Bước 2 — Mở khóa quyền dùng bot Then",
-        value=f"Đọc {guide_mention}, rồi bấm nút xác nhận để nhận vai trò **Dân làng Hua Tát** và bắt đầu dùng bot.",
+        name="🕯️ Bước 2 — Thắp sáng cây bút cùng bot Then",
+        value=(
+            f"Đọc qua {guide_mention} để làm quen với Then — người bạn đồng hành nhỏ giúp bạn viết văn, "
+            "gợi ý luận điểm và trò chuyện văn chương. Xác nhận xong, bạn sẽ nhận vai trò **Dân làng Hua Tát** "
+            "và chính thức được dùng bot cùng cả nhà."
+        ),
         inline=False,
     )
     return embed
@@ -99,7 +111,7 @@ class VerifyView(discord.ui.View):
             await interaction.response.send_message("Bạn đã là thành viên chính thức rồi!", ephemeral=True)
         else:
             await interaction.user.add_roles(member_role)
-            await interaction.response.send_message("🎉 Chào mừng bạn đến với NHÓM HỌC TẬP HVHN! Các kênh học thuật đã được mở khóa.", ephemeral=True)
+            await interaction.response.send_message("🎉 Chào mừng bạn đến với Hồn Văn - Hồn Người! Các kênh học thuật đã được mở khóa.", ephemeral=True)
 
 
 class Setup(commands.Cog):
@@ -250,7 +262,7 @@ class Setup(commands.Cog):
             return ch.mention if ch else fallback
 
         rules_embed = discord.Embed(
-            title="Bộ luật chính thức - Nhóm học tập HVHN",
+            title="Bộ luật chính thức - Nhóm học tập Hồn Văn - Hồn Người",
             description="Đọc hết trước khi tham gia thảo luận hoặc dùng lệnh bot. Vi phạm bị xử lý theo Chương V.",
             color=0x2b2d31
         )
