@@ -1334,13 +1334,14 @@ class AI(commands.Cog):
 
 
     @staticmethod
-    def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str) -> str:
+    def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str, guidance: str = "") -> str:
         source_block = knowledge or "KHONG CO KHO PDF/TRI THUC HVHN PHU HOP DUOC NAP."
         web_block = web_context or "KHONG CO NGUON WEB DUOC TRUY XUAT."
         return (
             "Ban la Then, tro giang AI mon Ngu van cua HVHN. Luon tra loi bang tieng Viet co dau, tru khi nguoi dung yeu cau ngon ngu khac.\n"
             f"CHE DO: {mode}\n"
-            "KHO PDF/TRI THUC/FEEDBACK HVHN DA TRUY XUAT:\n"
+            + (f"{guidance}\n" if guidance else "")
+            + "KHO PDF/TRI THUC/FEEDBACK HVHN DA TRUY XUAT:\n"
             f"{source_block}\n\n"
             "NGUON WEB DA TRA CUU (neu co):\n"
             f"{web_block}\n\n"
@@ -1482,9 +1483,10 @@ class AI(commands.Cog):
         mode: str,
         *,
         retrieval_hit: bool = False,
+        guidance: str = "",
     ) -> tuple[str | None, str]:
         self._last_verifier_rejected = False
-        full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode)
+        full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode, guidance)
         if RETRIEVAL_DEBUG:
             print(f"[debug] final_prompt\n{full_prompt}", flush=True)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.05)
@@ -1740,7 +1742,8 @@ class AI(commands.Cog):
                 CONTEXT_MAX_CHARS,
                 teacher_feedback=feedback_knowledge,
             )
-        answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
+        guidance = Scaffold.for_plan(plan)
+        answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit, guidance=guidance)
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
             return
