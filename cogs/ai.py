@@ -478,6 +478,25 @@ class QuoteExtractor:
     def extract(cls, pdf_meta: dict, plan: RAGPlan, query: str) -> list[QuoteEvidence]:
         requested_plain = _rag_plain(plan.author_filter)
         evidences: list[QuoteEvidence] = []
+        for fact in pdf_meta.get("quotes") or []:
+            author = (fact.get("author") or cls.UNKNOWN).strip() or cls.UNKNOWN
+            if requested_plain and _rag_plain(author) != requested_plain:
+                continue
+            quote = re.sub(r"\s+", " ", fact.get("quote") or "").strip()
+            if not quote:
+                continue
+            evidences.append(QuoteEvidence(
+                quote=quote,
+                author=author,
+                pdf_title=fact.get("title") or "",
+                page=None,
+                chunk_id=f"fact::{author}",
+                source=fact.get("source") or "",
+                chunk=None,
+                context=quote,
+                confidence=1.0,
+                score=1000 + AI._unit_score(query, quote),
+            ))
         for chunk in pdf_meta.get("chunks") or []:
             text = re.sub(r"\s+", " ", chunk.get("content") or chunk.get("excerpt") or "").strip()
             spans = cls.quote_spans(text)
