@@ -26,6 +26,8 @@ COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "900
 SYSTEM_EXTRA_MAX_CHARS = 32000
 VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
+# Duoi nguong nay coi nhu truy xuat .md lac de -> khong nhoi vao context (tranh chep tai lieu khong lien quan).
+MD_MIN_RELEVANCE = float(os.getenv("HVHN_MD_MIN_RELEVANCE", "2.0"))
 RETRIEVAL_DEBUG = os.getenv("HVHN_RETRIEVAL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
 DEBUG_COMMAND_TIMEOUT_SECONDS = int(os.getenv("HVHN_DEBUG_COMMAND_TIMEOUT_SECONDS", "25"))
 PDF_DEFAULT_LIMIT = int(os.getenv("HVHN_PDF_DEFAULT_LIMIT", "7"))
@@ -160,6 +162,11 @@ THEN_SYSTEM_PROMPT = (
     "phân tích; mỗi ý phải gắn với một dẫn chứng hoặc lập luận riêng, không nói suông.\n"
     "9. Người dùng có thể gõ sai chính tả hoặc thiếu dấu tên tác giả/tác phẩm — hãy hiểu "
     "theo nghĩa đúng gần nhất và trả lời, không bắt bẻ lỗi gõ.\n"
+    "10. Ngữ cảnh 'KHO PDF/TRI THỨC HVHN' đưa kèm CÓ THỂ KHÔNG liên quan câu hỏi. Chỉ dùng "
+    "phần thực sự khớp với ĐỀ BÀI/tác phẩm đang hỏi. Nếu tài liệu nói về tác giả/tác phẩm "
+    "KHÁC (ví dụ đề hỏi bài thơ A nhưng tài liệu nói về Xuân Diệu/Thơ Mới), TUYỆT ĐỐI bỏ qua, "
+    "không được lắp nội dung đó vào bài. Với nghị luận xã hội: phân tích từ chính ngữ liệu đề "
+    "cho và dẫn chứng đời sống thực, không mượn lý luận phê bình văn học.\n"
     "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ, viết như người thật chứ không như "
     "bản mẫu. Câu hỏi đơn giản thì trả lời gọn; câu hỏi cần phân tích thì đi sâu có lớp lang, "
     "tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
@@ -1772,6 +1779,16 @@ class AI(commands.Cog):
         profile = self._request_profile(user_prompt)
         retrieval_limit = max(plan.retrieval_limit, PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT)
         pdf_meta = await self._pdf_retrieval(user_prompt, limit=retrieval_limit)
+        _empty_meta = {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
+        if plan.genre == "NLXH":
+            # NLXH khong dung dan chung/ly luan van hoc -> khong nhoi kho phe binh (vd Ba dinh cao Tho Moi).
+            print("[debug] md_suppressed reason=NLXH", flush=True)
+            pdf_meta = dict(_empty_meta)
+        elif (float(pdf_meta.get("top_score") or 0) < MD_MIN_RELEVANCE
+              and not (profile["quote"] or profile["aggregate"]) and not plan.author_filter):
+            # Truy xuat yeu/lac de -> bo, tranh lap noi dung tai lieu khong lien quan vao bai.
+            print(f"[debug] md_suppressed reason=low_relevance top_score={pdf_meta.get('top_score')}", flush=True)
+            pdf_meta = dict(_empty_meta)
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
