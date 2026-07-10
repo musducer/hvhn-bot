@@ -47,6 +47,8 @@ def _clean_author(raw: str) -> str:
     tokens = [t for t in value.split() if t]
     if not tokens or len(tokens) > 6 or len(value) > 60:
         return ""
+    if _plain(value) in _ROLE_PREFIXES:
+        return ""  # chi con danh xung, khong co ten
     if not tokens[0][:1].isupper():
         return ""
     capitalised = sum(1 for t in tokens if t[:1].isupper())
@@ -308,38 +310,66 @@ def build_md_context(chunks: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+_STOP_TERMS = {
+    "của", "cho", "với", "trong", "những", "một", "các", "hay", "không", "nào",
+    "gì", "mình", "bạn", "tôi", "và", "là", "có", "để", "về", "này",
+}
+
+
+def query_terms(query: str) -> list[str]:
+    # giu nguyen dau (khop LIKE voi text co dau trong DB); cham diem thi bo dau
+    terms = []
+    for token in re.findall(r"[a-z0-9à-ỹđ]{2,}", (query or "").lower()):
+        if token not in _STOP_TERMS and token not in terms:
+            terms.append(token)
+    return terms[:16]
+
+
+def score_text(terms: list[str], text: str) -> int:
+    plain = _plain(text)
+    return sum(1 for t in terms if _plain(t) in plain)
+
+
 async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     await ensure_md_schema(db)
+    terms = query_terms(query)
+    patterns = [f"%{t}%" for t in terms] or ["%"]
+    # Lay ung vien theo OR (bat ky term nao khop) roi cham diem overlap trong Python —
+    # plainto_tsquery AND toan bo tu nen truot voi query dien dat khac.
     rows = await db.fetch(
         """
-        SELECT doc_key, title, content, source,
-               ts_rank(to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(content,'')),
-                       plainto_tsquery('simple', $1)) AS rank
+        SELECT doc_key, title, content, source
         FROM ai_md_passages
-        WHERE to_tsvector('simple', coalesce(title,'') || ' ' || coalesce(content,''))
-              @@ plainto_tsquery('simple', $1)
-        ORDER BY rank DESC
-        LIMIT $2
+        WHERE lower(coalesce(title,'') || ' ' || coalesce(content,'')) LIKE ANY($1::text[])
+        LIMIT 200
         """,
-        query, limit,
+        patterns,
     )
+    scored = sorted(rows, key=lambda r: score_text(terms, f"{r['title']} {r['content']}"), reverse=True)
+    selected = scored[:limit]
     chunks = [{"title": r["title"], "content": r["content"], "excerpt": r["content"],
-               "source": r["source"], "chunk_index": i, "page": None} for i, r in enumerate(rows)]
+               "source": r["source"], "chunk_index": i, "page": None} for i, r in enumerate(selected)]
     qrows = await db.fetch(
         """
         SELECT q.quote, q.author, q.source, d.title
         FROM ai_md_quotes q JOIN ai_md_documents d ON d.doc_key = q.doc_key
-        WHERE to_tsvector('simple', coalesce(q.quote,'') || ' ' || coalesce(q.author,''))
-              @@ plainto_tsquery('simple', $1)
-        LIMIT $2
+        WHERE lower(coalesce(q.quote,'') || ' ' || coalesce(q.author,'')) LIKE ANY($1::text[])
+        LIMIT 200
         """,
-        query, max(limit, 8),
+        patterns,
     )
+
+    def _quote_score(r) -> int:
+        # tac gia khop ten duoc uu tien manh
+        author_hits = score_text(terms, r["author"] or "") * 10
+        return author_hits + score_text(terms, r["quote"] or "")
+
+    q_selected = sorted(qrows, key=_quote_score, reverse=True)[:max(limit, 8)]
     quotes = [{"quote": r["quote"], "author": r["author"] or "", "source": r["source"], "title": r["title"]}
-              for r in qrows]
-    top = float(rows[0]["rank"]) if rows else 0.0
+              for r in q_selected]
+    top = float(score_text(terms, f"{selected[0]['title']} {selected[0]['content']}")) if selected else 0.0
     return {"context": build_md_context(chunks), "chunks": chunks, "quotes": quotes,
-            "selected_count": len(chunks), "candidate_count": len(chunks), "top_score": top}
+            "selected_count": len(chunks), "candidate_count": len(rows), "top_score": top}
 
 
 async def search_md_knowledge(db, query: str, *, limit: int = 5) -> str:
