@@ -11,7 +11,8 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from md_knowledge import retrieve_md_knowledge, search_md_knowledge
+from md_knowledge import retrieve_md_knowledge, backfill_embeddings
+import md_embeddings
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -1154,18 +1155,63 @@ class AI(commands.Cog):
         role_name = os.getenv("HVHN_ADMIN_ROLE", "HVHN Admin").strip()
         return any(role.name == role_name for role in interaction.user.roles) or interaction.user.guild_permissions.manage_guild
 
+    async def _embed_query(self, query: str):
+        # Nhung cau hoi de tra cuu ngu nghia. Loi/thieu key -> None (lui ve tu khoa).
+        if not self.gemini_keys:
+            return None
+        try:
+            return await md_embeddings.embed_query(self.gemini_keys, query)
+        except Exception as exc:
+            print(f"[ai] embed_query_error {exc}", flush=True)
+            return None
+
     async def _pdf_knowledge_context(self, query: str) -> str:
         try:
-            return await search_md_knowledge(self.bot.db, query, limit=5)
+            qvec = await self._embed_query(query)
+            result = await retrieve_md_knowledge(self.bot.db, query, limit=5, query_vector=qvec)
+            return result.get("context", "")
         except Exception:
             return ""
 
     async def _pdf_retrieval(self, query: str, *, limit: int = PDF_DEFAULT_LIMIT) -> dict:
         try:
-            return await retrieve_md_knowledge(self.bot.db, query, limit=limit)
+            qvec = await self._embed_query(query)
+            return await retrieve_md_knowledge(self.bot.db, query, limit=limit, query_vector=qvec)
         except Exception as exc:
             print(f"[ai] md_retrieval_error {exc}", flush=True)
             return {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
+
+    async def _embed_fn(self, texts):
+        return await md_embeddings.embed_texts(self.gemini_keys, texts, task_type="RETRIEVAL_DOCUMENT")
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        # Nhung embedding cho cac passage con thieu (chay 1 lan, nen, khong chan bot).
+        if getattr(self, "_embed_started", False) or not self.gemini_keys:
+            return
+        self._embed_started = True
+        async def _bg():
+            try:
+                res = await backfill_embeddings(self.bot.db, self._embed_fn, batch=64)
+                print(f"[ai] embed_backfill_startup embedded={res.get('embedded')} ok={res.get('ok')}", flush=True)
+            except Exception as exc:
+                print(f"[ai] embed_backfill_startup_error {exc}", flush=True)
+        asyncio.create_task(_bg())
+
+    @app_commands.command(name="hvhn_embed_backfill",
+                          description="(admin) Nhúng embedding cho tài liệu .md để bot tra cứu theo ngữ nghĩa")
+    async def hvhn_embed_backfill(self, interaction: discord.Interaction):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Chỉ admin dùng được lệnh này.", ephemeral=True)
+            return
+        if not self.gemini_keys:
+            await interaction.response.send_message("Chưa cấu hình GEMINI_API_KEYS nên không nhúng được.", ephemeral=True)
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        res = await backfill_embeddings(self.bot.db, self._embed_fn, batch=64)
+        await interaction.followup.send(
+            f"Đã nhúng {res.get('embedded', 0)} đoạn (hoàn tất: {res.get('ok')}). "
+            f"Chạy lại lệnh nếu còn sót.", ephemeral=True)
 
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
         terms = expand_query_terms(query)[:24]

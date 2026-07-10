@@ -287,6 +287,56 @@ async def ensure_md_schema(db) -> None:
         await db.execute("CREATE EXTENSION IF NOT EXISTS unaccent")
     except Exception:
         pass
+    # pgvector: tra cuu ngu nghia. Neu khong co ext thi bo qua (hybrid tu dong lui ve tu khoa).
+    try:
+        await db.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        await db.execute("ALTER TABLE ai_md_passages ADD COLUMN IF NOT EXISTS embedding vector(768)")
+        try:
+            await db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ai_md_passages_vec "
+                "ON ai_md_passages USING hnsw (embedding vector_cosine_ops)"
+            )
+        except Exception:
+            pass  # hnsw can pgvector >=0.5; khong co index van chay (seq scan)
+    except Exception:
+        pass
+
+
+async def has_passage_embeddings(db) -> bool:
+    try:
+        return bool(await db.fetchval("SELECT 1 FROM ai_md_passages WHERE embedding IS NOT NULL LIMIT 1"))
+    except Exception:
+        return False
+
+
+async def backfill_embeddings(db, embed_fn, *, batch: int = 64, max_passages: int = 5000) -> dict:
+    """Nhung cac passage con thieu embedding. embed_fn(list[str]) -> list[list[float]] | None (async).
+
+    Chay tren BOT (co GEMINI key). Idempotent: chi dung passage embedding IS NULL.
+    """
+    await ensure_md_schema(db)
+    done = 0
+    while done < max_passages:
+        rows = await db.fetch(
+            "SELECT doc_key, passage_index, coalesce(title,'') || ' ' || coalesce(content,'') AS text "
+            "FROM ai_md_passages WHERE embedding IS NULL LIMIT $1",
+            batch,
+        )
+        if not rows:
+            break
+        vectors = await embed_fn([r["text"] for r in rows])
+        if not vectors or len(vectors) != len(rows):
+            return {"embedded": done, "ok": False}
+        from md_embeddings import vec_literal
+        for r, vec in zip(rows, vectors):
+            await db.execute(
+                "UPDATE ai_md_passages SET embedding = $3::vector WHERE doc_key = $1 AND passage_index = $2",
+                r["doc_key"], r["passage_index"], vec_literal(vec),
+            )
+        done += len(rows)
+        if len(rows) < batch:
+            break
+    return {"embedded": done, "ok": True}
 
 
 async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", author: str = "", created_by=None) -> dict:
@@ -423,7 +473,20 @@ async def _fetch_like(db, sql_unaccent: str, sql_plain: str, patterns_fold: list
         return await db.fetch(sql_plain, patterns_raw)
 
 
-async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
+def _rrf_merge(kw_ranked: list, vec_ranked: list, limit: int, c: int = 60) -> list:
+    # Reciprocal Rank Fusion: gop 2 bang xep hang tu khoa + ngu nghia mot cach ben vung.
+    scores: dict = {}
+    holder: dict = {}
+    for ranking in (kw_ranked, vec_ranked):
+        for rank, r in enumerate(ranking, start=1):
+            key = (r["doc_key"], r["passage_index"])
+            scores[key] = scores.get(key, 0.0) + 1.0 / (c + rank)
+            holder.setdefault(key, r)
+    order = sorted(scores, key=lambda k: scores[k], reverse=True)
+    return [holder[k] for k in order[:limit]]
+
+
+async def retrieve_md_knowledge(db, query: str, *, limit: int = 5, query_vector=None) -> dict:
     await ensure_md_schema(db)
     terms = query_terms(query)
     patterns_fold = [f"%{_plain(t)}%" for t in terms] or ["%"]
@@ -432,13 +495,13 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     rows = await _fetch_like(
         db,
         """
-        SELECT p.doc_key, p.title, p.content, p.source, d.title AS doc_title, d.author
+        SELECT p.doc_key, p.passage_index, p.title, p.content, p.source, d.title AS doc_title, d.author
         FROM ai_md_passages p JOIN ai_md_documents d ON d.doc_key = p.doc_key
         WHERE unaccent(lower(coalesce(p.title,'') || ' ' || coalesce(p.content,''))) LIKE ANY($1::text[])
         LIMIT 300
         """,
         """
-        SELECT p.doc_key, p.title, p.content, p.source, d.title AS doc_title, d.author
+        SELECT p.doc_key, p.passage_index, p.title, p.content, p.source, d.title AS doc_title, d.author
         FROM ai_md_passages p JOIN ai_md_documents d ON d.doc_key = p.doc_key
         WHERE lower(coalesce(p.title,'') || ' ' || coalesce(p.content,'')) LIKE ANY($1::text[])
         LIMIT 300
@@ -447,8 +510,34 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     )
     # IDF tren tap ung vien: ten rieng/tu hiem duoc uu tien, tu pho bien bi ha thap.
     p_weights = _idf_weights(terms, [f"{r['title']} {r['content']}" for r in rows])
-    scored = sorted(rows, key=lambda r: score_weighted(terms, f"{r['title']} {r['content']}", p_weights), reverse=True)
-    selected = scored[:limit]
+    kw_ranked = sorted(rows, key=lambda r: score_weighted(terms, f"{r['title']} {r['content']}", p_weights), reverse=True)
+
+    # Tra cuu NGU NGHIA (neu co query_vector va passage da nhung) roi hop nhat bang RRF.
+    vec_ranked = []
+    best_sim = 0.0
+    if query_vector is not None:
+        try:
+            from md_embeddings import vec_literal
+            vrows = await db.fetch(
+                """
+                SELECT p.doc_key, p.passage_index, p.title, p.content, p.source,
+                       d.title AS doc_title, d.author, 1 - (p.embedding <=> $1::vector) AS sim
+                FROM ai_md_passages p JOIN ai_md_documents d ON d.doc_key = p.doc_key
+                WHERE p.embedding IS NOT NULL
+                ORDER BY p.embedding <=> $1::vector
+                LIMIT 40
+                """,
+                vec_literal(query_vector),
+            )
+            vec_ranked = list(vrows)
+            best_sim = float(vrows[0]["sim"]) if vrows else 0.0
+        except Exception:
+            vec_ranked = []
+
+    if vec_ranked:
+        selected = _rrf_merge(kw_ranked[:40], vec_ranked, limit)
+    else:
+        selected = kw_ranked[:limit]
     chunks = [{"title": r["title"], "doc_title": r["doc_title"], "author": r["author"],
                "content": r["content"], "excerpt": r["content"],
                "source": r["source"], "chunk_index": i, "page": None} for i, r in enumerate(selected)]
@@ -478,7 +567,9 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     q_selected = sorted(qrows, key=_quote_score, reverse=True)[:max(limit, 8)]
     quotes = [{"quote": r["quote"], "author": r["author"] or "", "source": r["source"], "title": r["title"]}
               for r in q_selected]
-    top = score_weighted(terms, f"{selected[0]['title']} {selected[0]['content']}", p_weights) if selected else 0.0
+    kw_top = score_weighted(terms, f"{selected[0]['title']} {selected[0]['content']}", p_weights) if selected else 0.0
+    # Hit ngu nghia manh (sim cao) cung tinh la co can cu du tu khoa khong khop chu.
+    top = max(float(kw_top), best_sim * 3.0)
     return {"context": build_md_context(chunks), "chunks": chunks, "quotes": quotes,
             "selected_count": len(chunks), "candidate_count": len(rows), "top_score": float(top)}
 
