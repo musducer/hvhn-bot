@@ -150,3 +150,15 @@ Sheet: **"Phân phối - HVHN"** = `1KwCP7JcKCAR_GGlIPLUXYMk8_tdQu2Wo-E-nD5nRf6Y
 - Reason codes: `NO_RETRIEVAL`, `EMPTY_CONTEXT`, `LOW_RETRIEVAL_SCORE`, `RERANK_REJECTED`, `VERIFIER_REJECTED`, `PROMPT_FILTERED`, `CONTEXT_TRUNCATED`, `LLM_REFUSED`, `OCR_FAILURE`, `UNKNOWN`.
 - Fix false refusal: neu evidence manh hoac `RETRIEVAL_HIT=True`, verifier khong duoc doi thanh "khong du du lieu"; neu LLM van refuse -> forced-grounded retry -> fallback tra excerpt evidence.
 - Loi ton dong: `RETRIEVAL_HIT` co the false-positive neu query term qua chung; can redeploy/sync slash de thay command moi; neu van sai, xem `top_pdf_chunk first500` de biet OCR/chunk co that su chua dap an khong.
+
+## 12. Embedding provider - hoan tat 2026-07-11
+
+- `md_embeddings.py` ho tro Voyage va Gemini. Chon bang `HVHN_EMBED_PROVIDER=voyage|gemini`; neu khong dat thi uu tien `VOYAGE_API_KEYS`, sau do `GEMINI_API_KEYS`.
+- Voyage mac dinh `voyage-3.5-lite`, 1024 chieu; co the doi bang `HVHN_VOYAGE_MODEL` va `HVHN_VOYAGE_DIM`.
+- Caller trong `cogs/ai.py`, probe va background backfill da dung API provider-neutral; khong con phu thuoc bat buoc vao Gemini key.
+- `ensure_md_schema()` tu kiem tra kich thuoc pgvector. Khi doi provider/dimension, chi cot embedding dan xuat va index vector bi tao lai; backfill se nhung lai passage, noi dung goc khong bi xoa.
+- Test: `python -m unittest discover -s tests -p "test_*.py"` (89 test pass tai luc ban giao).
+
+## 13. Quy uoc lam viec voi Codex
+
+- Sau khi hoan tat va kiem tra thay doi code, Codex tu dong commit va push len nhanh hien tai; khong can cho chu du an nhac lai. Khong dua file backup/untracked khong lien quan vao commit.

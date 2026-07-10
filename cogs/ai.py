@@ -1164,10 +1164,10 @@ class AI(commands.Cog):
 
     async def _embed_query(self, query: str):
         # Nhung cau hoi de tra cuu ngu nghia. Loi/thieu key -> None (lui ve tu khoa).
-        if not self.gemini_keys:
+        if not md_embeddings.has_keys():
             return None
         try:
-            return await md_embeddings.embed_query(self.gemini_keys, query)
+            return await md_embeddings.embed_query(query)
         except Exception as exc:
             print(f"[ai] embed_query_error {exc}", flush=True)
             return None
@@ -1189,11 +1189,11 @@ class AI(commands.Cog):
             return {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
 
     async def _embed_fn(self, texts):
-        return await md_embeddings.embed_texts(self.gemini_keys, texts, task_type="RETRIEVAL_DOCUMENT")
+        return await md_embeddings.embed_texts(texts, task_type="RETRIEVAL_DOCUMENT")
 
     def _start_embed_backfill(self) -> bool:
         # Job nen co nhip, chi 1 lan chay dong thoi. Tra True neu vua khoi dong.
-        if getattr(self, "_embed_running", False) or not self.gemini_keys:
+        if getattr(self, "_embed_running", False) or not md_embeddings.has_keys():
             return False
         self._embed_running = True
 
@@ -1211,7 +1211,7 @@ class AI(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        if getattr(self, "_embed_started", False) or not self.gemini_keys:
+        if getattr(self, "_embed_started", False) or not md_embeddings.has_keys():
             return
         self._embed_started = True
         self._start_embed_backfill()
@@ -1222,15 +1222,18 @@ class AI(commands.Cog):
         if not self._is_admin(interaction):
             await interaction.response.send_message("Chỉ admin dùng được lệnh này.", ephemeral=True)
             return
-        if not self.gemini_keys:
-            await interaction.response.send_message("Chưa cấu hình GEMINI_API_KEYS nên không nhúng được.", ephemeral=True)
+        if not md_embeddings.has_keys():
+            await interaction.response.send_message(
+                "Chưa cấu hình VOYAGE_API_KEYS hoặc GEMINI_API_KEYS nên không nhúng được.",
+                ephemeral=True,
+            )
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         remaining = await count_missing_embeddings(self.bot.db)
         if remaining == 0:
             await interaction.followup.send("Tất cả tài liệu đã được nhúng embedding. Không còn gì để làm.", ephemeral=True)
             return
-        probe = await md_embeddings.probe(self.gemini_keys)
+        probe = await md_embeddings.probe()
         if not probe.startswith("OK"):
             await interaction.followup.send(
                 f"API embedding lỗi: `{probe}`\nCòn {remaining} đoạn chưa nhúng.", ephemeral=True)

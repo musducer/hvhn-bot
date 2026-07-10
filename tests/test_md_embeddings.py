@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import unittest
+from unittest.mock import patch
 
+import md_embeddings
 from md_embeddings import vec_literal, _parse_batch, EMBED_DIM
 from md_knowledge import _rrf_merge
 
@@ -23,6 +25,18 @@ class ParseBatchTest(unittest.TestCase):
 
     def test_no_embeddings_key(self):
         self.assertIsNone(_parse_batch({"error": "quota"}))
+
+
+class ProviderSelectionTest(unittest.TestCase):
+    @patch.dict("os.environ", {"VOYAGE_API_KEYS": "v", "GEMINI_API_KEYS": "g"}, clear=True)
+    def test_voyage_is_preferred(self):
+        self.assertEqual(md_embeddings.active_provider(), "voyage")
+        self.assertEqual(md_embeddings.active_dim(), 1024)
+
+    @patch.dict("os.environ", {"HVHN_EMBED_PROVIDER": "gemini", "VOYAGE_API_KEYS": "v", "GEMINI_API_KEYS": "g"}, clear=True)
+    def test_explicit_gemini(self):
+        self.assertEqual(md_embeddings.active_provider(), "gemini")
+        self.assertEqual(md_embeddings.active_dim(), 768)
 
 
 class RrfMergeTest(unittest.TestCase):
