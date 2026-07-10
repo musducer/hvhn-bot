@@ -5,11 +5,147 @@ import asyncpg
 import os as _os
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
-# blockquote chua trich dan trong ngoac kep, kem attribution tuy chon: — Tac gia | (Tac gia)
-_QUOTE = re.compile(
-    r'>\s*[""\"](?P<quote>.+?)[""\"]'
-    r'(?:\s*(?:[—\-–]\s*(?P<a1>[^"\n(]+?)|\((?P<a2>[^)\n]+?)\)))?\s*$'
+
+# Parser BAO DUNG dinh dang: nhan dinh co the mo dau bang +, -, *, > hoac dau ngoac kep
+# dung dau dong; tac gia trong (…) hoac sau — o cuoi; tho nhieu dong voi tac gia o dong duoi.
+_OPEN_QUOTES = "“\"'‘"
+_CLOSE_QUOTES = "”\"'’"
+_LINE_START = re.compile(r'^\s*(?:[+\-*>•]\s*)?(?P<oq>[“"])')
+_ATTR_PAREN = re.compile(r'\(([^)\n]{2,120})\)')
+_ATTR_DASH = re.compile(r'^[\s.]*[—–-]\s*(?P<name>[^"“”(\n]{2,80})\s*$')
+_PAREN_ONLY_LINE = re.compile(r'^\s*\(([^)\n]{2,120})\)\s*\.?\s*$')
+
+# Danh xung thuong gap truoc ten tac gia — bo khi chuan hoa.
+_ROLE_PREFIXES = (
+    "nha tho", "nha van", "nha nghien cuu", "nha phe binh", "nha viet kich", "nha bao",
+    "nha triet hoc", "triet gia", "hoc gia", "dich gia", "nhac si", "dao dien",
+    "giao su", "pho giao su", "tien si", "gs", "pgs", "ts", "thac si", "ths",
 )
+
+
+def _plain(text: str) -> str:
+    import unicodedata
+    folded = unicodedata.normalize("NFD", text or "")
+    return "".join(ch for ch in folded if unicodedata.category(ch) != "Mn").lower().strip()
+
+
+def _clean_author(raw: str) -> str:
+    # "(Pablo Neruda, nha tho quoc dan cua Chile, ...)" -> "Pablo Neruda"
+    # "(Nha van Ly Nhue - Trung Quoc)" -> "Ly Nhue"
+    value = (raw or "").strip().strip(".")
+    value = value.split(",")[0]
+    value = re.split(r"\s[—–-]\s", value)[0].strip()
+    changed = True
+    while changed:
+        changed = False
+        plain = _plain(value)
+        for role in _ROLE_PREFIXES:
+            if plain.startswith(role + " "):
+                value = value[len(role):].strip()
+                changed = True
+                break
+    tokens = [t for t in value.split() if t]
+    if not tokens or len(tokens) > 6 or len(value) > 60:
+        return ""
+    if not tokens[0][:1].isupper():
+        return ""
+    capitalised = sum(1 for t in tokens if t[:1].isupper())
+    # >=50% de nhan ten phien am kieu "Sê khốp", "Đôxtôiepxki"
+    if capitalised / len(tokens) < 0.5:
+        return ""
+    return value
+
+
+def _extract_quote_facts(lines: list[str], passage_title: str) -> list[dict]:
+    facts: list[dict] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        m = _LINE_START.match(line)
+        if not m:
+            i += 1
+            continue
+        open_pos = m.end() - 1
+        rest = line[open_pos + 1:]
+        quote_lines: list[str] = []
+        tail = ""
+        consumed = 0
+        # tim dau dong ngoac kep, co the o dong sau (tho nhieu dong)
+        scan = rest
+        j = i
+        while True:
+            close_idx = next((k for k, ch in enumerate(scan) if ch in _CLOSE_QUOTES), -1)
+            if close_idx >= 0:
+                quote_lines.append(scan[:close_idx])
+                tail = scan[close_idx + 1:]
+                break
+            quote_lines.append(scan)
+            j += 1
+            if j >= len(lines) or j - i > 12:
+                quote_lines = []
+                break
+            scan = lines[j]
+        if not quote_lines:
+            i += 1
+            continue
+        quote = " ".join(part.strip() for part in quote_lines if part.strip()).strip()
+        if len(quote) < 15:
+            i = j + 1
+            continue
+        author = ""
+        pm = _ATTR_PAREN.search(tail)
+        if pm:
+            author = _clean_author(pm.group(1))
+        if not author:
+            dm = _ATTR_DASH.match(tail)
+            if dm:
+                author = _clean_author(dm.group("name"))
+        if not author and not tail.strip():
+            # tac gia co the nam o 1-2 dong ke tiep dang "(Ten)"
+            for look in range(j + 1, min(j + 3, len(lines))):
+                if not lines[look].strip():
+                    continue
+                pl = _PAREN_ONLY_LINE.match(lines[look])
+                if pl:
+                    author = _clean_author(pl.group(1))
+                    consumed = look - j
+                break
+        facts.append({"quote": quote, "author": author, "passage_title": passage_title})
+        i = j + 1 + consumed
+    return facts
+
+
+def _fallback_passages(content: str, max_chars: int = 1200) -> list[dict]:
+    # file khong co heading: gom cac doan van (cach nhau dong trong) thanh block ~max_chars
+    paragraphs = []
+    for para in re.split(r"\n\s*\n", content):
+        para = para.strip()
+        if not para:
+            continue
+        if len(para) <= max_chars:
+            paragraphs.append(para)
+            continue
+        # doan qua kho (vd danh sach nhan dinh khong co dong trong): cat theo dong
+        cur = ""
+        for line in para.split("\n"):
+            if cur and len(cur) + len(line) + 1 > max_chars:
+                paragraphs.append(cur)
+                cur = line
+            else:
+                cur = f"{cur}\n{line}" if cur else line
+        if cur:
+            paragraphs.append(cur)
+    blocks: list[str] = []
+    cur = ""
+    for para in paragraphs:
+        if cur and len(cur) + len(para) + 2 > max_chars:
+            blocks.append(cur)
+            cur = para
+        else:
+            cur = f"{cur}\n\n{para}" if cur else para
+    if cur:
+        blocks.append(cur)
+    return [{"title": "", "content": b} for b in blocks]
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -28,39 +164,55 @@ def _parse_frontmatter(text: str) -> tuple[dict, str]:
     return meta, rest
 
 
+def _preprocess(text: str) -> str:
+    # don dep artefact tu pandoc/converter: \+ \- \" \' va span [x]{.mark}
+    text = re.sub(r"\\([+\-\"'*.])", r"\1", text)
+    text = re.sub(r"\[([^\[\]]*)\]\{\.[^}]+\}", r"\1", text)
+    text = text.replace("**", "")
+    return text
+
+
 def parse_markdown(text: str) -> dict:
     text = (text or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = _preprocess(text)
     meta, body = _parse_frontmatter(text)
 
-    passages: list[dict] = []
-    quotes: list[dict] = []
+    # 1) chia section theo heading (neu co)
+    sections: list[tuple[str, list[str]]] = []
     cur_title = ""
     cur_lines: list[str] = []
-
-    def _flush():
-        content = "\n".join(cur_lines).strip()
-        if cur_title or content:
-            passages.append({"title": cur_title, "content": content})
-
     for line in body.split("\n"):
         m = _HEADING.match(line)
         if m:
-            _flush()
+            if cur_title or any(l.strip() for l in cur_lines):
+                sections.append((cur_title, cur_lines))
             cur_title = m.group(2).strip()
             cur_lines = []
             continue
         cur_lines.append(line)
-        qm = _QUOTE.search(line)
-        if qm:
-            author = (qm.group("a1") or qm.group("a2") or "").strip()
-            quotes.append({
-                "quote": qm.group("quote").strip(),
-                "author": author,
-                "passage_title": cur_title,
-            })
-    _flush()
+    if cur_title or any(l.strip() for l in cur_lines):
+        sections.append((cur_title, cur_lines))
 
-    title = meta.get("title") or (passages[0]["title"] if passages else "")
+    # 2) trich fact nhan dinh + dung passage
+    passages: list[dict] = []
+    quotes: list[dict] = []
+    for title, lines in sections:
+        quotes.extend(_extract_quote_facts(lines, title))
+        content = "\n".join(lines).strip()
+        if not (title or content):
+            continue
+        if len(content) > 1500:
+            for idx, block in enumerate(_fallback_passages(content)):
+                part_title = title if idx == 0 else (f"{title} (tiếp {idx})" if title else "")
+                passages.append({"title": part_title, "content": block["content"]})
+        else:
+            passages.append({"title": title, "content": content})
+
+    title = meta.get("title") or (sections[0][0] if sections and sections[0][0] else "")
+    if not title:
+        first_line = next((l.strip() for l in body.split("\n") if l.strip()), "")
+        if len(first_line) <= 100 and not _LINE_START.match(first_line):
+            title = first_line
     return {"title": title, "source": meta.get("source", ""), "passages": passages, "quotes": quotes}
 
 

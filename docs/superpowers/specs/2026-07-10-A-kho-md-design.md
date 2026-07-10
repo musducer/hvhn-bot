@@ -13,12 +13,17 @@ File lõi: `pdf_knowledge.py` (đổi vai), `cogs/ai.py`, `cogs/doc_storage.py`,
 - **Xoá kho PDF ngay** (wipe `bot_docs/` + bảng `ai_pdf_*`, bỏ index PDF vào AI).
 - Kho **"tri thức thủ công" (`ai_knowledge`) giữ riêng** nhưng **sửa retrieval**: nắm từ khoá + suy luận + kết hợp tri thức liên quan, KHÔNG đòi query trùng title, không chép nguyên văn.
 
-## 2. Quy ước .md (dạy chủ khi soạn)
+## 2. Parser bao dung định dạng (SỬA 2026-07-10 theo file thật của chủ)
 
-- Heading `#`/`##`/`###` → ranh giới **passage** (đơn vị semantic retrieval). Tiêu đề heading = title passage.
-- Nhận định có tác giả: dòng blockquote `> "…" — Tên tác giả` (hoặc `> "…" (Tên tác giả)`) → **fact quote→author** trích deterministic.
-- Đoạn văn thường → passage text (dùng cho phân tích/dàn ý/gợi ý — Tầng 2 của B).
-- Frontmatter YAML tùy chọn (`---\ntitle: ...\nsource: ...\n---`) → metadata tài liệu.
+KHÔNG bắt người soạn theo quy ước cứng — tài liệu thật đa dạng (danh sách `+`/`-`, thơ nhiều dòng, bản convert pandoc...). Parser tự thích nghi:
+
+- **Passage:** heading `#..######` nếu có; KHÔNG có heading → tự chia theo đoạn văn (block ~1200 ký tự); section quá 1500 ký tự cũng tự cắt (giữ title, đánh "(tiếp n)").
+- **Fact nhận định (quote→author), trích khi dòng MỞ ĐẦU bằng nhận định:** `+ "…" (Tác giả)`, `- "…" (Tác giả)`, `> "…" — Tác giả`, `* "…" (Tác giả)`, hoặc ngoặc kép đứng đầu dòng; thơ nhiều dòng với `(Tác giả)` ở dòng dưới cũng bắt được.
+- **Chuẩn hoá tác giả:** bỏ danh xưng (Nhà thơ/Nhà văn/Nhà nghiên cứu/GS/TS...), cắt phần tiểu sử sau dấu phẩy/gạch ("Pablo Neruda, nhà thơ..." → "Pablo Neruda"; "Lý Nhuệ - Trung Quốc" → "Lý Nhuệ"); nhận tên phiên âm ("Sê khốp").
+- **Chống fact rác:** quote nằm GIỮA câu (vd tên tác phẩm `bài thơ "X" (Tác giả)`) không bị trích thành nhận định; chuỗi không giống tên người bị loại.
+- **Tiền xử lý pandoc:** gỡ `\+ \- \"`, span `[x]{.mark}`, `**`.
+- Frontmatter YAML tùy chọn (`---\ntitle: ...\n---`) → metadata; không có thì lấy dòng đầu làm title.
+- Đo trên kho thật của chủ (`D:\Download 2\new hvhn bot doc (md)`): "nhan dinh van chuong.md" trích 152/153 nhận định có tác giả; file mô hình/tiểu luận không sinh fact rác.
 
 ## 3. Kiến trúc
 
