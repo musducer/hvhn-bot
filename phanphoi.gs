@@ -1466,12 +1466,22 @@ function capNhatTaiLieu() {
     }
   });
 
+  // GIỮ tick "Xóa tài liệu" đang có (theo tên tài liệu) để rebuild không nuốt tick người dùng.
+  const oldTicks = {};
+  if (sh.getLastRow() > 1) {
+    sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues().forEach(r => {
+      if (r[0]) oldTicks[String(r[0])] = r[2] === true;
+    });
+  }
+
   sh.clear();
   sh.getRange(1, 1, 1, 3).setValues([['Tên tài liệu', 'Số khách đang có', 'Xóa tài liệu']]);
   const names = Object.keys(count).sort();
   if (names.length) {
     sh.getRange(2, 1, names.length, 2).setValues(names.map(n => [n, count[n]]));
     sh.getRange(2, 3, names.length, 1).insertCheckboxes();
+    const ticks = names.map(n => [oldTicks[n] === true]);
+    if (ticks.some(t => t[0])) sh.getRange(2, 3, names.length, 1).setValues(ticks);
   }
 
   // trang trí
