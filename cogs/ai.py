@@ -1843,7 +1843,7 @@ class AI(commands.Cog):
             answer = answer[:MAX_DISCORD_LEN] + "\n\n*(da rut gon de vua Discord)*"
 
         embed = discord.Embed(title=title, description=answer, color=discord.Color.green())
-        embed.set_footer(text=f"Then tra loi cho {interaction.user.display_name}. Bam feedback neu can sua.")
+        embed.set_footer(text=f"Then trả lời {interaction.user.display_name} · thấy chỗ nào cần chỉnh, bấm nút góp ý giúp Then nhé.")
         await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
         print(
             f"[debug] final_answer_sent insufficient={self._insufficient_answer(answer)} "
