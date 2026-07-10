@@ -1548,6 +1548,79 @@ function taoLaiFormMd() {
   SpreadsheetApp.getUi().alert(msg);
 }
 
+// ===== CHƯƠNG TRÌNH TRẢI NGHIỆM: FORM + HANDLER =====
+
+function taoLaiFormKhachTraiNghiem() {
+  const props = PropertiesService.getScriptProperties();
+  const form = FormApp.create('HVHN — Thêm khách TRẢI NGHIỆM');
+  form.setDescription('Nhập họ tên + email để cấp quyền xem tài liệu trải nghiệm (' + TRIAL_HOURS + ' giờ).');
+  form.addTextItem().setTitle('Họ và tên').setRequired(true);
+  form.addTextItem().setTitle('Email (Gmail)').setRequired(true);
+  form.setConfirmationMessage('Đã nhận! Bạn sẽ được cấp quyền xem tài liệu trải nghiệm.');
+  form.setAcceptingResponses(true);
+  ScriptApp.newTrigger('xuLyFormKhachTraiNghiem').forForm(form).onFormSubmit().create();
+  props.setProperty('FORM_KHACH_TN_ID', form.getId());
+  const msg = 'Đã tạo Form THÊM KHÁCH TRẢI NGHIỆM. Link gửi quản lý:\n\n' + form.getPublishedUrl();
+  Logger.log(msg); SpreadsheetApp.getUi().alert(msg);
+}
+
+// onFormSubmit (installable trigger) -> được phép gọi DriveApp.
+// Thêm dòng vào tab Khách trải nghiệm (hạn 72h) + cấp quyền xem folder chung NGAY.
+function xuLyFormKhachTraiNghiem(e) {
+  let name = '', email = '';
+  e.response.getItemResponses().forEach(it => {
+    const t = it.getItem().getTitle().toLowerCase();
+    if (t.indexOf('tên') >= 0) name = String(it.getResponse()).trim();
+    else if (t.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
+  });
+  if (!name || !email) return;
+  ensureTraiNghiem();
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
+  const now = _now();
+  const expiry = _addHours(now, TRIAL_HOURS);
+  kh.appendRow([name, email, now, expiry, '', 'Còn hạn', false]);
+  const shared = _trialSharedFolder();
+  try { shared.addViewer(email); } catch (err) { ghiLog('LỖI cấp quyền trải nghiệm', email + ' -> ' + err); }
+  ghiLog('Thêm khách trải nghiệm', name + ' - ' + email);
+}
+
+function taoLaiFormTaiLieuTraiNghiem() {
+  const props = PropertiesService.getScriptProperties();
+  const form = FormApp.create('HVHN — Thêm tài liệu TRẢI NGHIỆM');
+  form.setDescription('Tải lên PDF cho chương trình trải nghiệm. Watermark cố định "' + TRIAL_NAME + '", phân phối vào folder chung.');
+  form.addTextItem().setTitle('Tên tài liệu (tuỳ chọn, để trống sẽ dùng tên file)');
+  // Apps Script không tạo được câu hỏi upload -> thêm tay 1 câu "Tải tệp lên" trong link SỬA.
+  form.setConfirmationMessage('Đã nhận file. Watcher trên PC sẽ đóng dấu + đưa vào folder chung.');
+  form.setAcceptingResponses(true);
+  ScriptApp.newTrigger('xuLyFormTaiLieuTraiNghiem').forForm(form).onFormSubmit().create();
+  props.setProperty('FORM_TL_TN_ID', form.getId());
+  const msg = 'Đã tạo Form THÊM TÀI LIỆU TRẢI NGHIỆM.\n\n'
+    + 'Mở link SỬA thêm tay 1 câu "Tải tệp lên" (PDF):\n' + form.getEditUrl()
+    + '\n\nLink GỬI quản lý: ' + form.getPublishedUrl();
+  Logger.log(msg); SpreadsheetApp.getUi().alert(msg);
+}
+
+// Handler: copy PDF trải nghiệm vào folder đơn _don_them_tai_lieu_trai_nghiem (watcher render).
+function xuLyFormTaiLieuTraiNghiem(e) {
+  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
+  const incoming = getOrCreateFolder(parent, INCOMING_TRIAL_NAME);
+  let tenTL = '';
+  let fileIds = [];
+  e.response.getItemResponses().forEach(it => {
+    const type = it.getItem().getType();
+    if (type === FormApp.ItemType.FILE_UPLOAD) fileIds = fileIds.concat(it.getResponse());
+    else if (type === FormApp.ItemType.TEXT) tenTL = String(it.getResponse()).trim();
+  });
+  fileIds.forEach(id => {
+    const f = DriveApp.getFileById(id);
+    let newName = f.getName();
+    if (tenTL) newName = tenTL.replace(/[\\\/:*?"<>|]/g, '').trim() + '.pdf';
+    if (!/\.pdf$/i.test(newName)) newName += '.pdf';
+    f.makeCopy(newName, incoming);
+  });
+}
+
 function caiDatForm() {
   const ui = SpreadsheetApp.getUi();
   const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
