@@ -887,7 +887,9 @@ async def xu_ly_don_them_md():
         path = os.path.join(INCOMING_BOT_MD, name)
         if not _stable(path):
             continue
-        await _index_md_for_ai(path)
+        result = await _index_md_for_ai(path)
+        if result != "indexed":
+            continue  # giu file lai de vong sau thu index lai (DB loi tam thoi)
         try:
             dest = _unique_path(PROCESSED_MD, name)
             os.replace(path, dest)
