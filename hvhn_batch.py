@@ -87,6 +87,20 @@ def _render_job(doc_path, recipient):
     return file_name
 
 
+def render_trial(doc_path, out_folder, *, name="Nguyễn Văn A", email="nguyenvana@gmail.com"):
+    doc_name = os.path.splitext(os.path.basename(doc_path))[0]
+    file_name = f"{name}__{doc_name}.pdf"
+    out_path = os.path.join(out_folder, file_name)
+    os.makedirs(out_folder, exist_ok=True)
+    convert_to_secure_image_pdf(
+        doc_path, out_path,
+        recipient_name=name,
+        recipient_email=email,
+        warning_text=WARNING_TEXT,
+    )
+    return file_name
+
+
 def render_batch(docs, recipients):
     os.makedirs(OUT_ROOT, exist_ok=True)
     jobs = [(doc, r) for doc in docs for r in recipients]

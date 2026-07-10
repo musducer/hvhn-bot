@@ -21,6 +21,7 @@ from dotenv import load_dotenv
 from hvhn_batch import (
     MIRROR_SOURCE, DOCS_DIR, load_clients, append_client,
     list_docs, render_batch, write_new_rows_csv, remove_client, remove_doc,
+    render_trial,
 )
 from pdf_knowledge import (
     PDF_KNOWLEDGE_SCHEMA,
@@ -36,6 +37,9 @@ JOBS_KHACH = os.path.join(MIRROR_PARENT, "_don_them_khach")
 INCOMING_DOCS = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu")
 INCOMING_BOT_DOCS = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu_bot")
 INCOMING_BOT_MD = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu_bot_md")
+INCOMING_TRIAL = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu_trai_nghiem")
+TRIAL_SHARED = os.path.join(MIRROR_PARENT, "TÀI LIỆU TRẢI NGHIỆM")
+PROCESSED_TRIAL = os.path.join(MIRROR_PARENT, "_da_xu_ly_trai_nghiem")
 PROCESSED_MD = os.path.join(MIRROR_PARENT, "_da_xu_ly_tai_lieu_bot_md")
 PROCESSED_DOCS = os.path.join(MIRROR_PARENT, "_da_xu_ly_tai_lieu")  # lưu trữ PDF gốc đã xử lý
 XOA_KHACH = os.path.join(MIRROR_PARENT, "_don_xoa_khach")           # đơn xoá khách (email)
@@ -897,6 +901,24 @@ async def xu_ly_don_them_md():
             traceback.print_exc()
 
 
+def xu_ly_don_trai_nghiem():
+    if not os.path.isdir(INCOMING_TRIAL):
+        return
+    os.makedirs(PROCESSED_TRIAL, exist_ok=True)
+    pdfs = [f for f in os.listdir(INCOMING_TRIAL) if f.lower().endswith(".pdf")]
+    for pdf in pdfs:
+        path = os.path.join(INCOMING_TRIAL, pdf)
+        if not _stable(path):
+            continue
+        try:
+            render_trial(path, TRIAL_SHARED)
+            print(f"[TRAI NGHIEM] render {pdf} -> {TRIAL_SHARED}", flush=True)
+            dest = _unique_path(PROCESSED_TRIAL, pdf)
+            os.replace(path, dest)
+        except Exception:
+            traceback.print_exc()
+
+
 def xu_ly_don_xoa_khach():
     """Đơn xoá khách: mỗi .txt chứa email -> gỡ khỏi clients.csv (để đừng render lại sau này)."""
     if not os.path.isdir(XOA_KHACH):
@@ -954,6 +976,7 @@ async def main_async():
             await xu_ly_don_them_tai_lieu()
             await xu_ly_don_them_tai_lieu_bot()
             await xu_ly_don_them_md()
+            xu_ly_don_trai_nghiem()
             xu_ly_don_xoa_khach()
             await xu_ly_don_xoa_tai_lieu()
             await _sync_runtime_status()
