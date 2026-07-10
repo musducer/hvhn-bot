@@ -238,6 +238,8 @@ function hvhnTuDongHoa() {
     donTaiLieuBotOnlyKhoKhachTuDong(); // tài liệu bot-only lỡ lọt kho khách -> gỡ khỏi Sheet/Drive
     xoaKhachDaTichTuDong();   // tick Xóa khách -> tự xoá, không cần bấm menu
     xoaTaiLieuDaTichTuDong(); // tick Xóa tài liệu -> tự xoá, không cần bấm menu
+    xoaKhachTraiNghiemDaTich();     // tick Xóa khách trải nghiệm -> tự xoá
+    xoaTaiLieuTraiNghiemDaTich();   // tick Xóa tài liệu trải nghiệm -> tự xoá (trước khi rebuild tab)
     kiemTraHetHanTraiNghiem();   // trải nghiệm quá 72h -> gỡ quyền xem folder chung
     capNhatTaiLieuTraiNghiem();  // đồng bộ tab Tài liệu trải nghiệm + khóa tải
     capNhatTaiLieu();         // tab Tài liệu luôn mới
@@ -610,17 +612,26 @@ function ensureTraiNghiem() {
 }
 
 // Quét folder chung -> dựng lại tab Tài liệu trải nghiệm + khóa tải từng file.
+// GIỮ NGUYÊN tick ☑Xóa đang có (theo tên file) để rebuild không nuốt tick người dùng.
 function capNhatTaiLieuTraiNghiem() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   ensureTraiNghiem();
   const tl = ss.getSheetByName(TRIAL_DOC_TAB);
   const shared = _trialSharedFolder();
+
+  const oldTicks = {}; // ten file -> tick dang co
+  if (tl.getLastRow() > 1) {
+    tl.getRange(2, 1, tl.getLastRow() - 1, 3).getValues().forEach(r => {
+      if (r[0]) oldTicks[String(r[0])] = r[TRIAL_DOC_DEL_COL - 1] === true;
+    });
+  }
+
   const rows = [];
   const files = shared.getFiles();
   while (files.hasNext()) {
     const f = files.next();
     try { Drive.Files.update({ copyRequiresWriterPermission: true }, f.getId()); } catch (e2) {}
-    rows.push([f.getName(), 'Trong chương trình', false]);
+    rows.push([f.getName(), 'Trong chương trình', oldTicks[f.getName()] === true]);
   }
   if (tl.getLastRow() > 1) tl.getRange(2, 1, tl.getLastRow() - 1, 3).clearContent();
   if (rows.length) {
