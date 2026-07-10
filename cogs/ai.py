@@ -11,7 +11,6 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from pdf_knowledge import retrieve_pdf_knowledge, search_pdf_knowledge
 from md_knowledge import retrieve_md_knowledge, search_md_knowledge
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
