@@ -83,6 +83,7 @@ function onOpen() {
     .addItem('📱 Tạo Google Form cho điện thoại (1 lần)', 'caiDatForm')
     .addItem('📱 Tạo lại RIÊNG Form thêm khách', 'taoLaiFormKhach')
     .addItem('📱 Tạo lại RIÊNG Form nạp tài liệu cho bot', 'taoLaiFormBot')
+    .addItem('📱 Tạo lại RIÊNG Form nạp .md cho bot', 'taoLaiFormMd')
     .addItem('Dọn file trùng trên Drive', 'donFileTrung')
     .addItem('Trang trí lại tất cả', 'trangTriTatCa')
     .addToUi();
@@ -1408,6 +1409,7 @@ const HVHN_PARENT_FOLDER_ID = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs'; // folder cha
 const JOBS_KHACH_NAME = '_don_them_khach';      // nơi ghi đơn thêm khách (watcher PC đọc)
 const INCOMING_DOCS_NAME = '_don_them_tai_lieu'; // nơi chứa PDF tài liệu mới (watcher PC đọc)
 const BOT_DOCS_FORM_NAME = '_don_them_tai_lieu_bot'; // PDF chỉ nạp cho AI/bot, không phân phối khách
+const INCOMING_BOT_MD_NAME = '_don_them_tai_lieu_bot_md'; // .md chỉ nạp cho AI/bot, không phân phối khách
 
 // Mở form theo ID nếu form còn sống (không bị xoá/thùng rác); ngược lại trả null.
 function _openFormIfAlive(id) {
@@ -1458,6 +1460,33 @@ function taoLaiFormBot() {
   const form = _taoFormBot(props);
   const msg = 'Đã tạo lại Form NẠP TÀI LIỆU CHO BOT.\n\n'
     + 'Cần mở link SỬA rồi thêm tay 1 câu "Tải tệp lên" bắt buộc.\n\n'
+    + 'Link SỬA: ' + form.getEditUrl() + '\n\n'
+    + 'Link GỬI quản lý: ' + form.getPublishedUrl();
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+}
+
+// Tạo mới form NẠP .MD CHO BOT + gắn trigger + lưu ID. Trả về form.
+function _taoFormMd(props) {
+  const form = FormApp.create('HVHN — Nạp tài liệu .md cho bot');
+  form.setDescription('Tải lên file .md để bot AI đọc làm căn cứ trả lời. Tài liệu này KHÔNG phân phối cho khách.\n\n'
+    + 'Quy ước soạn .md: dùng heading (#, ##, ...) để tách từng đoạn/mục; trích dẫn ghi theo dạng '
+    + '> "…nội dung trích dẫn…" — Tác giả (mỗi trích dẫn 1 dòng blockquote riêng).');
+  form.addTextItem().setTitle('Tên tài liệu (tuỳ chọn, để trống sẽ dùng tên file)');
+  // Apps Script không tạo được câu hỏi upload file bằng code -> thêm tay 1 lần trong link sửa form.
+  form.setConfirmationMessage('Đã nhận file. Bot sẽ đọc sau khi watcher trên PC xử lý.');
+  form.setAcceptingResponses(true);
+  ScriptApp.newTrigger('xuLyFormMd').forForm(form).onFormSubmit().create();
+  props.setProperty('FORM_MD_ID', form.getId());
+  return form;
+}
+
+// Menu: tạo lại RIÊNG form nạp .md cho bot (khi lỡ xoá/hỏng), không đụng các form khác.
+function taoLaiFormMd() {
+  const props = PropertiesService.getScriptProperties();
+  const form = _taoFormMd(props);
+  const msg = 'Đã tạo lại Form NẠP .MD CHO BOT.\n\n'
+    + 'Cần mở link SỬA rồi thêm tay 1 câu "Tải tệp lên" bắt buộc (chỉ nhận .md).\n\n'
     + 'Link SỬA: ' + form.getEditUrl() + '\n\n'
     + 'Link GỬI quản lý: ' + form.getPublishedUrl();
   Logger.log(msg);
@@ -1569,4 +1598,28 @@ function xuLyFormTaiLieuBot(e) {
     if (!/\.pdf$/i.test(newName)) newName += '.pdf';
     f.makeCopy(newName, incoming);
   });
+}
+
+// Handler khi có người submit Form "Nạp .md cho bot": copy file .md vào folder _don_them_tai_lieu_bot_md.
+function xuLyFormMd(e) {
+  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
+  const incoming = getOrCreateFolder(parent, INCOMING_BOT_MD_NAME);
+  let tenTL = '';
+  let fileIds = [];
+  e.response.getItemResponses().forEach(it => {
+    const type = it.getItem().getType();
+    if (type === FormApp.ItemType.FILE_UPLOAD) {
+      fileIds = fileIds.concat(it.getResponse());
+    } else if (type === FormApp.ItemType.TEXT) {
+      tenTL = String(it.getResponse()).trim();
+    }
+  });
+  fileIds.forEach(id => {
+    const f = DriveApp.getFileById(id);
+    let newName = f.getName();
+    if (tenTL) newName = tenTL.replace(/[\\\/:*?"<>|]/g, '').trim() + '.md';
+    if (!/\.md$/i.test(newName)) newName += '.md';
+    f.makeCopy(newName, incoming);
+  });
+  ghiLog('Nạp .md cho bot', fileIds.length + ' file -> ' + INCOMING_BOT_MD_NAME);
 }

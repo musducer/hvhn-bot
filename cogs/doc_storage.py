@@ -7,7 +7,7 @@ from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands
-from pdf_knowledge import index_pdf_bytes, pdf_knowledge_stats
+from pdf_knowledge import pdf_knowledge_stats
 
 try:
     from hvhn_batch import MIRROR_SOURCE
@@ -19,7 +19,6 @@ DEFAULT_MIRROR_PARENT = Path(MIRROR_SOURCE).parent
 ADMIN_ROLE_ENV = "HVHN_ADMIN_ROLE"
 MIRROR_PARENT_ENV = "HVHN_MIRROR_PARENT"
 MAX_PDF_BYTES = int(os.getenv("HVHN_MAX_PDF_MB", "300")) * 1024 * 1024
-INLINE_INDEX_MAX_BYTES = int(os.getenv("HVHN_INLINE_INDEX_MAX_MB", "25")) * 1024 * 1024
 PDF_URL_PATTERN = re.compile(r"^https?://", re.I)
 
 
@@ -106,61 +105,43 @@ class DocumentStorage(commands.Cog):
             return f"quá {MAX_PDF_BYTES // 1024 // 1024}MB"
         return None
 
-    async def _enqueue_and_index_pdf(
+    async def _enqueue_client_pdf(
         self,
         file: discord.Attachment,
         requested_by: int,
-        *,
-        distribute_to_clients: bool = False,
-    ) -> tuple[int | None, dict | None, str | None]:
+    ) -> tuple[int | None, str | None]:
+        # Chi xep hang watermark/phan phoi cho khach; AI khong index PDF nua (kho tri thuc la .md).
         error = self._validate_pdf_attachment(file)
         if error:
-            return None, None, error
+            return None, error
 
         try:
             data = await file.read()
         except Exception as exc:
-            return None, None, f"lỗi đọc file: {exc}"
+            return None, f"lỗi đọc file: {exc}"
         if len(data) > MAX_PDF_BYTES:
-            return None, None, f"quá {MAX_PDF_BYTES // 1024 // 1024}MB"
+            return None, f"quá {MAX_PDF_BYTES // 1024 // 1024}MB"
 
         job_id = await self._enqueue(
-            "add_document" if distribute_to_clients else "add_bot_document",
+            "add_document",
             file_name=file.filename,
             file_data=data,
             requested_by=requested_by,
         )
-
-        if INLINE_INDEX_MAX_BYTES <= 0 or len(data) > INLINE_INDEX_MAX_BYTES:
-            return job_id, None, None
-
-        try:
-            indexed = await index_pdf_bytes(
-                self.bot.db,
-                file.filename,
-                data,
-                source=("discord_client:" if distribute_to_clients else "bot_only:") + file.filename,
-                created_by=requested_by,
-            )
-        except Exception as exc:
-            indexed = None
-            return job_id, indexed, f"đã xếp hàng nhưng AI chưa đọc được PDF: {exc}"
-        return job_id, indexed, None
+        return job_id, None
 
     async def _enqueue_pdf_url(
         self,
         url: str,
         file_name: str,
         requested_by: int,
-        *,
-        distribute_to_clients: bool = False,
     ) -> int | None:
         url = url.strip()
         if not PDF_URL_PATTERN.match(url):
             return None
         safe_file_name = _safe_stem(Path(file_name).stem or "tai_lieu") + ".pdf"
         return await self._enqueue(
-            "add_document_url" if distribute_to_clients else "add_bot_document_url",
+            "add_document_url",
             text_payload=url,
             file_name=safe_file_name,
             requested_by=requested_by,
@@ -183,62 +164,18 @@ class DocumentStorage(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="hvhn_themtailieu", description="Nạp PDF vào kho riêng cho bot AI, không phân phối cho khách")
-    async def add_document(self, interaction: discord.Interaction, file: discord.Attachment):
-        if not await self._require_admin(interaction):
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-        job_id, indexed, error = await self._enqueue_and_index_pdf(file, interaction.user.id)
-        if not job_id:
-            await interaction.followup.send(f"Không nhận `{file.filename}`: {error}.", ephemeral=True)
-            return
-
-        ai_note = ""
-        if indexed:
-            ai_note = f"\nAI đã đọc vào kho tri thức: `{indexed['chunks']}` đoạn."
-            if indexed["chunks"] == 0:
-                ai_note += " PDF này có thể là scan ảnh, cần OCR nếu muốn AI đọc nội dung."
-        elif error:
-            ai_note = f"\nCảnh báo: {error}"
-        else:
-            ai_note = "\nĐã xếp hàng; watcher sẽ đọc/OCR sau để tránh Discord timeout với PDF lớn/PDF ảnh."
-        await interaction.followup.send(
-            f"Đã xếp hàng đơn #{job_id}: nạp `{file.filename}` vào kho riêng cho bot. Watcher sẽ lưu file, không watermark/không phân phối cho khách.{ai_note}",
-            ephemeral=True,
-        )
-
     @app_commands.command(name="hvhn_tailieu_khach", description="Thêm PDF vào kho độc quyền và phân phối cho khách")
     async def add_client_document(self, interaction: discord.Interaction, file: discord.Attachment):
         if not await self._require_admin(interaction):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        job_id, indexed, error = await self._enqueue_and_index_pdf(file, interaction.user.id, distribute_to_clients=True)
+        job_id, error = await self._enqueue_client_pdf(file, interaction.user.id)
         if not job_id:
             await interaction.followup.send(f"Không nhận `{file.filename}`: {error}.", ephemeral=True)
             return
-
-        ai_note = ""
-        if indexed:
-            ai_note = f"\nAI cũng đã đọc vào kho tri thức: `{indexed['chunks']}` đoạn."
-        elif error:
-            ai_note = f"\nCảnh báo: {error}"
-        else:
-            ai_note = "\nĐã xếp hàng; watcher sẽ watermark/phân phối và đọc/OCR sau."
         await interaction.followup.send(
-            f"Đã xếp hàng đơn #{job_id}: thêm `{file.filename}` vào kho độc quyền cho khách. Watcher sẽ watermark và phân phối.{ai_note}",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="hvhn_nap_link", description="Nạp PDF lớn bằng link Drive vào kho riêng cho bot AI")
-    async def add_bot_document_link(self, interaction: discord.Interaction, url: str, ten_file: str):
-        if not await self._require_admin(interaction):
-            return
-        job_id = await self._enqueue_pdf_url(url, ten_file, interaction.user.id)
-        if not job_id:
-            await interaction.response.send_message("Link không hợp lệ. Cần link bắt đầu bằng http/https.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            f"Đã xếp hàng đơn #{job_id}: watcher sẽ tải `{ten_file}.pdf` từ link và OCR nếu là PDF hình ảnh.",
+            f"Đã xếp hàng đơn #{job_id}: thêm `{file.filename}` vào kho độc quyền cho khách. "
+            "Watcher sẽ watermark và phân phối. (Kho tri thức AI giờ chỉ nhận file .md qua Google Form.)",
             ephemeral=True,
         )
 
@@ -246,54 +183,12 @@ class DocumentStorage(commands.Cog):
     async def add_client_document_link(self, interaction: discord.Interaction, url: str, ten_file: str):
         if not await self._require_admin(interaction):
             return
-        job_id = await self._enqueue_pdf_url(url, ten_file, interaction.user.id, distribute_to_clients=True)
+        job_id = await self._enqueue_pdf_url(url, ten_file, interaction.user.id)
         if not job_id:
             await interaction.response.send_message("Link không hợp lệ. Cần link bắt đầu bằng http/https.", ephemeral=True)
             return
         await interaction.response.send_message(
-            f"Đã xếp hàng đơn #{job_id}: watcher sẽ tải `{ten_file}.pdf`, watermark, phân phối và nạp vào kho AI.",
-            ephemeral=True,
-        )
-
-    @app_commands.command(name="hvhn_nap_tailieu", description="Nạp nhiều PDF vào kho riêng cho bot AI, không phân phối cho khách")
-    async def add_many_documents(
-        self,
-        interaction: discord.Interaction,
-        file_1: discord.Attachment,
-        file_2: discord.Attachment | None = None,
-        file_3: discord.Attachment | None = None,
-        file_4: discord.Attachment | None = None,
-        file_5: discord.Attachment | None = None,
-        file_6: discord.Attachment | None = None,
-        file_7: discord.Attachment | None = None,
-        file_8: discord.Attachment | None = None,
-        file_9: discord.Attachment | None = None,
-        file_10: discord.Attachment | None = None,
-    ):
-        if not await self._require_admin(interaction):
-            return
-        await interaction.response.defer(ephemeral=True, thinking=True)
-
-        files = [f for f in (file_1, file_2, file_3, file_4, file_5, file_6, file_7, file_8, file_9, file_10) if f]
-        lines = []
-        ok = 0
-        for file in files:
-            job_id, indexed, error = await self._enqueue_and_index_pdf(file, interaction.user.id)
-            if not job_id:
-                lines.append(f"❌ `{file.filename}`: {error}")
-                continue
-            ok += 1
-            chunks = indexed["chunks"] if indexed else None
-            suffix = " - đã xếp hàng, watcher sẽ đọc/OCR sau" if indexed is None and error is None else ""
-            if indexed and indexed["chunks"] == 0:
-                suffix = " - sẽ OCR nếu là PDF scan ảnh"
-            if error:
-                suffix = f" - {error}"
-            read_text = f"AI đọc `{chunks}` đoạn" if chunks is not None else "chờ watcher"
-            lines.append(f"✅ `#{job_id}` `{file.filename}`: {read_text}{suffix}")
-
-        await interaction.followup.send(
-            "Đã nạp `{}`/`{}` PDF.\n{}".format(ok, len(files), "\n".join(lines[:20])),
+            f"Đã xếp hàng đơn #{job_id}: watcher sẽ tải `{ten_file}.pdf`, watermark và phân phối cho khách.",
             ephemeral=True,
         )
 

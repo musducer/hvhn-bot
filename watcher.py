@@ -28,12 +28,15 @@ from pdf_knowledge import (
     remove_pdf_document_by_title,
     sync_pdf_folder,
 )
+from md_knowledge import MD_KNOWLEDGE_SCHEMA, index_md_path
 
 # Các folder đơn hàng (nằm cạnh folder Source, do Apps Script tạo + Form/menu ghi vào)
 MIRROR_PARENT = os.path.dirname(MIRROR_SOURCE)
 JOBS_KHACH = os.path.join(MIRROR_PARENT, "_don_them_khach")
 INCOMING_DOCS = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu")
 INCOMING_BOT_DOCS = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu_bot")
+INCOMING_BOT_MD = os.path.join(MIRROR_PARENT, "_don_them_tai_lieu_bot_md")
+PROCESSED_MD = os.path.join(MIRROR_PARENT, "_da_xu_ly_tai_lieu_bot_md")
 PROCESSED_DOCS = os.path.join(MIRROR_PARENT, "_da_xu_ly_tai_lieu")  # lưu trữ PDF gốc đã xử lý
 XOA_KHACH = os.path.join(MIRROR_PARENT, "_don_xoa_khach")           # đơn xoá khách (email)
 XOA_TAILIEU = os.path.join(MIRROR_PARENT, "_don_xoa_tai_lieu")      # đơn xoá tài liệu (tên gốc)
@@ -268,6 +271,7 @@ CREATE TABLE IF NOT EXISTS hvhn_sheet_docs (
 """
 
 DOC_JOB_SCHEMA += PDF_KNOWLEDGE_SCHEMA
+DOC_JOB_SCHEMA += MD_KNOWLEDGE_SCHEMA
 
 
 def _ts():
@@ -860,6 +864,39 @@ async def xu_ly_don_them_tai_lieu_bot():
             traceback.print_exc()
 
 
+async def _index_md_for_ai(path):
+    if not DATABASE_URL:
+        return "db_failed"
+    try:
+        result = await index_md_path(DATABASE_URL, path)
+        print(f"[AI MD] {os.path.basename(path)} -> {result.get('passages', 0)} passage", flush=True)
+        await _set_runtime_status("ai_md_last_indexed", f"{result.get('title')} ({result.get('passages', 0)} passage)")
+        return "indexed"
+    except Exception as exc:
+        print(f"[AI MD] index_failed file={os.path.basename(path)} err={type(exc).__name__}: {exc}", flush=True)
+        traceback.print_exc()
+        return "failed"
+
+
+async def xu_ly_don_them_md():
+    if not os.path.isdir(INCOMING_BOT_MD):
+        return
+    os.makedirs(PROCESSED_MD, exist_ok=True)
+    files = [f for f in os.listdir(INCOMING_BOT_MD) if f.lower().endswith(".md")]
+    for name in files:
+        path = os.path.join(INCOMING_BOT_MD, name)
+        if not _stable(path):
+            continue
+        result = await _index_md_for_ai(path)
+        if result != "indexed":
+            continue  # giu file lai de vong sau thu index lai (DB loi tam thoi)
+        try:
+            dest = _unique_path(PROCESSED_MD, name)
+            os.replace(path, dest)
+        except Exception:
+            traceback.print_exc()
+
+
 def xu_ly_don_xoa_khach():
     """Đơn xoá khách: mỗi .txt chứa email -> gỡ khỏi clients.csv (để đừng render lại sau này)."""
     if not os.path.isdir(XOA_KHACH):
@@ -916,6 +953,7 @@ async def main_async():
             xu_ly_don_them_khach()
             await xu_ly_don_them_tai_lieu()
             await xu_ly_don_them_tai_lieu_bot()
+            await xu_ly_don_them_md()
             xu_ly_don_xoa_khach()
             await xu_ly_don_xoa_tai_lieu()
             await _sync_runtime_status()

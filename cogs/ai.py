@@ -11,7 +11,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from pdf_knowledge import retrieve_pdf_knowledge, search_pdf_knowledge
+from md_knowledge import retrieve_md_knowledge, search_md_knowledge
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
@@ -238,6 +238,41 @@ def _rag_plain(value: str) -> str:
     value = unicodedata.normalize("NFD", value or "")
     value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn").lower()
     return value.replace("đ", "d")
+
+
+CONCEPT_CLUSTERS = [
+    ["mo bai", "gioi thieu", "dan dat", "vao bai", "dat van de", "mo doan", "cau mo dau"],
+    ["ket bai", "ket luan", "khep lai", "tong ket", "chot van de", "ket doan"],
+    ["than bai", "trien khai", "phat trien y", "phan tich", "trien khai luan diem"],
+    ["dan y", "bo cuc", "suon bai", "khung bai", "luan diem", "he thong luan diem", "y chinh"],
+    ["dan chung", "bang chung", "vi du", "lieu chung", "minh chung"],
+    ["ly le", "lap luan", "ly luan", "bien luan"],
+    ["nghi luan xa hoi", "nlxh", "tu tuong dao li", "hien tuong doi song"],
+    ["nghi luan van hoc", "nlvh", "phan tich tac pham", "cam nhan"],
+    ["bien phap tu tu", "nghe thuat", "an du", "so sanh", "nhan hoa", "diep ngu"],
+    ["nhan vat", "hinh tuong", "nhan vat van hoc"],
+    ["van phong", "giong van", "loi van", "hanh van"],
+    ["nhan dinh", "y kien", "trich dan", "cau noi"],
+]
+
+
+def expand_query_terms(query: str) -> list[str]:
+    base = _rag_plain(query)
+    tokens = [t for t in re.findall(r"[a-z0-9]{2,}", base) if t]
+    out: list[str] = []
+
+    def _add(t: str):
+        if t and t not in out:
+            out.append(t)
+
+    for t in tokens:
+        _add(t)
+    # no cum: neu chuoi query cham toi bat ky phrase nao trong cum -> them ca cum
+    for cluster in CONCEPT_CLUSTERS:
+        if any(phrase in base for phrase in cluster):
+            for phrase in cluster:
+                _add(phrase)
+    return out
 
 
 @dataclass
@@ -478,6 +513,25 @@ class QuoteExtractor:
     def extract(cls, pdf_meta: dict, plan: RAGPlan, query: str) -> list[QuoteEvidence]:
         requested_plain = _rag_plain(plan.author_filter)
         evidences: list[QuoteEvidence] = []
+        for fact in pdf_meta.get("quotes") or []:
+            author = (fact.get("author") or cls.UNKNOWN).strip() or cls.UNKNOWN
+            if requested_plain and _rag_plain(author) != requested_plain:
+                continue
+            quote = re.sub(r"\s+", " ", fact.get("quote") or "").strip()
+            if not quote:
+                continue
+            evidences.append(QuoteEvidence(
+                quote=quote,
+                author=author,
+                pdf_title=fact.get("title") or "",
+                page=None,
+                chunk_id=f"fact::{author}",
+                source=fact.get("source") or "",
+                chunk=None,
+                context=quote,
+                confidence=1.0,
+                score=1000 + AI._unit_score(query, quote),
+            ))
         for chunk in pdf_meta.get("chunks") or []:
             text = re.sub(r"\s+", " ", chunk.get("content") or chunk.get("excerpt") or "").strip()
             spans = cls.quote_spans(text)
@@ -1088,20 +1142,19 @@ class AI(commands.Cog):
 
     async def _pdf_knowledge_context(self, query: str) -> str:
         try:
-            return await search_pdf_knowledge(self.bot.db, query, limit=5)
-        except Exception as exc:
-            print(f"[ai] PDF knowledge exception: {exc}", flush=True)
+            return await search_md_knowledge(self.bot.db, query, limit=5)
+        except Exception:
             return ""
 
     async def _pdf_retrieval(self, query: str, *, limit: int = PDF_DEFAULT_LIMIT) -> dict:
         try:
-            return await retrieve_pdf_knowledge(self.bot.db, query, limit=limit)
+            return await retrieve_md_knowledge(self.bot.db, query, limit=limit)
         except Exception as exc:
-            print(f"[ai] PDF retrieval exception: {exc}", flush=True)
-            return {"context": "", "candidate_count": 0, "selected_count": 0, "top_score": 0, "chunks": [], "error": str(exc)}
+            print(f"[ai] md_retrieval_error {exc}", flush=True)
+            return {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
 
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
-        terms = [t.lower() for t in re.findall(r"[\w?-?A-Za-z0-9]{3,}", query, flags=re.UNICODE)][:12]
+        terms = expand_query_terms(query)[:24]
         if not terms:
             rows = await self.bot.db.fetch(
                 "SELECT category, title, content FROM ai_knowledge WHERE approved = TRUE ORDER BY created_at DESC LIMIT $1",
