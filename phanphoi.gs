@@ -33,7 +33,8 @@ const BOT_ONLY_DOC_PREFIXES = ['discord'];
 // Tab không phải dữ liệu khách -> luôn bỏ qua khi quét
 function isSystemTab(name) {
   return name === DASHBOARD_NAME || name === STAGING_NAME || name === REGISTRY_NAME
-      || name === DOCS_NAME || name === LOG_NAME;
+      || name === DOCS_NAME || name === LOG_NAME
+      || name === TRIAL_CLIENT_TAB || name === TRIAL_DOC_TAB;
 }
 
 // Ghi 1 dòng nhật ký: thời gian | hành động | chi tiết. Không làm hỏng flow nếu lỗi.
@@ -60,6 +61,7 @@ function onOpen() {
   ensureDashboard();
   ensureStaging();
   ensureRegistry();
+  ensureTraiNghiem();
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('HVHN')
     .addItem('🚀 Chạy tất cả NGAY (phân phối + gia hạn + hết hạn + dashboard)', 'hvhnTuDongHoa')
@@ -80,6 +82,15 @@ function onOpen() {
       .addItem('Tách theo khách', 'tachTheoKhach')
       .addItem('Cài tự động hoá toàn bộ', 'caiDatTuDongHoa')
       .addItem('Tạo Google Form cho điện thoại', 'caiDatForm'))
+    .addSubMenu(ui.createMenu('🧪 Trải nghiệm')
+      .addItem('Cập nhật danh sách tài liệu trải nghiệm', 'capNhatTaiLieuTraiNghiem')
+      .addItem('Kiểm tra hết hạn khách trải nghiệm (ngay)', 'kiemTraHetHanTraiNghiem')
+      .addItem('Xóa KHÁCH trải nghiệm đã tích', 'xoaKhachTraiNghiemDaTich')
+      .addItem('Xóa TÀI LIỆU trải nghiệm đã tích', 'xoaTaiLieuTraiNghiemDaTich')
+      .addSeparator()
+      .addItem('🗑️ XÓA CẢ CHƯƠNG TRÌNH trải nghiệm', 'xoaChuongTrinhTraiNghiem')
+      .addItem('📱 Tạo lại Form thêm khách trải nghiệm', 'taoLaiFormKhachTraiNghiem')
+      .addItem('📱 Tạo lại Form thêm tài liệu trải nghiệm', 'taoLaiFormTaiLieuTraiNghiem'))
     .addToUi();
 }
 
@@ -568,6 +579,32 @@ function ensureRegistry() {
   ]]);
   if (isNew) decorateRegistry(reg);
   return reg;
+}
+
+function _trialSharedFolder() {
+  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID_EARLY);
+  return getOrCreateFolder(parent, TRIAL_SHARED_NAME);
+}
+
+function ensureTraiNghiem() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
+  if (!kh) kh = ss.insertSheet(TRIAL_CLIENT_TAB);
+  kh.getRange(1, 1, 1, 7).setValues([[
+    'Tên khách', 'Email', 'Ngày cấp', 'Ngày hết hạn', 'Còn lại', 'Trạng thái', 'Xóa'
+  ]]);
+  kh.getRange(1, 1, 1, 7).setBackground('#8e24aa').setFontColor('#fff').setFontWeight('bold');
+  kh.setFrozenRows(1);
+  if (kh.getLastRow() > 1) kh.getRange(2, TRIAL_DEL_COL, kh.getLastRow() - 1, 1).insertCheckboxes();
+
+  let tl = ss.getSheetByName(TRIAL_DOC_TAB);
+  if (!tl) tl = ss.insertSheet(TRIAL_DOC_TAB);
+  tl.getRange(1, 1, 1, 3).setValues([['Tên tài liệu', 'Trạng thái', 'Xóa']]);
+  tl.getRange(1, 1, 1, 3).setBackground('#8e24aa').setFontColor('#fff').setFontWeight('bold');
+  tl.setFrozenRows(1);
+
+  _trialSharedFolder(); // đảm bảo folder chung tồn tại
+  ghiLog('Trải nghiệm', 'Đã đảm bảo tab + folder chương trình trải nghiệm');
 }
 
 function _today() {
@@ -1418,6 +1455,16 @@ const JOBS_KHACH_NAME = '_don_them_khach';      // nơi ghi đơn thêm khách (
 const INCOMING_DOCS_NAME = '_don_them_tai_lieu'; // nơi chứa PDF tài liệu mới (watcher PC đọc)
 const BOT_DOCS_FORM_NAME = '_don_them_tai_lieu_bot'; // PDF chỉ nạp cho AI/bot, không phân phối khách
 const INCOMING_BOT_MD_NAME = '_don_them_tai_lieu_bot_md'; // .md chỉ nạp cho AI/bot, không phân phối khách
+
+const TRIAL_HOURS = 72;
+const TRIAL_NAME = 'Nguyễn Văn A';
+const TRIAL_EMAIL = 'nguyenvana@gmail.com';
+const TRIAL_CLIENT_TAB = 'Khách trải nghiệm';
+const TRIAL_DOC_TAB = 'Tài liệu trải nghiệm';
+const TRIAL_SHARED_NAME = 'TÀI LIỆU TRẢI NGHIỆM';
+const INCOMING_TRIAL_NAME = '_don_them_tai_lieu_trai_nghiem';
+const TRIAL_DEL_COL = 7;      // cột G tab Khách trải nghiệm: ☑Xóa
+const TRIAL_DOC_DEL_COL = 3;  // cột C tab Tài liệu trải nghiệm: ☑Xóa
 
 // Mở form theo ID nếu form còn sống (không bị xoá/thùng rác); ngược lại trả null.
 function _openFormIfAlive(id) {
