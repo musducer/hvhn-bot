@@ -1651,9 +1651,13 @@ function taoLaiFormBot() {
 function _taoFormMd(props) {
   const form = FormApp.create('HVHN — Nạp tài liệu .md cho bot');
   form.setDescription('Tải lên file .md để bot AI đọc làm căn cứ trả lời. Tài liệu này KHÔNG phân phối cho khách.\n\n'
-    + 'Quy ước soạn .md: dùng heading (#, ##, ...) để tách từng đoạn/mục; trích dẫn ghi theo dạng '
-    + '> "…nội dung trích dẫn…" — Tác giả (mỗi trích dẫn 1 dòng blockquote riêng).');
+    + 'Cứ soạn theo cách trình bày quen thuộc của bạn — bot tự nhận diện đề mục, trích dẫn, tác giả, '
+    + 'đoạn văn ở nhiều định dạng khác nhau. Vài mẹo giúp bot hiểu chính xác hơn (không bắt buộc):\n'
+    + '• Dùng đề mục (#, ##…) để tách ý sẽ giúp tra cứu gọn hơn.\n'
+    + '• Trích dẫn kèm tác giả ghi liền nhau, ví dụ: > "…nội dung…" — Tác giả.\n'
+    + '• Thơ, danh sách, văn xuôi… đều đọc được, không cần ép về một khuôn.');
   form.addTextItem().setTitle('Tên tài liệu (tuỳ chọn, để trống sẽ dùng tên file)');
+  form.addTextItem().setTitle('Tác giả tài liệu (nếu là sách/bài của MỘT người — vd Chu Văn Sơn; để trống nếu là tuyển tập nhiều tác giả)');
   // Apps Script không tạo được câu hỏi upload file bằng code -> thêm tay 1 lần trong link sửa form.
   form.setConfirmationMessage('Đã nhận file. Bot sẽ đọc sau khi watcher trên PC xử lý.');
   form.setAcceptingResponses(true);
@@ -1858,14 +1862,16 @@ function xuLyFormTaiLieuBot(e) {
 function xuLyFormMd(e) {
   const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
   const incoming = getOrCreateFolder(parent, INCOMING_BOT_MD_NAME);
-  let tenTL = '';
+  let tenTL = '', tacGia = '';
   let fileIds = [];
   e.response.getItemResponses().forEach(it => {
     const type = it.getItem().getType();
+    const title = it.getItem().getTitle().toLowerCase();
     if (type === FormApp.ItemType.FILE_UPLOAD) {
       fileIds = fileIds.concat(it.getResponse());
     } else if (type === FormApp.ItemType.TEXT) {
-      tenTL = String(it.getResponse()).trim();
+      if (title.indexOf('tác giả') >= 0 || title.indexOf('tac gia') >= 0) tacGia = String(it.getResponse()).trim();
+      else tenTL = String(it.getResponse()).trim();
     }
   });
   fileIds.forEach(id => {
@@ -1873,7 +1879,16 @@ function xuLyFormMd(e) {
     let newName = f.getName();
     if (tenTL) newName = tenTL.replace(/[\\\/:*?"<>|]/g, '').trim() + '.md';
     if (!/\.md$/i.test(newName)) newName += '.md';
-    f.makeCopy(newName, incoming);
+    if (tacGia) {
+      // Ghi tác giả vào ĐẦU file để watcher/parser đọc (ưu tiên ô Form). Không ghi đè nếu file đã có sẵn.
+      let text = f.getBlob().getDataAsString('UTF-8');
+      if (!/^\s*t[aá]c gi[aả]\s*:/im.test(text) && !/^\s*---/.test(text)) {
+        text = 'Tác giả: ' + tacGia + '\n\n' + text;
+      }
+      incoming.createFile(newName, text, 'text/markdown');
+    } else {
+      f.makeCopy(newName, incoming);
+    }
   });
-  ghiLog('Nạp .md cho bot', fileIds.length + ' file -> ' + INCOMING_BOT_MD_NAME);
+  ghiLog('Nạp .md cho bot', fileIds.length + ' file (tác giả: ' + (tacGia || '—') + ') -> ' + INCOMING_BOT_MD_NAME);
 }

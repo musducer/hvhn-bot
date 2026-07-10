@@ -58,6 +58,29 @@ def _clean_author(raw: str) -> str:
     return value
 
 
+_AUTHOR_KEYS = ("tac gia", "author", "tac gia tai lieu")
+
+
+def _detect_author(meta: dict, body: str) -> str:
+    # 1) frontmatter: author / tác giả
+    for k, v in meta.items():
+        if _plain(k) in _AUTHOR_KEYS and (v or "").strip():
+            return _clean_author(v) or v.strip()
+    # 2) dong metadata gan dau file: "Tác giả: Chu Văn Sơn"
+    seen = 0
+    for line in body.split("\n"):
+        s = line.strip()
+        if not s:
+            continue
+        seen += 1
+        if seen > 10:
+            break
+        m = re.match(r"^\s*([^:：]{2,24})[:：]\s*(.+)$", s)
+        if m and _plain(m.group(1)) in _AUTHOR_KEYS and m.group(2).strip():
+            return _clean_author(m.group(2)) or m.group(2).strip()
+    return ""
+
+
 def _extract_quote_facts(lines: list[str], passage_title: str) -> list[dict]:
     facts: list[dict] = []
     i = 0
@@ -215,18 +238,22 @@ def parse_markdown(text: str) -> dict:
         first_line = next((l.strip() for l in body.split("\n") if l.strip()), "")
         if len(first_line) <= 100 and not _LINE_START.match(first_line):
             title = first_line
-    return {"title": title, "source": meta.get("source", ""), "passages": passages, "quotes": quotes}
+    author = _detect_author(meta, body)
+    return {"title": title, "author": author, "source": meta.get("source", ""),
+            "passages": passages, "quotes": quotes}
 
 
 MD_KNOWLEDGE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_md_documents (
     doc_key TEXT PRIMARY KEY,
     title TEXT NOT NULL,
+    author TEXT,
     source TEXT,
     content_hash TEXT NOT NULL,
     passage_count INTEGER NOT NULL DEFAULT 0,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE ai_md_documents ADD COLUMN IF NOT EXISTS author TEXT;
 CREATE TABLE IF NOT EXISTS ai_md_passages (
     doc_key TEXT NOT NULL,
     passage_index INTEGER NOT NULL,
@@ -255,16 +282,21 @@ async def ensure_md_schema(db) -> None:
     await db.execute(MD_KNOWLEDGE_SCHEMA)
 
 
-async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", created_by=None) -> dict:
+async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", author: str = "", created_by=None) -> dict:
     await ensure_md_schema(db)
     doc_key = (source or title or _content_hash(data)[:16]).strip().lower()
     content_hash = _content_hash(data)
-    current = await db.fetchrow("SELECT content_hash FROM ai_md_documents WHERE doc_key = $1", doc_key)
+    current = await db.fetchrow("SELECT content_hash, author FROM ai_md_documents WHERE doc_key = $1", doc_key)
     parsed = parse_markdown(data.decode("utf-8", errors="replace"))
     doc_title = title or parsed["title"] or doc_key
     doc_source = source or parsed.get("source", "")
+    # Form-priority: tham so author > tac gia phat hien trong file.
+    doc_author = (author or parsed.get("author", "") or "").strip()
     if current and current["content_hash"] == content_hash:
-        return {"doc_key": doc_key, "title": doc_title, "passages": 0, "quotes": 0, "changed": False}
+        # Noi dung khong doi nhung tac gia co the moi (them qua Form / metadata) -> cap nhat rieng.
+        if doc_author and (current["author"] or "") != doc_author:
+            await db.execute("UPDATE ai_md_documents SET author = $2 WHERE doc_key = $1", doc_key, doc_author)
+        return {"doc_key": doc_key, "title": doc_title, "author": doc_author, "passages": 0, "quotes": 0, "changed": False}
     async with db.acquire() if hasattr(db, "acquire") else _null_ctx(db) as conn:
         async with conn.transaction():
             await conn.execute("DELETE FROM ai_md_passages WHERE doc_key = $1", doc_key)
@@ -281,16 +313,16 @@ async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", creat
                 )
             await conn.execute(
                 """
-                INSERT INTO ai_md_documents (doc_key, title, source, content_hash, passage_count, updated_at)
-                VALUES ($1,$2,$3,$4,$5, now())
+                INSERT INTO ai_md_documents (doc_key, title, author, source, content_hash, passage_count, updated_at)
+                VALUES ($1,$2,$3,$4,$5,$6, now())
                 ON CONFLICT (doc_key) DO UPDATE SET
-                    title = EXCLUDED.title, source = EXCLUDED.source,
+                    title = EXCLUDED.title, author = EXCLUDED.author, source = EXCLUDED.source,
                     content_hash = EXCLUDED.content_hash, passage_count = EXCLUDED.passage_count,
                     updated_at = now()
                 """,
-                doc_key, doc_title, doc_source, content_hash, len(parsed["passages"]),
+                doc_key, doc_title, doc_author, doc_source, content_hash, len(parsed["passages"]),
             )
-    return {"doc_key": doc_key, "title": doc_title,
+    return {"doc_key": doc_key, "title": doc_title, "author": doc_author,
             "passages": len(parsed["passages"]), "quotes": len(parsed["quotes"]), "changed": True}
 
 
@@ -303,10 +335,17 @@ class _null_ctx:
 def build_md_context(chunks: list[dict]) -> str:
     blocks = []
     for i, c in enumerate(chunks, start=1):
-        title = c.get("title") or ""
-        source = c.get("source") or title
+        title = c.get("doc_title") or c.get("title") or ""
+        author = (c.get("author") or "").strip()
         content = c.get("excerpt") or c.get("content") or ""
-        blocks.append(f"[P{i}] Tai lieu MD - {title} - doan {c.get('chunk_index')}\nNguon MD: {source}\n{content}")
+        if author:
+            who = (f"Doan van xuoi nay do chinh tac gia tai lieu viet — TAC GIA: {author}. "
+                   f"Neu can dan ten nguoi noi cua cac cau trong doan (khong co dau ngoac kep gan ten khac), "
+                   f"do la {author}.")
+        else:
+            who = ("TAC GIA TAI LIEU: khong ro. Tuyet doi khong tu gan cac cau trong doan cho bat ky ten nao "
+                   "lay tu tai lieu khac.")
+        blocks.append(f"[P{i}] Trich tu tai lieu \"{title}\" (doan {c.get('chunk_index')})\n{who}\n{content}")
     return "\n\n".join(blocks)
 
 
@@ -338,16 +377,17 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     # plainto_tsquery AND toan bo tu nen truot voi query dien dat khac.
     rows = await db.fetch(
         """
-        SELECT doc_key, title, content, source
-        FROM ai_md_passages
-        WHERE lower(coalesce(title,'') || ' ' || coalesce(content,'')) LIKE ANY($1::text[])
+        SELECT p.doc_key, p.title, p.content, p.source, d.title AS doc_title, d.author
+        FROM ai_md_passages p JOIN ai_md_documents d ON d.doc_key = p.doc_key
+        WHERE lower(coalesce(p.title,'') || ' ' || coalesce(p.content,'')) LIKE ANY($1::text[])
         LIMIT 200
         """,
         patterns,
     )
     scored = sorted(rows, key=lambda r: score_text(terms, f"{r['title']} {r['content']}"), reverse=True)
     selected = scored[:limit]
-    chunks = [{"title": r["title"], "content": r["content"], "excerpt": r["content"],
+    chunks = [{"title": r["title"], "doc_title": r["doc_title"], "author": r["author"],
+               "content": r["content"], "excerpt": r["content"],
                "source": r["source"], "chunk_index": i, "page": None} for i, r in enumerate(selected)]
     qrows = await db.fetch(
         """

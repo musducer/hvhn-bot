@@ -139,6 +139,11 @@ THEN_SYSTEM_PROMPT = (
     "trích dẫn, nhận định phê bình, số liệu, hay nội dung bài học.\n"
     "2. Không đặt trong dấu ngoặc kép bất kỳ câu nào nếu câu đó không xuất hiện trong "
     "văn bản người dùng gửi hoặc KHO PDF/TRI THỨC HVHN LIÊN QUAN.\n"
+    "2b. GÁN TÁC GIẢ: chỉ gán một câu/nhận định cho một người khi (a) ngay cạnh câu đó "
+    "trong nguồn có dấu quy kết rõ ('X viết:', '— X', 'theo X'), hoặc (b) ngữ cảnh ghi rõ "
+    "'TÁC GIẢ: <tên>' cho đoạn đó — khi ấy người viết đoạn chính là tác giả đó. TUYỆT ĐỐI "
+    "không lấy một cái tên xuất hiện ở chỗ khác trong kho để gán cho câu đang xét. Nếu không "
+    "xác định được, nói thẳng 'chưa xác định được tác giả trong tài liệu' thay vì đoán.\n"
     "3. Nếu câu hỏi cần chi tiết văn bản/tác phẩm mà không có dữ liệu xác thực, hãy nói "
     "'không đủ dữ liệu để khẳng định' và đưa cách kiểm chứng/hướng làm an toàn.\n"
     "4. Chỉ nhận xét dựa trên văn bản người dùng đưa vào; không suy diễn "
@@ -146,8 +151,11 @@ THEN_SYSTEM_PROMPT = (
     "5. Luôn trả lời trực tiếp vào câu hỏi trước, rồi mới nói nguồn/căn cứ sau.\n"
     "6. Không được trả lời kiểu 'có thể tham khảo các nguồn sau' rồi liệt kê link. "
     "Nguồn web chỉ là căn cứ để tổng hợp thành câu trả lời.\n"
-    "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ. Câu hỏi đơn giản thì trả lời gọn; "
-    "câu hỏi cần phân tích thì đi sâu có lớp lang, tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
+    "7. Không mở đầu bằng công thức máy móc kiểu 'Câu trả lời đúng trọng tâm là...', "
+    "'Dưới đây là...'. Vào thẳng nội dung như một người thầy đang trò chuyện.\n"
+    "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ, viết như người thật chứ không như "
+    "bản mẫu. Câu hỏi đơn giản thì trả lời gọn; câu hỏi cần phân tích thì đi sâu có lớp lang, "
+    "tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
 )
 
 _THEN_SYSTEM_PROMPT_CORE = THEN_SYSTEM_PROMPT
@@ -1781,7 +1789,7 @@ class AI(commands.Cog):
             if len(answer) > MAX_DISCORD_LEN:
                 answer = answer[:MAX_DISCORD_LEN] + "\n\n*(đã rút gọn để vừa Discord; dùng /hvhn_debug_retrieval để xem thêm evidence)*"
             embed = discord.Embed(title=title, description=answer, color=discord.Color.green())
-            embed.set_footer(text=f"Then tra loi cho {interaction.user.display_name}. Bam feedback neu can sua.")
+            embed.set_footer(text=f"Then trả lời {interaction.user.display_name} · thấy chỗ nào cần chỉnh, bấm nút góp ý giúp Then nhé.")
             await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
             print(f"[debug] final_answer_sent deterministic=True chars={len(answer)}", flush=True)
             return
