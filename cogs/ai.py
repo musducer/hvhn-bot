@@ -1216,6 +1216,11 @@ class AI(commands.Cog):
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
         res = await backfill_embeddings(self.bot.db, self._embed_fn, batch=64)
+        if not res.get("ok") and res.get("embedded", 0) == 0:
+            detail = await md_embeddings.probe(self.gemini_keys)
+            await interaction.followup.send(
+                f"Nhúng THẤT BẠI (0 đoạn). Lý do từ API embedding: `{detail}`", ephemeral=True)
+            return
         await interaction.followup.send(
             f"Đã nhúng {res.get('embedded', 0)} đoạn (hoàn tất: {res.get('ok')}). "
             f"Chạy lại lệnh nếu còn sót.", ephemeral=True)

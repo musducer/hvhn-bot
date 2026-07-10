@@ -33,14 +33,35 @@ def _parse_batch(payload: dict) -> list[list[float]] | None:
     return out
 
 
+_last_error = ""
+
+
+def last_error() -> str:
+    return _last_error
+
+
 async def _post(session: aiohttp.ClientSession, url: str, body: dict) -> dict | None:
+    global _last_error
     try:
         async with session.post(url, json=body, timeout=_TIMEOUT) as resp:
             if resp.status != 200:
+                text = (await resp.text())[:400]
+                _last_error = f"HTTP {resp.status}: {text}"
+                print(f"[embed] {_last_error}", flush=True)
                 return None
             return await resp.json()
-    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError):
+    except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
+        _last_error = f"{type(exc).__name__}: {exc}"
+        print(f"[embed] {_last_error}", flush=True)
         return None
+
+
+async def probe(keys: list[str]) -> str:
+    """Thu nhung 1 chuoi ngan; tra ve 'OK' hoac mo ta loi de hien cho admin."""
+    out = await embed_texts(keys, ["kiểm tra"], task_type="RETRIEVAL_QUERY")
+    if out and out[0]:
+        return f"OK (dim={len(out[0])})"
+    return last_error() or "khong ro (None)"
 
 
 async def embed_texts(keys: list[str], texts: list[str], *, task_type: str = "RETRIEVAL_DOCUMENT") -> list[list[float]] | None:
