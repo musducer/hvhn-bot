@@ -238,6 +238,8 @@ function hvhnTuDongHoa() {
     donTaiLieuBotOnlyKhoKhachTuDong(); // tài liệu bot-only lỡ lọt kho khách -> gỡ khỏi Sheet/Drive
     xoaKhachDaTichTuDong();   // tick Xóa khách -> tự xoá, không cần bấm menu
     xoaTaiLieuDaTichTuDong(); // tick Xóa tài liệu -> tự xoá, không cần bấm menu
+    kiemTraHetHanTraiNghiem();   // trải nghiệm quá 72h -> gỡ quyền xem folder chung
+    capNhatTaiLieuTraiNghiem();  // đồng bộ tab Tài liệu trải nghiệm + khóa tải
     capNhatTaiLieu();         // tab Tài liệu luôn mới
     capNhatDashboard();       // dashboard luôn mới
   } catch (e) {
@@ -602,9 +604,112 @@ function ensureTraiNghiem() {
   tl.getRange(1, 1, 1, 3).setValues([['Tên tài liệu', 'Trạng thái', 'Xóa']]);
   tl.getRange(1, 1, 1, 3).setBackground('#8e24aa').setFontColor('#fff').setFontWeight('bold');
   tl.setFrozenRows(1);
+  // KHÔNG đụng DriveApp ở đây: ensureTraiNghiem chạy trong onOpen (simple trigger,
+  // bị cấm gọi DriveApp). Folder chung sẽ được _trialSharedFolder() tạo khi chạy
+  // từ menu/trigger/form (đủ quyền).
+}
 
-  _trialSharedFolder(); // đảm bảo folder chung tồn tại
-  ghiLog('Trải nghiệm', 'Đã đảm bảo tab + folder chương trình trải nghiệm');
+// Quét folder chung -> dựng lại tab Tài liệu trải nghiệm + khóa tải từng file.
+function capNhatTaiLieuTraiNghiem() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureTraiNghiem();
+  const tl = ss.getSheetByName(TRIAL_DOC_TAB);
+  const shared = _trialSharedFolder();
+  const rows = [];
+  const files = shared.getFiles();
+  while (files.hasNext()) {
+    const f = files.next();
+    try { Drive.Files.update({ copyRequiresWriterPermission: true }, f.getId()); } catch (e2) {}
+    rows.push([f.getName(), 'Trong chương trình', false]);
+  }
+  if (tl.getLastRow() > 1) tl.getRange(2, 1, tl.getLastRow() - 1, 3).clearContent();
+  if (rows.length) {
+    tl.getRange(2, 1, rows.length, 3).setValues(rows);
+    tl.getRange(2, TRIAL_DOC_DEL_COL, rows.length, 1).insertCheckboxes();
+  }
+}
+
+// Khách trải nghiệm quá hạn (72h) -> gỡ quyền xem folder chung của RIÊNG khách đó.
+function kiemTraHetHanTraiNghiem() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  ensureTraiNghiem();
+  const kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
+  const last = kh.getLastRow();
+  if (last < 2) return;
+  const now = _now();
+  const shared = _trialSharedFolder();
+  const vals = kh.getRange(2, 1, last - 1, 6).getValues();
+  const out = [];
+  for (let i = 0; i < vals.length; i++) {
+    const name = vals[i][0];
+    const email = vals[i][1];
+    const expiry = vals[i][3];
+    let status = vals[i][5];
+    if (email && expiry && status !== 'Đã gỡ (hết hạn)' && new Date(expiry).getTime() <= now.getTime()) {
+      try { shared.removeViewer(String(email)); } catch (e) {}
+      status = 'Đã gỡ (hết hạn)';
+      ghiLog('Trải nghiệm hết hạn - gỡ quyền', name + ' - ' + email);
+    }
+    const remaining = expiry ? _fmtRemaining(_hoursBetween(now, new Date(expiry))) : '';
+    out.push([remaining, status]);
+  }
+  kh.getRange(2, 5, out.length, 2).setValues(out);
+}
+
+// Xóa các khách trải nghiệm đã tick cột G: gỡ quyền + xóa dòng.
+function xoaKhachTraiNghiemDaTich() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
+  if (!kh || kh.getLastRow() < 2) return;
+  const shared = _trialSharedFolder();
+  const data = kh.getRange(2, 1, kh.getLastRow() - 1, 7).getValues();
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i][TRIAL_DEL_COL - 1] === true) {
+      try { shared.removeViewer(String(data[i][1])); } catch (e) {}
+      kh.deleteRow(i + 2);
+      ghiLog('Xóa khách trải nghiệm', data[i][0] + ' - ' + data[i][1]);
+    }
+  }
+}
+
+// Xóa các tài liệu trải nghiệm đã tick cột C: trash file trong folder chung + xóa dòng.
+function xoaTaiLieuTraiNghiemDaTich() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const tl = ss.getSheetByName(TRIAL_DOC_TAB);
+  if (!tl || tl.getLastRow() < 2) return;
+  const shared = _trialSharedFolder();
+  const data = tl.getRange(2, 1, tl.getLastRow() - 1, 3).getValues();
+  for (let i = data.length - 1; i >= 0; i--) {
+    if (data[i][TRIAL_DOC_DEL_COL - 1] === true) {
+      const fs = shared.getFilesByName(String(data[i][0]));
+      while (fs.hasNext()) fs.next().setTrashed(true);
+      tl.deleteRow(i + 2);
+      ghiLog('Xóa tài liệu trải nghiệm', data[i][0]);
+    }
+  }
+}
+
+// NÚT SAU CÙNG: xóa CẢ chương trình — trash mọi tài liệu + gỡ quyền mọi khách + trống 2 tab.
+function xoaChuongTrinhTraiNghiem() {
+  const ui = SpreadsheetApp.getUi();
+  const resp = ui.alert('Xóa CẢ chương trình trải nghiệm?',
+    'Sẽ xóa MỌI tài liệu trong folder chung, gỡ quyền MỌI khách trải nghiệm, và làm trống 2 tab. Không hoàn tác.',
+    ui.ButtonSet.YES_NO);
+  if (resp !== ui.Button.YES) return;
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const shared = _trialSharedFolder();
+  const kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
+  if (kh && kh.getLastRow() > 1) {
+    const emails = kh.getRange(2, 2, kh.getLastRow() - 1, 1).getValues();
+    emails.forEach(r => { if (r[0]) { try { shared.removeViewer(String(r[0])); } catch (e) {} } });
+    kh.getRange(2, 1, kh.getLastRow() - 1, 7).clearContent();
+  }
+  const files = shared.getFiles();
+  while (files.hasNext()) files.next().setTrashed(true);
+  const tl = ss.getSheetByName(TRIAL_DOC_TAB);
+  if (tl && tl.getLastRow() > 1) tl.getRange(2, 1, tl.getLastRow() - 1, 3).clearContent();
+  ghiLog('XÓA CẢ CHƯƠNG TRÌNH trải nghiệm', 'đã trash tài liệu + gỡ mọi khách');
+  ui.alert('Đã xóa cả chương trình trải nghiệm.');
 }
 
 function _today() {
