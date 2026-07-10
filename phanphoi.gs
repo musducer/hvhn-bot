@@ -97,9 +97,14 @@ function onEdit(e) {
     capNhatDashboard();
   } else if (name === REGISTRY_NAME && e.range.getColumn() === RENEW_COL
              && e.range.getRow() > 1 && e.value === 'TRUE') {
-    // onEdit là simple trigger -> KHÔNG được gọi DriveApp. runNow=false: chỉ sửa sheet,
-    // để trigger 5 phút (tuDongXuLyFileMoi->phanPhoi) tự phân phối lại nếu cần.
-    giaHanMotDong(sheet, e.range.getRow(), false);
+    // KHONG gia han ngay khi tick nua (truoc day chay lien -> nguoi dung chua kip dien
+    // cot "So gio" da bi cong 720h mac dinh). Tick chi DANH DAU; xu ly boi menu ♻️
+    // hoac trigger hvhnTuDongHoa (toi da 5 phut). Chi nhac huong dan:
+    sheet.getParent().toast(
+      'Đã đánh dấu gia hạn. Điền "Số giờ gia hạn" (cột I) nếu muốn số giờ tùy ý (trống = 720h = 30 ngày). ' +
+      'Hệ thống xử lý trong tối đa 5 phút, hoặc chạy menu HVHN > ♻️ Gia hạn ngay.',
+      'HVHN', 8
+    );
   }
 }
 
@@ -650,24 +655,33 @@ function dongBoKhachHang() {
 }
 
 // Tính lại cột "Còn lại" + "Trạng thái" cho mọi dòng (không đụng 'Đã gỡ quyền').
+// CHI GHI cột 5-6 — tuyệt đối không ghi đè cột tick G/H hay cột Số giờ I
+// (trước đây ghi cả block 1-7 làm nuốt tick người dùng vừa đặt).
 function capNhatTrangThaiHan(reg) {
   const last = reg.getLastRow();
   if (last < 2) return;
   const now = _now();
-  const rng = reg.getRange(2, 1, last - 1, 7);
-  const vals = rng.getValues();
+  const vals = reg.getRange(2, 1, last - 1, 6).getValues();
+  const out = [];
 
   vals.forEach(row => {
+    let remaining = row[4];
+    let status = row[5];
     const expiry = row[3] ? new Date(row[3]) : null;
-    if (!expiry) { row[4] = ''; return; }
+    if (!expiry) {
+      out.push(['', status]);
+      return;
+    }
     const hoursLeft = _hoursBetween(now, expiry);
-    row[4] = _fmtRemaining(hoursLeft);
-    if (row[5] === 'Đã gỡ quyền') return; // đã gỡ -> chờ gia hạn, không tự đổi
-    if (hoursLeft < 0) row[5] = 'Hết hạn - chờ gỡ';
-    else if (hoursLeft <= WARN_HOURS) row[5] = 'Sắp hết';
-    else row[5] = 'Còn hạn';
+    remaining = _fmtRemaining(hoursLeft);
+    if (status !== 'Đã gỡ quyền') { // đã gỡ -> chờ gia hạn, không tự đổi
+      if (hoursLeft < 0) status = 'Hết hạn - chờ gỡ';
+      else if (hoursLeft <= WARN_HOURS) status = 'Sắp hết';
+      else status = 'Còn hạn';
+    }
+    out.push([remaining, status]);
   });
-  rng.setValues(vals);
+  reg.getRange(2, 5, out.length, 2).setValues(out);
 }
 
 // TRIGGER HẰNG NGÀY: khách quá hạn -> XOÁ file phân phối (bỏ file) + gỡ chia sẻ, đánh 'Đã gỡ quyền'.
@@ -707,20 +721,20 @@ function kiemTraHetHan() {
         if (tData[r][0]) tab.getRange(r + 1, 4).setValue('Đã gỡ (hết hạn)');
       }
     }
-    vals[i][5] = 'Đã gỡ quyền';
     ghiLog('Hết hạn - gỡ quyền + xoá file', name + ' - ' + email);
     revoked++;
+    // chi ghi o Trang thai cua dong nay — khong ghi de ca block (nuot tick nguoi dung)
+    reg.getRange(i + 2, 6).setValue('Đã gỡ quyền');
   }
 
-  reg.getRange(2, 1, vals.length, 7).setValues(vals);
   capNhatTrangThaiHan(reg);
   decorateRegistry(reg);
   Logger.log(`Đã gỡ quyền ${revoked} khách hết hạn.`);
   capNhatDashboard();
 }
 
-// Gia hạn 1 dòng. Cộng thêm SUB_DAYS; nếu đã gỡ -> chuẩn bị phân phối lại.
-// runNow=true (từ menu, đủ quyền): chạy phanPhoi ngay. runNow=false (từ onEdit): để trigger lo.
+// Gia hạn 1 dòng: cộng số GIỜ ở cột I (trống = SUB_HOURS = 720h); nếu đã gỡ -> chuẩn bị phân phối lại.
+// runNow=true (từ menu, đủ quyền): chạy phanPhoi ngay. runNow=false (từ trigger): để trigger lo.
 function giaHanMotDong(reg, rowIndex, runNow) {
   const row = reg.getRange(rowIndex, 1, 1, HOURS_COL).getValues()[0];
   const [name, email, grant, expiry, , status] = row;
