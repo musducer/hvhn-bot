@@ -66,7 +66,9 @@ class WatcherDbRecoveryTest(unittest.IsolatedAsyncioTestCase):
         async def failing_pool(context):
             return pool
 
-        with patch.object(watcher, "_get_db_pool", failing_pool), patch.object(watcher, "_reset_db_pool") as reset:
+        with patch.object(watcher, "DATABASE_URL", "postgresql://test"), \
+                patch.object(watcher, "_get_db_pool", failing_pool), \
+                patch.object(watcher, "_reset_db_pool") as reset:
             rows = await watcher._fetch_discord_jobs()
         self.assertEqual(rows, [])
         self.assertEqual(pool.active, 0)
@@ -83,7 +85,9 @@ class WatcherDbRecoveryTest(unittest.IsolatedAsyncioTestCase):
             pools.append(pool)
             return pool
 
-        with patch.object(watcher, "_get_db_pool", flaky_pool), patch.object(watcher, "_reset_db_pool"):
+        with patch.object(watcher, "DATABASE_URL", "postgresql://test"), \
+                patch.object(watcher, "_get_db_pool", flaky_pool), \
+                patch.object(watcher, "_reset_db_pool"):
             first = await watcher._fetch_discord_jobs()
             second = await watcher._fetch_discord_jobs()
         self.assertEqual(first, [])
