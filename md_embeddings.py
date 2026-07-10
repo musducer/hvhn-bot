@@ -8,11 +8,25 @@ import json
 
 import aiohttp
 
-EMBED_MODEL = "text-embedding-004"
 EMBED_DIM = 768
+# Thu lan luot; dung cai dau tien key ho tro. gemini-embedding-001 mac dinh 3072 chieu nen
+# ep ve 768 qua outputDimensionality de vua cot vector(768).
+_EMBED_MODELS = ("text-embedding-004", "embedding-001", "gemini-embedding-001")
+_working_model = None  # cache model chay duoc
 _ENDPOINT = "https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?key={key}"
 _TIMEOUT = aiohttp.ClientTimeout(total=30)
 _MAX_BATCH = 96  # gioi han batchEmbedContents
+
+
+def _build_request(model: str, text: str, task_type: str) -> dict:
+    req = {
+        "model": f"models/{model}",
+        "content": {"parts": [{"text": text[:8000]}]},
+        "taskType": task_type,
+    }
+    if model == "gemini-embedding-001":
+        req["outputDimensionality"] = EMBED_DIM
+    return req
 
 
 def vec_literal(values) -> str:
@@ -69,36 +83,35 @@ async def embed_texts(keys: list[str], texts: list[str], *, task_type: str = "RE
 
     task_type: RETRIEVAL_DOCUMENT khi luu, RETRIEVAL_QUERY khi tra cuu.
     """
+    global _working_model
     keys = [k for k in (keys or []) if k]
     texts = [t if (t and t.strip()) else " " for t in (texts or [])]
     if not keys or not texts:
         return None
+    # Uu tien model da biet chay duoc; roi moi thu cac model khac.
+    model_order = ([_working_model] if _working_model else []) + [m for m in _EMBED_MODELS if m != _working_model]
     results: list[list[float]] = []
     async with aiohttp.ClientSession() as session:
         for start in range(0, len(texts), _MAX_BATCH):
             chunk = texts[start:start + _MAX_BATCH]
-            body = {
-                "requests": [
-                    {
-                        "model": f"models/{EMBED_MODEL}",
-                        "content": {"parts": [{"text": t[:8000]}]},
-                        "taskType": task_type,
-                    }
-                    for t in chunk
-                ]
-            }
             got = None
-            for key in keys:  # xoay key khi loi/rate-limit
-                url = _ENDPOINT.format(model=EMBED_MODEL, method="batchEmbedContents", key=key)
-                payload = await _post(session, url, body)
-                if payload is not None:
-                    got = _parse_batch(payload)
-                    if got is not None and len(got) == len(chunk):
-                        break
-                    got = None
+            for model in model_order:
+                body = {"requests": [_build_request(model, t, task_type) for t in chunk]}
+                for key in keys:  # xoay key khi loi/rate-limit
+                    url = _ENDPOINT.format(model=model, method="batchEmbedContents", key=key)
+                    payload = await _post(session, url, body)
+                    if payload is not None:
+                        parsed = _parse_batch(payload)
+                        if parsed is not None and len(parsed) == len(chunk):
+                            got = parsed
+                            _working_model = model  # nho model chay duoc
+                            break
+                if got is not None:
+                    break
             if got is None:
                 return None
             results.extend(got)
+            model_order = ([_working_model] if _working_model else []) + [m for m in _EMBED_MODELS if m != _working_model]
     return results
 
 
