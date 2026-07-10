@@ -26,7 +26,9 @@ _ROLE_PREFIXES = (
 def _plain(text: str) -> str:
     import unicodedata
     folded = unicodedata.normalize("NFD", text or "")
-    return "".join(ch for ch in folded if unicodedata.category(ch) != "Mn").lower().strip()
+    stripped = "".join(ch for ch in folded if unicodedata.category(ch) != "Mn")
+    # đ/Đ khong phan huy bang NFD -> map tay cho khop voi Postgres unaccent()
+    return stripped.replace("đ", "d").replace("Đ", "d").lower().strip()
 
 
 def _clean_author(raw: str) -> str:
@@ -280,6 +282,11 @@ def _content_hash(data: bytes) -> str:
 
 async def ensure_md_schema(db) -> None:
     await db.execute(MD_KNOWLEDGE_SCHEMA)
+    # unaccent: khop tra cuu khong phan biet dau (go sai/thieu dau van trung). Optional.
+    try:
+        await db.execute("CREATE EXTENSION IF NOT EXISTS unaccent")
+    except Exception:
+        pass
 
 
 async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", author: str = "", created_by=None) -> dict:
@@ -369,47 +376,111 @@ def score_text(terms: list[str], text: str) -> int:
     return sum(1 for t in terms if _plain(t) in plain)
 
 
+_TOKEN_RE = re.compile(r"[a-z0-9à-ỹđ]+", re.I)
+
+
+def _tok_set(text: str) -> set:
+    return {_plain(w) for w in _TOKEN_RE.findall(text or "")}
+
+
+def _tok_counts(text: str) -> dict:
+    from collections import Counter
+    return Counter(_plain(w) for w in _TOKEN_RE.findall(text or ""))
+
+
+def _idf_weights(terms: list[str], texts: list[str]) -> dict:
+    # Tu hiem trong tap ung vien -> trong so cao (ten rieng > tu pho bien nhu "tho", "phong").
+    import math
+    n = len(texts) or 1
+    token_sets = [_tok_set(t) for t in texts]
+    weights = {}
+    for term in terms:
+        pt = _plain(term)
+        df = sum(1 for ts in token_sets if pt in ts)
+        weights[term] = math.log((n + 1) / (df + 1)) + 1.0
+    return weights
+
+
+def score_weighted(terms: list[str], text: str, weights: dict) -> float:
+    # Khop theo AM TIET (het nhieu chuoi-con: "le" khong con lot vao "len").
+    # Cong tan suat co tran de doan nhac ten rieng nhieu lan thang doan chi nhac 1 lan.
+    counts = _tok_counts(text)
+    total = 0.0
+    for term in terms:
+        pt = _plain(term)
+        c = counts.get(pt, 0)
+        if c:
+            total += weights.get(term, 1.0) * (1.0 + 0.4 * min(c - 1, 5))
+    return total
+
+
+async def _fetch_like(db, sql_unaccent: str, sql_plain: str, patterns_fold: list[str], patterns_raw: list[str]):
+    # Uu tien khop khong dau (unaccent) de go sai/thieu dau van trung; neu unaccent chua co
+    # tren DB thi lui ve LIKE thuong.
+    try:
+        return await db.fetch(sql_unaccent, patterns_fold)
+    except Exception:
+        return await db.fetch(sql_plain, patterns_raw)
+
+
 async def retrieve_md_knowledge(db, query: str, *, limit: int = 5) -> dict:
     await ensure_md_schema(db)
     terms = query_terms(query)
-    patterns = [f"%{t}%" for t in terms] or ["%"]
-    # Lay ung vien theo OR (bat ky term nao khop) roi cham diem overlap trong Python —
-    # plainto_tsquery AND toan bo tu nen truot voi query dien dat khac.
-    rows = await db.fetch(
+    patterns_fold = [f"%{_plain(t)}%" for t in terms] or ["%"]
+    patterns_raw = [f"%{t}%" for t in terms] or ["%"]
+    # Lay ung vien theo OR (bat ky term nao khop) roi cham diem trong Python.
+    rows = await _fetch_like(
+        db,
+        """
+        SELECT p.doc_key, p.title, p.content, p.source, d.title AS doc_title, d.author
+        FROM ai_md_passages p JOIN ai_md_documents d ON d.doc_key = p.doc_key
+        WHERE unaccent(lower(coalesce(p.title,'') || ' ' || coalesce(p.content,''))) LIKE ANY($1::text[])
+        LIMIT 300
+        """,
         """
         SELECT p.doc_key, p.title, p.content, p.source, d.title AS doc_title, d.author
         FROM ai_md_passages p JOIN ai_md_documents d ON d.doc_key = p.doc_key
         WHERE lower(coalesce(p.title,'') || ' ' || coalesce(p.content,'')) LIKE ANY($1::text[])
-        LIMIT 200
+        LIMIT 300
         """,
-        patterns,
+        patterns_fold, patterns_raw,
     )
-    scored = sorted(rows, key=lambda r: score_text(terms, f"{r['title']} {r['content']}"), reverse=True)
+    # IDF tren tap ung vien: ten rieng/tu hiem duoc uu tien, tu pho bien bi ha thap.
+    p_weights = _idf_weights(terms, [f"{r['title']} {r['content']}" for r in rows])
+    scored = sorted(rows, key=lambda r: score_weighted(terms, f"{r['title']} {r['content']}", p_weights), reverse=True)
     selected = scored[:limit]
     chunks = [{"title": r["title"], "doc_title": r["doc_title"], "author": r["author"],
                "content": r["content"], "excerpt": r["content"],
                "source": r["source"], "chunk_index": i, "page": None} for i, r in enumerate(selected)]
-    qrows = await db.fetch(
+    qrows = await _fetch_like(
+        db,
+        """
+        SELECT q.quote, q.author, q.source, d.title
+        FROM ai_md_quotes q JOIN ai_md_documents d ON d.doc_key = q.doc_key
+        WHERE unaccent(lower(coalesce(q.quote,'') || ' ' || coalesce(q.author,''))) LIKE ANY($1::text[])
+        LIMIT 300
+        """,
         """
         SELECT q.quote, q.author, q.source, d.title
         FROM ai_md_quotes q JOIN ai_md_documents d ON d.doc_key = q.doc_key
         WHERE lower(coalesce(q.quote,'') || ' ' || coalesce(q.author,'')) LIKE ANY($1::text[])
-        LIMIT 200
+        LIMIT 300
         """,
-        patterns,
+        patterns_fold, patterns_raw,
     )
+    q_weights = _idf_weights(terms, [f"{r['quote']} {r['author']}" for r in qrows])
 
-    def _quote_score(r) -> int:
-        # tac gia khop ten duoc uu tien manh
-        author_hits = score_text(terms, r["author"] or "") * 10
-        return author_hits + score_text(terms, r["quote"] or "")
+    def _quote_score(r) -> float:
+        # tac gia khop ten duoc uu tien manh (theo trong so IDF)
+        author_hits = score_weighted(terms, r["author"] or "", q_weights) * 10
+        return author_hits + score_weighted(terms, r["quote"] or "", q_weights)
 
     q_selected = sorted(qrows, key=_quote_score, reverse=True)[:max(limit, 8)]
     quotes = [{"quote": r["quote"], "author": r["author"] or "", "source": r["source"], "title": r["title"]}
               for r in q_selected]
-    top = float(score_text(terms, f"{selected[0]['title']} {selected[0]['content']}")) if selected else 0.0
+    top = score_weighted(terms, f"{selected[0]['title']} {selected[0]['content']}", p_weights) if selected else 0.0
     return {"context": build_md_context(chunks), "chunks": chunks, "quotes": quotes,
-            "selected_count": len(chunks), "candidate_count": len(rows), "top_score": top}
+            "selected_count": len(chunks), "candidate_count": len(rows), "top_score": float(top)}
 
 
 async def search_md_knowledge(db, query: str, *, limit: int = 5) -> str:
