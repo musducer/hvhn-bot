@@ -11,7 +11,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from md_knowledge import retrieve_md_knowledge, backfill_embeddings
+from md_knowledge import retrieve_md_knowledge, backfill_embeddings, count_missing_embeddings
 import md_embeddings
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -1191,19 +1191,30 @@ class AI(commands.Cog):
     async def _embed_fn(self, texts):
         return await md_embeddings.embed_texts(self.gemini_keys, texts, task_type="RETRIEVAL_DOCUMENT")
 
+    def _start_embed_backfill(self) -> bool:
+        # Job nen co nhip, chi 1 lan chay dong thoi. Tra True neu vua khoi dong.
+        if getattr(self, "_embed_running", False) or not self.gemini_keys:
+            return False
+        self._embed_running = True
+
+        async def _bg():
+            try:
+                res = await backfill_embeddings(self.bot.db, self._embed_fn, batch=30, pace_seconds=20)
+                print(f"[ai] embed_backfill embedded={res.get('embedded')} ok={res.get('ok')} err={res.get('error')}", flush=True)
+            except Exception as exc:
+                print(f"[ai] embed_backfill_error {exc}", flush=True)
+            finally:
+                self._embed_running = False
+
+        asyncio.create_task(_bg())
+        return True
+
     @commands.Cog.listener()
     async def on_ready(self):
-        # Nhung embedding cho cac passage con thieu (chay 1 lan, nen, khong chan bot).
         if getattr(self, "_embed_started", False) or not self.gemini_keys:
             return
         self._embed_started = True
-        async def _bg():
-            try:
-                res = await backfill_embeddings(self.bot.db, self._embed_fn, batch=64)
-                print(f"[ai] embed_backfill_startup embedded={res.get('embedded')} ok={res.get('ok')}", flush=True)
-            except Exception as exc:
-                print(f"[ai] embed_backfill_startup_error {exc}", flush=True)
-        asyncio.create_task(_bg())
+        self._start_embed_backfill()
 
     @app_commands.command(name="hvhn_embed_backfill",
                           description="(admin) Nhúng embedding cho tài liệu .md để bot tra cứu theo ngữ nghĩa")
@@ -1215,15 +1226,21 @@ class AI(commands.Cog):
             await interaction.response.send_message("Chưa cấu hình GEMINI_API_KEYS nên không nhúng được.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        res = await backfill_embeddings(self.bot.db, self._embed_fn, batch=64)
-        if not res.get("ok") and res.get("embedded", 0) == 0:
-            detail = await md_embeddings.probe(self.gemini_keys)
-            await interaction.followup.send(
-                f"Nhúng THẤT BẠI (0 đoạn). Lý do từ API embedding: `{detail}`", ephemeral=True)
+        remaining = await count_missing_embeddings(self.bot.db)
+        if remaining == 0:
+            await interaction.followup.send("Tất cả tài liệu đã được nhúng embedding. Không còn gì để làm.", ephemeral=True)
             return
+        probe = await md_embeddings.probe(self.gemini_keys)
+        if not probe.startswith("OK"):
+            await interaction.followup.send(
+                f"API embedding lỗi: `{probe}`\nCòn {remaining} đoạn chưa nhúng.", ephemeral=True)
+            return
+        running = self._start_embed_backfill()
+        note = "Đã khởi động nhúng nền." if running else "Đang nhúng nền (job trước còn chạy)."
         await interaction.followup.send(
-            f"Đã nhúng {res.get('embedded', 0)} đoạn (hoàn tất: {res.get('ok')}). "
-            f"Chạy lại lệnh nếu còn sót.", ephemeral=True)
+            f"{note} Còn ~{remaining} đoạn, chạy dần để né giới hạn quota (~100/phút). "
+            f"Vài phút nữa hỏi lại là có tra cứu ngữ nghĩa. Bấm lại lệnh để xem còn bao nhiêu.",
+            ephemeral=True)
 
     async def _knowledge_context(self, query: str, limit: int = 6) -> str:
         terms = expand_query_terms(query)[:24]

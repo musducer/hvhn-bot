@@ -48,26 +48,34 @@ def _parse_batch(payload: dict) -> list[list[float]] | None:
 
 
 _last_error = ""
+_last_status = 0
 
 
 def last_error() -> str:
     return _last_error
 
 
-async def _post(session: aiohttp.ClientSession, url: str, body: dict) -> dict | None:
-    global _last_error
+def rate_limited_last() -> bool:
+    return _last_status == 429
+
+
+async def _post(session: aiohttp.ClientSession, url: str, body: dict):
+    """Tra ve (status, payload|None). status=0 khi loi mang."""
+    global _last_error, _last_status
     try:
         async with session.post(url, json=body, timeout=_TIMEOUT) as resp:
-            if resp.status != 200:
-                text = (await resp.text())[:400]
-                _last_error = f"HTTP {resp.status}: {text}"
-                print(f"[embed] {_last_error}", flush=True)
-                return None
-            return await resp.json()
+            _last_status = resp.status
+            if resp.status == 200:
+                return 200, await resp.json()
+            text = (await resp.text())[:300]
+            _last_error = f"HTTP {resp.status}: {text}"
+            print(f"[embed] {_last_error}", flush=True)
+            return resp.status, None
     except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
+        _last_status = 0
         _last_error = f"{type(exc).__name__}: {exc}"
         print(f"[embed] {_last_error}", flush=True)
-        return None
+        return 0, None
 
 
 async def probe(keys: list[str]) -> str:
@@ -97,17 +105,26 @@ async def embed_texts(keys: list[str], texts: list[str], *, task_type: str = "RE
             got = None
             for model in model_order:
                 body = {"requests": [_build_request(model, t, task_type) for t in chunk]}
+                rate_limited = False
                 for key in keys:  # xoay key khi loi/rate-limit
                     url = _ENDPOINT.format(model=model, method="batchEmbedContents", key=key)
-                    payload = await _post(session, url, body)
-                    if payload is not None:
+                    status, payload = await _post(session, url, body)
+                    if status == 200 and payload is not None:
                         parsed = _parse_batch(payload)
                         if parsed is not None and len(parsed) == len(chunk):
                             got = parsed
                             _working_model = model  # nho model chay duoc
                             break
+                    elif status == 429:
+                        _working_model = model  # model DUNG, chi het quota tam -> ngung thu model 404
+                        rate_limited = True
+                    elif status == 404:
+                        break  # model khong ton tai voi key nay -> qua model khac
+                    # cac loi khac: thu key tiep
                 if got is not None:
                     break
+                if rate_limited:
+                    return None  # model dung nhung dinh quota -> de caller nghi roi thu lai
             if got is None:
                 return None
             results.extend(got)

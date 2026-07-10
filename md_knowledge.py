@@ -309,13 +309,25 @@ async def has_passage_embeddings(db) -> bool:
         return False
 
 
-async def backfill_embeddings(db, embed_fn, *, batch: int = 64, max_passages: int = 5000) -> dict:
-    """Nhung cac passage con thieu embedding. embed_fn(list[str]) -> list[list[float]] | None (async).
+async def count_missing_embeddings(db) -> int:
+    try:
+        return int(await db.fetchval("SELECT count(*) FROM ai_md_passages WHERE embedding IS NULL") or 0)
+    except Exception:
+        return 0
 
-    Chay tren BOT (co GEMINI key). Idempotent: chi dung passage embedding IS NULL.
+
+async def backfill_embeddings(db, embed_fn, *, batch: int = 40, max_passages: int = 5000,
+                              pace_seconds: float = 16.0, max_rl_waits: int = 40) -> dict:
+    """Nhung cac passage con thieu embedding, CO NHIP de ne quota free (100 req/phut).
+
+    embed_fn(list[str]) -> list[list[float]] | None (async). Idempotent: chi dung embedding IS NULL.
+    Khi dinh 429 (rate limited) thi nghi roi thu lai; het luot cho thi tra ok=False (chay lai sau).
     """
+    import asyncio
+    from md_embeddings import vec_literal, rate_limited_last, last_error
     await ensure_md_schema(db)
     done = 0
+    rl_waits = 0
     while done < max_passages:
         rows = await db.fetch(
             "SELECT doc_key, passage_index, coalesce(title,'') || ' ' || coalesce(content,'') AS text "
@@ -326,8 +338,11 @@ async def backfill_embeddings(db, embed_fn, *, batch: int = 64, max_passages: in
             break
         vectors = await embed_fn([r["text"] for r in rows])
         if not vectors or len(vectors) != len(rows):
-            return {"embedded": done, "ok": False}
-        from md_embeddings import vec_literal
+            if rate_limited_last() and rl_waits < max_rl_waits:
+                rl_waits += 1
+                await asyncio.sleep(30)  # het quota tam -> nghi roi thu lai chinh lo nay
+                continue
+            return {"embedded": done, "ok": False, "error": last_error()}
         for r, vec in zip(rows, vectors):
             await db.execute(
                 "UPDATE ai_md_passages SET embedding = $3::vector WHERE doc_key = $1 AND passage_index = $2",
@@ -336,6 +351,7 @@ async def backfill_embeddings(db, embed_fn, *, batch: int = 64, max_passages: in
         done += len(rows)
         if len(rows) < batch:
             break
+        await asyncio.sleep(pace_seconds)  # giu duoi ~100 req/phut
     return {"embedded": done, "ok": True}
 
 
