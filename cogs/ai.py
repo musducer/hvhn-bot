@@ -2011,26 +2011,6 @@ class AI(commands.Cog):
             suffix = f"\n\n(page {i}/{len(pages)})" if len(pages) > 1 else ""
             await interaction.followup.send(page + suffix, ephemeral=True)
 
-    @app_commands.command(name="debug_retrieval", description="Debug retrieval nhanh trước khi gọi LLM (Admin)")
-    async def debug_retrieval_alias(self, interaction: discord.Interaction, query: str):
-        if not self._is_admin(interaction):
-            await interaction.response.send_message("Ban can role HVHN Admin hoac quyen Manage Server.", ephemeral=True)
-            return
-        await interaction.response.defer(ephemeral=True)
-        try:
-            pages = await asyncio.wait_for(self._run_debug_retrieval(query), timeout=DEBUG_COMMAND_TIMEOUT_SECONDS)
-        except asyncio.TimeoutError:
-            print(f"[debug] debug_retrieval timeout query={query[:180]!r}", flush=True)
-            await interaction.followup.send("Debug retrieval timeout. Xem Render logs `[debug]` de biet diem ket.", ephemeral=True)
-            return
-        except Exception as exc:
-            print(f"[debug] debug_retrieval exception={type(exc).__name__}: {exc}", flush=True)
-            await interaction.followup.send(f"Debug retrieval loi: `{type(exc).__name__}: {str(exc)[:1200]}`", ephemeral=True)
-            return
-        for i, page in enumerate(pages, start=1):
-            suffix = f"\n\n(page {i}/{len(pages)})" if len(pages) > 1 else ""
-            await interaction.followup.send(page + suffix, ephemeral=True)
-
     @app_commands.command(name="ai_feedback_stats", description="Xem thống kê feedback AI (Admin)")
     async def feedback_stats(self, interaction: discord.Interaction):
         if not self._is_admin(interaction):

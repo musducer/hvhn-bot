@@ -7,8 +7,6 @@ from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands
-from pdf_knowledge import pdf_knowledge_stats
-
 try:
     from hvhn_batch import MIRROR_SOURCE
 except Exception:
@@ -222,29 +220,6 @@ class DocumentStorage(commands.Cog):
             ephemeral=True,
         )
 
-    @app_commands.command(name="hvhn_trangthai", description="Kiểm tra kết nối bot với folder đơn HVHN")
-    async def status(self, interaction: discord.Interaction):
-        if not await self._require_admin(interaction):
-            return
-        folders = {
-            "mirror": self.mirror_parent,
-            "thêm khách": self.jobs_add_client,
-            "thêm tài liệu": self.jobs_add_doc,
-            "xóa khách": self.jobs_remove_client,
-            "xóa tài liệu": self.jobs_remove_doc,
-        }
-        pending = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'pending'")
-        processing = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'processing'")
-        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status IN ('error', 'download_failed', 'db_failed', 'ocr_failed')")
-        lines = [
-            "queue DB: OK",
-            f"đang chờ: {pending} | đang xử lý: {processing} | lỗi: {failed}",
-            "",
-            "folder local trên máy đang chạy bot:",
-        ]
-        lines.extend(f"{name}: {'OK' if path.exists() else 'thiếu'} - {path}" for name, path in folders.items())
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
     @app_commands.command(name="hvhn_status_full", description="Xem trạng thái đầy đủ của hệ HVHN")
     async def status_full(self, interaction: discord.Interaction):
         if not await self._require_admin(interaction):
@@ -341,27 +316,6 @@ class DocumentStorage(commands.Cog):
             )
         await interaction.response.send_message(f"Đã đưa `{len(ids)}` đơn lỗi về hàng chờ.", ephemeral=True)
 
-    @app_commands.command(name="hvhn_ai_pdf_audit", description="Kiểm tra AI đã đọc/OCR kho PDF chưa")
-    async def ai_pdf_audit(self, interaction: discord.Interaction):
-        if not await self._require_admin(interaction):
-            return
-        stats = await pdf_knowledge_stats(self.bot.db)
-        exclusive = stats["by_source"].get("exclusive", {"docs": 0, "chunks": 0})
-        bot_only = stats["by_source"].get("bot", {"docs": 0, "chunks": 0})
-        lines = [
-            f"Tổng: `{stats['total_docs']}` PDF | `{stats['total_chunks']}` đoạn AI đọc được",
-            f"Kho khách: `{exclusive['docs']}` PDF | `{exclusive['chunks']}` đoạn",
-            f"Kho bot: `{bot_only['docs']}` PDF | `{bot_only['chunks']}` đoạn",
-        ]
-        if stats["zero_docs"]:
-            lines.append("")
-            lines.append("PDF chưa đọc được nội dung/OCR ra 0 đoạn:")
-            lines.extend(f"- `{row['title']}`" for row in stats["zero_docs"][:15])
-        else:
-            lines.append("")
-            lines.append("Không có PDF nào đang ở trạng thái 0 đoạn.")
-        await interaction.response.send_message("\n".join(lines), ephemeral=True)
-
     @app_commands.command(name="hvhn_khach", description="Xem trạng thái một khách theo email")
     async def client_status(self, interaction: discord.Interaction, email: str):
         if not await self._require_admin(interaction):
@@ -439,45 +393,6 @@ class DocumentStorage(commands.Cog):
             f"Đã xếp hàng đơn #{job_id}: gia hạn `{email}` thêm `{human}`.",
             ephemeral=True,
         )
-
-    @app_commands.command(name="hvhn_baocao", description="Báo cáo nhanh hệ thống HVHN")
-    async def report(self, interaction: discord.Interaction):
-        if not await self._require_admin(interaction):
-            return
-        await interaction.response.defer(ephemeral=True)
-        total_clients = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients")
-        active = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients WHERE coalesce(status, '') = 'Còn hạn'")
-        warning = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients WHERE coalesce(status, '') = 'Sắp hết'")
-        expired = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_clients WHERE coalesce(status, '') LIKE 'Hết hạn%' OR coalesce(status, '') = 'Đã gỡ quyền'")
-        docs = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_sheet_docs")
-        pending = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status = 'pending'")
-        failed = await self.bot.db.fetchval("SELECT count(*) FROM hvhn_doc_jobs WHERE status IN ('error', 'download_failed', 'db_failed', 'ocr_failed')")
-        soon = await self.bot.db.fetch(
-            """
-            SELECT name, email, days_left
-            FROM hvhn_sheet_clients
-            WHERE days_left IS NOT NULL AND days_left <= 3
-            ORDER BY days_left ASC
-            LIMIT 8
-            """
-        )
-
-        embed = discord.Embed(title="Báo cáo HVHN", color=discord.Color.gold())
-        embed.add_field(
-            name="Khách",
-            value=f"Tổng `{total_clients}` | Còn hạn `{active}` | Sắp hết `{warning}` | Hết/gỡ `{expired}`",
-            inline=False,
-        )
-        embed.add_field(name="Tài liệu", value=f"`{docs}` tài liệu trong Sheet", inline=False)
-        embed.add_field(name="Đơn hệ thống", value=f"Chờ `{pending}` | Lỗi `{failed}`", inline=False)
-        if soon:
-            embed.add_field(
-                name="Cần chú ý",
-                value="\n".join(f"{r['name']} - `{r['days_left']}` ngày - {r['email']}" for r in soon),
-                inline=False,
-            )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(DocumentStorage(bot))

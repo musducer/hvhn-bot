@@ -60,32 +60,26 @@ function onOpen() {
   ensureDashboard();
   ensureStaging();
   ensureRegistry();
-  SpreadsheetApp.getUi()
-    .createMenu('HVHN')
-    .addItem('1. Tách theo khách (chạy 1 lần đầu)', 'tachTheoKhach')
-    .addItem('2. Quét file new_rows.csv trên Drive + Phân phối', 'tuDongXuLyFileMoi')
-    .addItem('2B. Cài tự động hoá toàn bộ (chạy 1 lần)', 'caiDatTuDongHoa')
-    .addItem('3. Nhập mới thủ công (tab "Nhập mới") + Phân phối', 'themMoiVaPhanPhoi')
-    .addItem('4. Phân phối lại (quét toàn bộ)', 'phanPhoi')
-    .addItem('5. Cập nhật Dashboard', 'capNhatDashboard')
-    .addSeparator()
-    .addItem('📅 Đồng bộ danh sách khách + hạn dùng', 'dongBoKhachHang')
-    .addItem('⏰ Kiểm tra & gỡ quyền khách hết hạn (ngay)', 'kiemTraHetHan')
-    .addItem('♻️ Gia hạn khách đã tích (theo cột "Số giờ", trống=720h)', 'xuLyGiaHan')
+  const ui = SpreadsheetApp.getUi();
+  ui.createMenu('HVHN')
+    .addItem('🚀 Chạy tất cả NGAY (phân phối + gia hạn + hết hạn + dashboard)', 'hvhnTuDongHoa')
+    .addItem('📝 Nhập mới thủ công (tab "Nhập mới") + Phân phối', 'themMoiVaPhanPhoi')
+    .addItem('🔁 Phân phối lại (quét toàn bộ)', 'phanPhoi')
     .addSeparator()
     .addItem('📄 Cập nhật danh sách Tài liệu', 'capNhatTaiLieu')
     .addItem('🗑️ Xóa TÀI LIỆU đã tích', 'xoaTaiLieuDaTich')
-    .addItem('🧹 Dọn tài liệu bot-only khỏi kho khách', 'donTaiLieuBotOnlyKhoKhach')
     .addItem('🗑️ Xóa KHÁCH đã tích (cột H)', 'xoaKhachDaTich')
     .addItem('🗑️ Xóa TẤT CẢ khách', 'xoaTatCaKhach')
     .addItem('Cấp quyền xem folder cho khách', 'capQuyenFolderKhachHang')
     .addSeparator()
-    .addItem('📱 Tạo Google Form cho điện thoại (1 lần)', 'caiDatForm')
     .addItem('📱 Tạo lại RIÊNG Form thêm khách', 'taoLaiFormKhach')
-    .addItem('📱 Tạo lại RIÊNG Form nạp tài liệu cho bot', 'taoLaiFormBot')
     .addItem('📱 Tạo lại RIÊNG Form nạp .md cho bot', 'taoLaiFormMd')
     .addItem('Dọn file trùng trên Drive', 'donFileTrung')
     .addItem('Trang trí lại tất cả', 'trangTriTatCa')
+    .addSubMenu(ui.createMenu('⚙️ Cài đặt ban đầu (chạy 1 lần)')
+      .addItem('Tách theo khách', 'tachTheoKhach')
+      .addItem('Cài tự động hoá toàn bộ', 'caiDatTuDongHoa')
+      .addItem('Tạo Google Form cho điện thoại', 'caiDatForm'))
     .addToUi();
 }
 
