@@ -28,6 +28,12 @@ class ParseBatchTest(unittest.TestCase):
 
 
 class ProviderSelectionTest(unittest.TestCase):
+    @patch.dict("os.environ", {"JINA_API_KEYS": "j", "VOYAGE_API_KEYS": "v", "GEMINI_API_KEYS": "g"}, clear=True)
+    def test_jina_is_preferred(self):
+        self.assertEqual(md_embeddings.active_provider(), "jina")
+        self.assertEqual(md_embeddings.active_dim(), 1024)
+        self.assertTrue(md_embeddings.active_signature().startswith("jina:"))
+
     @patch.dict("os.environ", {"VOYAGE_API_KEYS": "v", "GEMINI_API_KEYS": "g"}, clear=True)
     def test_voyage_is_preferred(self):
         self.assertEqual(md_embeddings.active_provider(), "voyage")
@@ -37,6 +43,10 @@ class ProviderSelectionTest(unittest.TestCase):
     def test_explicit_gemini(self):
         self.assertEqual(md_embeddings.active_provider(), "gemini")
         self.assertEqual(md_embeddings.active_dim(), 768)
+
+    @patch.dict("os.environ", {"HVHN_EMBED_PROVIDER": "jina", "JINA_API_KEYS": "j"}, clear=True)
+    def test_jina_backfill_pace(self):
+        self.assertEqual(md_embeddings.backfill_pace_seconds(), 3.0)
 
 
 class RrfMergeTest(unittest.TestCase):

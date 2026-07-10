@@ -1,6 +1,7 @@
 """Embeddings cho tra cuu ngu nghia (hybrid voi tu khoa).
 
-Ho tro nhieu provider, chon qua HVHN_EMBED_PROVIDER (voyage|gemini) hoac tu dong:
+Ho tro nhieu provider, chon qua HVHN_EMBED_PROVIDER (jina|voyage|gemini) hoac tu dong:
+- jina: JINA_API_KEYS, model jina-embeddings-v5-text-small (1024 chieu).
 - voyage: VOYAGE_API_KEYS, model voyage-3.5-lite (1024 chieu) — ngan sach free lon, khong lo quota/ngay.
 - gemini: GEMINI_API_KEYS, model gemini-embedding-001 (ep 768 chieu) — free tier ~100 req/phut.
 Sinh embedding CHAY TREN BOT. Loi/thieu key -> None, ben goi lui ve tu khoa.
@@ -15,6 +16,10 @@ _TIMEOUT = aiohttp.ClientTimeout(total=45)
 _MAX_BATCH = 96
 
 # ---- cau hinh provider ----
+_JINA_MODEL = os.getenv("HVHN_JINA_MODEL", "jina-embeddings-v5-text-small")
+_JINA_DIM = int(os.getenv("HVHN_JINA_DIM", "1024"))
+_JINA_URL = "https://api.jina.ai/v1/embeddings"
+
 _VOYAGE_MODEL = os.getenv("HVHN_VOYAGE_MODEL", "voyage-3.5-lite")
 _VOYAGE_DIM = int(os.getenv("HVHN_VOYAGE_DIM", "1024"))
 _VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
@@ -37,10 +42,14 @@ def _keys(env: str) -> list[str]:
 
 def active_provider() -> str:
     pref = os.getenv("HVHN_EMBED_PROVIDER", "").strip().lower()
+    if pref == "jina" and _keys("JINA_API_KEYS"):
+        return "jina"
     if pref == "voyage" and _keys("VOYAGE_API_KEYS"):
         return "voyage"
     if pref == "gemini" and _keys("GEMINI_API_KEYS"):
         return "gemini"
+    if _keys("JINA_API_KEYS"):
+        return "jina"
     if _keys("VOYAGE_API_KEYS"):
         return "voyage"
     if _keys("GEMINI_API_KEYS"):
@@ -49,7 +58,24 @@ def active_provider() -> str:
 
 
 def active_dim() -> int:
-    return _VOYAGE_DIM if active_provider() == "voyage" else _GEMINI_DIM
+    provider = active_provider()
+    if provider == "jina":
+        return _JINA_DIM
+    return _VOYAGE_DIM if provider == "voyage" else _GEMINI_DIM
+
+
+def active_signature() -> str:
+    provider = active_provider()
+    if provider == "jina":
+        return f"jina:{_JINA_MODEL}:{_JINA_DIM}"
+    if provider == "voyage":
+        return f"voyage:{_VOYAGE_MODEL}:{_VOYAGE_DIM}"
+    return f"gemini:{_GEMINI_DIM}"
+
+
+def backfill_pace_seconds() -> float:
+    # Jina free tier cho phep backfill nhanh hon; cac provider con lai giu nhip cu.
+    return 3.0 if active_provider() == "jina" else 20.0
 
 
 def has_keys() -> bool:
@@ -102,6 +128,33 @@ async def _voyage_batch(session, keys, chunk, input_type):
                     return out
         elif status == 429:
             continue  # thu key khac
+    return None
+
+
+# ---------- Jina ----------
+async def _jina_batch(session, keys, chunk, task_type):
+    task = "retrieval.query" if task_type == "RETRIEVAL_QUERY" else "retrieval.passage"
+    body = {
+        "input": chunk,
+        "model": _JINA_MODEL,
+        "task": task,
+        "dimensions": _JINA_DIM,
+        "embedding_type": "float",
+        "normalized": True,
+        "truncate": True,
+    }
+    for key in keys:
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        status, payload = await _post(session, _JINA_URL, body, headers=headers)
+        if status == 200 and payload:
+            data = payload.get("data")
+            if isinstance(data, list) and len(data) == len(chunk):
+                ordered = sorted(data, key=lambda d: d.get("index", 0))
+                out = [d.get("embedding") for d in ordered]
+                if all(isinstance(vec, list) and len(vec) == _JINA_DIM for vec in out):
+                    return out
+        elif status == 429:
+            continue
     return None
 
 
@@ -162,12 +215,15 @@ async def embed_texts(texts, *, task_type: str = "RETRIEVAL_DOCUMENT"):
     if not provider or not texts:
         return None
     voyage_type = "query" if task_type == "RETRIEVAL_QUERY" else "document"
-    keys = _keys("VOYAGE_API_KEYS") if provider == "voyage" else _keys("GEMINI_API_KEYS")
+    key_env = {"jina": "JINA_API_KEYS", "voyage": "VOYAGE_API_KEYS", "gemini": "GEMINI_API_KEYS"}[provider]
+    keys = _keys(key_env)
     results = []
     async with aiohttp.ClientSession() as session:
         for start in range(0, len(texts), _MAX_BATCH):
             chunk = texts[start:start + _MAX_BATCH]
-            if provider == "voyage":
+            if provider == "jina":
+                got = await _jina_batch(session, keys, chunk, task_type)
+            elif provider == "voyage":
                 got = await _voyage_batch(session, keys, chunk, voyage_type)
             else:
                 got = await _gemini_batch(session, keys, chunk, task_type)
@@ -185,7 +241,7 @@ async def embed_query(text: str):
 async def probe() -> str:
     prov = active_provider()
     if not prov:
-        return "chua cau hinh key (VOYAGE_API_KEYS hoac GEMINI_API_KEYS)"
+        return "chua cau hinh key (JINA_API_KEYS, VOYAGE_API_KEYS hoac GEMINI_API_KEYS)"
     out = await embed_texts(["kiểm tra"], task_type="RETRIEVAL_QUERY")
     if out and out[0]:
         return f"OK provider={prov} dim={len(out[0])}"

@@ -1199,7 +1199,12 @@ class AI(commands.Cog):
 
         async def _bg():
             try:
-                res = await backfill_embeddings(self.bot.db, self._embed_fn, batch=30, pace_seconds=20)
+                res = await backfill_embeddings(
+                    self.bot.db,
+                    self._embed_fn,
+                    batch=30,
+                    pace_seconds=md_embeddings.backfill_pace_seconds(),
+                )
                 print(f"[ai] embed_backfill embedded={res.get('embedded')} ok={res.get('ok')} err={res.get('error')}", flush=True)
             except Exception as exc:
                 print(f"[ai] embed_backfill_error {exc}", flush=True)
@@ -1224,7 +1229,7 @@ class AI(commands.Cog):
             return
         if not md_embeddings.has_keys():
             await interaction.response.send_message(
-                "Chưa cấu hình VOYAGE_API_KEYS hoặc GEMINI_API_KEYS nên không nhúng được.",
+                "Chưa cấu hình JINA_API_KEYS, VOYAGE_API_KEYS hoặc GEMINI_API_KEYS nên không nhúng được.",
                 ephemeral=True,
             )
             return

@@ -162,3 +162,9 @@ Sheet: **"Phân phối - HVHN"** = `1KwCP7JcKCAR_GGlIPLUXYMk8_tdQu2Wo-E-nD5nRf6Y
 ## 13. Quy uoc lam viec voi Codex
 
 - Sau khi hoan tat va kiem tra thay doi code, Codex tu dong commit va push len nhanh hien tai; khong can cho chu du an nhac lai. Khong dua file backup/untracked khong lien quan vao commit.
+
+## 14. Jina embedding fallback - 2026-07-11
+
+- Provider mien phi khong can payment method: Jina AI. Dat `JINA_API_KEYS` va `HVHN_EMBED_PROVIDER=jina` tren Render.
+- Mac dinh `jina-embeddings-v5-text-small`, 1024 chieu; env tuy chon `HVHN_JINA_MODEL`, `HVHN_JINA_DIM`.
+- He thong luu signature provider/model/dimension. Doi Jina/Voyage/Gemini se xoa rieng vector cu va backfill lai, khong tron vector cua hai model.

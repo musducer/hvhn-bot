@@ -289,19 +289,34 @@ async def ensure_md_schema(db) -> None:
         pass
     # pgvector: tra cuu ngu nghia. Neu khong co ext thi bo qua (hybrid tu dong lui ve tu khoa).
     try:
-        from md_embeddings import active_dim
+        from md_embeddings import active_dim, active_signature
         dimension = active_dim()
+        signature = active_signature()
         await db.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        await db.execute(
+            "CREATE TABLE IF NOT EXISTS ai_md_embedding_config ("
+            "id SMALLINT PRIMARY KEY CHECK (id = 1), signature TEXT NOT NULL)"
+        )
+        stored_signature = await db.fetchval(
+            "SELECT signature FROM ai_md_embedding_config WHERE id = 1"
+        )
         current_dimension = await db.fetchval(
             "SELECT atttypmod FROM pg_attribute "
             "WHERE attrelid = 'ai_md_passages'::regclass AND attname = 'embedding' AND NOT attisdropped"
         )
         # Embeddings from different providers/dimensions cannot be mixed.
         # This column is derived data, so recreate it and let backfill repopulate.
-        if current_dimension is not None and int(current_dimension) != dimension:
+        if current_dimension is not None and (
+            int(current_dimension) != dimension or stored_signature != signature
+        ):
             await db.execute("DROP INDEX IF EXISTS idx_ai_md_passages_vec")
             await db.execute("ALTER TABLE ai_md_passages DROP COLUMN embedding")
         await db.execute(f"ALTER TABLE ai_md_passages ADD COLUMN IF NOT EXISTS embedding vector({dimension})")
+        await db.execute(
+            "INSERT INTO ai_md_embedding_config (id, signature) VALUES (1, $1) "
+            "ON CONFLICT (id) DO UPDATE SET signature = EXCLUDED.signature",
+            signature,
+        )
         try:
             await db.execute(
                 "CREATE INDEX IF NOT EXISTS idx_ai_md_passages_vec "
