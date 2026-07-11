@@ -1892,7 +1892,10 @@ class AI(commands.Cog):
             await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
             print(f"[debug] final_answer_sent deterministic=True chars={len(answer)}", flush=True)
             return
-        seed = Formatter.compare_seed(quote_evidence, plan) if plan.intent in {"COMPARE", "ANALYSIS"} else ""
+        # Luon nhet cac trich dan/nhan dinh DA XAC MINH vao ngu canh khi co — ke ca intent CHAT
+        # (vd "nhan dinh cua Vuong Tri Nhan"): truoc day chi nhet cho COMPARE/ANALYSIS nen LLM
+        # khong thay quote da tra -> tra loi "khong co trong tai lieu" du kho co.
+        seed = Formatter.evidence_block(quote_evidence) if quote_evidence else ""
         if seed:
             knowledge = build_context_budget(
                 user_prompt,
