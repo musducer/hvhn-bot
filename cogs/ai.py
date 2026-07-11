@@ -1783,6 +1783,38 @@ class AI(commands.Cog):
         return defects[:5]
 
     @staticmethod
+    def _strip_repeated_sentences(answer: str) -> str:
+        """Fallback khi repair LLM khong chay duoc (429/hết quota): cat co hoc cac cau
+        lap gan nguyen van (giu lan xuat hien dau, bo cac lan sau). Khong dung vao trich dan."""
+        quote_ranges = [(s.start, s.end) for s in QuoteExtractor.quote_spans(answer)]
+
+        def in_quote(a: int, b: int) -> bool:
+            return any(a < qe and b > qs for qs, qe in quote_ranges)
+
+        def shingles(s: str) -> set[str]:
+            words = s.split()
+            return {" ".join(words[i:i + 8]) for i in range(len(words) - 7)}
+
+        seen: list[set[str]] = []
+        out = []
+        last = 0
+        for m in re.finditer(r"[^.!?\n]+[.!?]?\s*", answer):
+            seg = m.group(0)
+            norm = re.sub(r"\s+", " ", AI._plain_text(seg)).strip()
+            sh = shingles(norm)
+            dup = bool(sh) and not in_quote(m.start(), m.end()) and any(sh & prev for prev in seen)
+            if not dup:
+                seen.append(sh)
+                out.append(answer[last:m.start()])
+                out.append(seg)
+            last = m.end()
+        out.append(answer[last:])
+        cleaned = "".join(out)
+        # don doan rong do bi cat
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+        return cleaned if len(cleaned) >= 200 else answer
+
+    @staticmethod
     def _ai_flavored_style_defects(answer: str) -> list[str]:
         """Bat 'mau AI': lam dung danh hoa 'su .../viec ...' va goi sai thu phap,
         khong phu thuoc gate 'phong cach' cua weak_style."""
@@ -1978,6 +2010,10 @@ class AI(commands.Cog):
             )
             if repaired:
                 answer = repaired
+            elif repeated_defects:
+                # Repair LLM khong chay duoc (het quota/429): it nhat cat co hoc cau lap.
+                answer = self._strip_repeated_sentences(answer)
+                print("[debug] repair_fallback=strip_repeated_sentences", flush=True)
         if answer:
             answer = await self._verify_answer(answer, prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
             answer = self._strip_internal_markers(answer)
