@@ -27,6 +27,32 @@ const HVHN_PARENT_FOLDER_ID_EARLY = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs';
 // bật "Settings → Responses → Collect email addresses". Đơn từ email lạ sẽ bị bỏ qua + ghi log.
 const MANAGER_EMAILS = []; // vd: ['chu@gmail.com', 'quanly2@gmail.com']
 
+// B1 (mitigation): cảnh báo khi có 2+ khách CÙNG TÊN nhưng KHÁC EMAIL — vì folder/tab định danh
+// theo tên nên họ sẽ dùng chung folder (xem tài liệu của nhau). Chỉ GHI LOG (không đụng dữ liệu/định
+// dạng). Giải pháp gốc (định danh theo email/ID) cần refactor riêng có test.
+let _canhBaoTrungTenLast = '';
+function canhBaoTrungTenKhach() {
+  try {
+    const reg = ensureRegistry();
+    const last = reg.getLastRow();
+    if (last < 2) return;
+    const vals = reg.getRange(2, 1, last - 1, 2).getValues(); // Tên, Email
+    const byName = {};
+    vals.forEach(r => {
+      const name = String(r[0] || '').trim().toLowerCase();
+      const email = String(r[1] || '').trim().toLowerCase();
+      if (!name || !email) return;
+      (byName[name] = byName[name] || {})[email] = true;
+    });
+    const dup = Object.keys(byName).filter(n => Object.keys(byName[n]).length > 1);
+    const sig = dup.sort().join('|');
+    if (dup.length && sig !== _canhBaoTrungTenLast) {
+      _canhBaoTrungTenLast = sig; // tránh spam log mỗi 5'
+      ghiLog('CẢNH BÁO trùng tên khách (khác email)', dup.join(', ') + ' — đặt tên phân biệt để tránh dùng chung folder');
+    }
+  } catch (e) {}
+}
+
 function _formAllowed(e) {
   if (!MANAGER_EMAILS.length) return true; // tính năng tắt
   var email = '';
@@ -261,6 +287,7 @@ function hvhnTuDongHoa() {
     kiemTraHetHanTraiNghiem();   // trải nghiệm quá 72h -> gỡ quyền xem folder chung
     capNhatTaiLieuTraiNghiem();  // đồng bộ tab Tài liệu trải nghiệm + khóa tải
     capNhatTaiLieu();         // tab Tài liệu luôn mới
+    canhBaoTrungTenKhach();   // B1: cảnh báo khách trùng tên (khác email) -> tránh dùng chung folder
     capNhatDashboard();       // dashboard luôn mới
   } catch (e) {
     ghiLog('LỖI tự động hoá', e.message || String(e));

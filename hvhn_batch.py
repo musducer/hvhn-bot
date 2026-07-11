@@ -60,6 +60,13 @@ def append_client(name, email):
     clients = load_clients()
     if any(c["email"].lower() == email.lower() for c in clients):
         raise ValueError(f"Email {email} đã có trong clients.csv")
+    # B1 (mitigation): chặn TRÙNG TÊN với email khác — vì folder/tab định danh theo tên nên hai
+    # người cùng tên sẽ dùng chung folder (xem tài liệu của nhau). Yêu cầu tên phân biệt.
+    if any(c["name"].strip().lower() == name.strip().lower() and c["email"].lower() != email.lower()
+           for c in clients):
+        raise ValueError(
+            f"TRÙNG TÊN: '{name}' đã tồn tại với email khác. Dùng tên phân biệt "
+            f"(vd '{name} (2)') để tránh dùng chung folder tài liệu.")
     with open(CLIENTS_CSV, "a", encoding="utf-8", newline="") as f:
         csv.writer(f).writerow([name, email])
 

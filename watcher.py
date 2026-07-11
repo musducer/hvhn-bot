@@ -821,7 +821,12 @@ def xu_ly_don_them_khach():
 
             try:
                 append_client(name, email)
-            except ValueError:
+            except ValueError as ve:
+                if "TRÙNG TÊN" in str(ve):
+                    # B1: không render khách trùng tên (tránh ghi vào folder của người khác cùng tên).
+                    print(f"  BỎ QUA đơn khách: {ve}", flush=True)
+                    os.remove(path)
+                    continue
                 print("  (email đã có trong clients.csv, chỉ render lại)", flush=True)
 
             rows = render_batch(list_docs(), [{"name": name, "email": email}])
