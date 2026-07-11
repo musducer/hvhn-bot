@@ -378,10 +378,18 @@ async def backfill_embeddings(db, embed_fn, *, batch: int = 40, max_passages: in
                 continue
             return {"embedded": done, "ok": False, "error": last_error()}
         for r, vec in zip(rows, vectors):
-            await db.execute(
-                "UPDATE ai_md_passages SET embedding = $3::vector WHERE doc_key = $1 AND passage_index = $2",
-                r["doc_key"], r["passage_index"], vec_literal(vec),
-            )
+            for attempt in range(4):  # chịu deadlock tạm thời với watcher đang re-index
+                try:
+                    await db.execute(
+                        "UPDATE ai_md_passages SET embedding = $3::vector WHERE doc_key = $1 AND passage_index = $2",
+                        r["doc_key"], r["passage_index"], vec_literal(vec),
+                    )
+                    break
+                except (asyncpg.exceptions.DeadlockDetectedError,
+                        asyncpg.exceptions.SerializationError):
+                    if attempt == 3:
+                        raise
+                    await asyncio.sleep(0.3 * (attempt + 1))
         done += len(rows)
         if len(rows) < batch:
             break
@@ -404,31 +412,47 @@ async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", autho
         if doc_author and (current["author"] or "") != doc_author:
             await db.execute("UPDATE ai_md_documents SET author = $2 WHERE doc_key = $1", doc_key, doc_author)
         return {"doc_key": doc_key, "title": doc_title, "author": doc_author, "passages": 0, "quotes": 0, "changed": False}
-    async with db.acquire() if hasattr(db, "acquire") else _null_ctx(db) as conn:
-        async with conn.transaction():
-            await conn.execute("DELETE FROM ai_md_passages WHERE doc_key = $1", doc_key)
-            await conn.execute("DELETE FROM ai_md_quotes WHERE doc_key = $1", doc_key)
-            for i, p in enumerate(parsed["passages"]):
+    async def _write_once():
+        async with db.acquire() if hasattr(db, "acquire") else _null_ctx(db) as conn:
+            async with conn.transaction():
+                # Khoá theo THỨ TỰ CỐ ĐỊNH (documents -> passages -> quotes) để giảm deadlock với
+                # backfill embedding của bot. UPSERT documents trước để giữ khoá nhất quán.
                 await conn.execute(
-                    "INSERT INTO ai_md_passages (doc_key, passage_index, title, content, source) VALUES ($1,$2,$3,$4,$5)",
-                    doc_key, i, p["title"], p["content"], doc_source,
+                    """
+                    INSERT INTO ai_md_documents (doc_key, title, author, source, content_hash, passage_count, updated_at)
+                    VALUES ($1,$2,$3,$4,$5,$6, now())
+                    ON CONFLICT (doc_key) DO UPDATE SET
+                        title = EXCLUDED.title, author = EXCLUDED.author, source = EXCLUDED.source,
+                        content_hash = EXCLUDED.content_hash, passage_count = EXCLUDED.passage_count,
+                        updated_at = now()
+                    """,
+                    doc_key, doc_title, doc_author, doc_source, content_hash, len(parsed["passages"]),
                 )
-            for q in parsed["quotes"]:
-                await conn.execute(
-                    "INSERT INTO ai_md_quotes (doc_key, quote, author, passage_title, source) VALUES ($1,$2,$3,$4,$5)",
-                    doc_key, q["quote"], q["author"], q["passage_title"], doc_source,
-                )
-            await conn.execute(
-                """
-                INSERT INTO ai_md_documents (doc_key, title, author, source, content_hash, passage_count, updated_at)
-                VALUES ($1,$2,$3,$4,$5,$6, now())
-                ON CONFLICT (doc_key) DO UPDATE SET
-                    title = EXCLUDED.title, author = EXCLUDED.author, source = EXCLUDED.source,
-                    content_hash = EXCLUDED.content_hash, passage_count = EXCLUDED.passage_count,
-                    updated_at = now()
-                """,
-                doc_key, doc_title, doc_author, doc_source, content_hash, len(parsed["passages"]),
-            )
+                await conn.execute("DELETE FROM ai_md_passages WHERE doc_key = $1", doc_key)
+                await conn.execute("DELETE FROM ai_md_quotes WHERE doc_key = $1", doc_key)
+                for i, p in enumerate(parsed["passages"]):
+                    await conn.execute(
+                        "INSERT INTO ai_md_passages (doc_key, passage_index, title, content, source) VALUES ($1,$2,$3,$4,$5)",
+                        doc_key, i, p["title"], p["content"], doc_source,
+                    )
+                for q in parsed["quotes"]:
+                    await conn.execute(
+                        "INSERT INTO ai_md_quotes (doc_key, quote, author, passage_title, source) VALUES ($1,$2,$3,$4,$5)",
+                        doc_key, q["quote"], q["author"], q["passage_title"], doc_source,
+                    )
+
+    # Deadlock (với backfill embedding của bot) là TẠM THỜI -> retry vài lần với backoff.
+    import asyncio as _asyncio
+    for attempt in range(6):
+        try:
+            await _write_once()
+            break
+        except (asyncpg.exceptions.DeadlockDetectedError,
+                asyncpg.exceptions.SerializationError) as exc:
+            if attempt == 5:
+                raise
+            print(f"[md] index retry {attempt + 1}/5 sau {type(exc).__name__}", flush=True)
+            await _asyncio.sleep(0.4 * (attempt + 1))
     return {"doc_key": doc_key, "title": doc_title, "author": doc_author,
             "passages": len(parsed["passages"]), "quotes": len(parsed["quotes"]), "changed": True}
 
