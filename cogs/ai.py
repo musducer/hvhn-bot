@@ -25,6 +25,12 @@ CONTEXT_MAX_CHARS = int(os.getenv("HVHN_CONTEXT_MAX_CHARS", "18000"))
 COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "9000"))
 SYSTEM_EXTRA_MAX_CHARS = 32000
 VERIFIER_EVIDENCE_MAX_CHARS = 6000
+# Sampling cho nhanh sinh cau tra loi VAN HOC chinh: noi rong de van co chat,
+# giau tu vung, khong khô/lap; do dai du de phan tich sau. Cac nhanh factual/
+# verifier van giu mac dinh chat (temp thap, top_p 0.4) de khong tang ao giac.
+LIT_TEMPERATURE = float(os.getenv("HVHN_LIT_TEMPERATURE", "0.6"))
+LIT_TOP_P = float(os.getenv("HVHN_LIT_TOP_P", "0.92"))
+LIT_MAX_TOKENS = int(os.getenv("HVHN_LIT_MAX_TOKENS", "3000"))
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 # Duoi nguong nay coi nhu truy xuat .md lac de -> khong nhoi vao context (tranh chep tai lieu khong lien quan).
 MD_MIN_RELEVANCE = float(os.getenv("HVHN_MD_MIN_RELEVANCE", "2.0"))
@@ -840,6 +846,8 @@ class AI(commands.Cog):
         prompt: str,
         system_prompt: str = SYSTEM_PROMPT,
         temperature: float = 0.2,
+        top_p: float = 0.4,
+        max_tokens: int | None = None,
     ) -> tuple[bool, str | dict]:
         url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
@@ -850,8 +858,10 @@ class AI(commands.Cog):
                 {"role": "user", "content": prompt},
             ],
             "temperature": temperature,
-            "top_p": 0.4,
+            "top_p": top_p,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
             if resp.status != 200:
                 body = await resp.text()
@@ -870,12 +880,17 @@ class AI(commands.Cog):
         prompt: str,
         system_prompt: str = SYSTEM_PROMPT,
         temperature: float = 0.2,
+        top_p: float = 0.4,
+        max_tokens: int | None = None,
     ) -> tuple[bool, str | dict]:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}"
+        generation_config: dict = {"temperature": temperature, "topP": top_p}
+        if max_tokens is not None:
+            generation_config["maxOutputTokens"] = max_tokens
         payload = {
             "systemInstruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": temperature, "topP": 0.4},
+            "generationConfig": generation_config,
         }
         async with session.post(url, json=payload, timeout=60) as resp:
             if resp.status != 200:
@@ -896,6 +911,8 @@ class AI(commands.Cog):
         prompt: str,
         system_prompt: str = SYSTEM_PROMPT,
         temperature: float = 0.2,
+        top_p: float = 0.4,
+        max_tokens: int | None = None,
     ) -> str | None:
         errors: list[str] = []
         prompt_chars = len(prompt) + len(system_prompt)
@@ -921,7 +938,7 @@ class AI(commands.Cog):
                         body=f"prompt_chars={prompt_chars} est_tokens={prompt_tokens}",
                     )
                     try:
-                        ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature)
+                        ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature, top_p, max_tokens)
                         if ok:
                             self.last_ai_errors = []
                             self._log_api_event(
@@ -970,7 +987,7 @@ class AI(commands.Cog):
                     body=f"prompt_chars={len(groq_prompt) + len(groq_system_prompt)} est_tokens={self._estimated_tokens(groq_prompt, groq_system_prompt)}",
                 )
                 try:
-                    ok, content = await self.ask_groq(session, key, groq_prompt, groq_system_prompt, temperature)
+                    ok, content = await self.ask_groq(session, key, groq_prompt, groq_system_prompt, temperature, top_p, max_tokens)
                     if ok:
                         self.last_ai_errors = []
                         self._log_api_event(
@@ -1008,7 +1025,7 @@ class AI(commands.Cog):
                                 status=content.get("status"),
                                 body=f"retry_chars={len(retry_prompt) + len(groq_system_prompt)} est_tokens={self._estimated_tokens(retry_prompt, groq_system_prompt)}",
                             )
-                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, groq_system_prompt, temperature)
+                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, groq_system_prompt, temperature, top_p, max_tokens)
                             if ok2:
                                 self.last_ai_errors = []
                                 return str(content2)
@@ -1054,7 +1071,7 @@ class AI(commands.Cog):
                     total_keys=len(self.gemini_keys),
                 )
                 try:
-                    ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature)
+                    ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature, top_p, max_tokens)
                     if ok:
                         self.last_ai_errors = []
                         self._log_api_event(
@@ -1585,7 +1602,9 @@ class AI(commands.Cog):
             "- Neu goi ten bien phap tu tu (so sanh/an du/diep ngu...), phai chi ra dau hieu ngon ngu cu the. Khong duoc goi la 'so sanh' khi cau dan khong co phe so sanh.\n"
             "- Van phong phan tich van hoc phai co chat van: mo bang mot truc tu tuong/hinh anh trung tam; dung dong tu co luc nhu 'bung len', 'ro ri', 'ket tinh', 'va cham', 'keo cang', 'chuyen hoa'; cau van co nhip ngan-dai dan xen. Tuyet doi khong viet nhu bao cao muc 'Ve noi dung/ve nghe thuat/tong ket'.\n"
             "- Hinh anh hoa lap luan nhung khong bay khoi evidence: moi an du/so sanh trong loi binh phai neo vao chi tiet van ban dang phan tich.\n"
-            "- Truoc khi chot, tu kiem: co dan chung cu the cho tung tac pham chua, co suy doan ngoai context khong, co cau nao co the gan cho moi tac pham khong.\n\n"
+            "- Truoc khi chot, tu kiem: co dan chung cu the cho tung tac pham chua, co suy doan ngoai context khong, co cau nao co the gan cho moi tac pham khong.\n"
+            "- DO SAU & DO DAI (voi cau hoi phan tich/cam nhan/phong cach): trien khai IT NHAT 3-4 luan diem, moi luan diem la mot doan day du theo 4 tang: (a) goi ten thu phap/nhan tu cu the -> (b) trich NGUYEN VAN dan chung, GIU nguyen diep tu/diep ngu ('va... va... va', 'nay day... nay day', 'cho... cho...'), khong rut gon/dien xuoi tho -> (c) phan tich VI SAO thu phap ay tao ra hieu qua ay (co che ngon ngu, khong noi chung 'the hien su phong phu') -> (d) khai quat len tu tuong/phong cach. Bai phai du day dan, co chieu sau, KHONG duoc chi 3-4 doan ngan hoi hot.\n"
+            "- CHONG LAP & CHONG CUT: khong lap lai cung mot cum khai quat (vd 'quan niem ve thoi gian va tuoi tre') qua mot lan; ket bai khong duoc tom lai y het than bai bang tu khac; moi doan phai them thong tin moi.\n\n"
             "YEU CAU NGUOI DUNG:\n"
             f"{prompt}"
         )
@@ -1831,7 +1850,13 @@ class AI(commands.Cog):
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode, guidance)
         if RETRIEVAL_DEBUG:
             print(f"[debug] final_prompt\n{full_prompt}", flush=True)
-        answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.05)
+        answer = await self.generate(
+            full_prompt,
+            THEN_SYSTEM_PROMPT,
+            temperature=LIT_TEMPERATURE,
+            top_p=LIT_TOP_P,
+            max_tokens=LIT_MAX_TOKENS,
+        )
         evidence_for_quote_check = "\n\n".join(part for part in (knowledge, web_context) if part)
         needs_repair = bool(answer) and (
             self._looks_like_source_dump(answer)
@@ -1858,7 +1883,9 @@ class AI(commands.Cog):
             repaired = await self.generate(
                 self._guarded_prompt(repair_prompt, knowledge, web_context, "repair"),
                 THEN_SYSTEM_PROMPT,
-                temperature=0.0,
+                temperature=LIT_TEMPERATURE,
+                top_p=LIT_TOP_P,
+                max_tokens=LIT_MAX_TOKENS,
             )
             if repaired:
                 answer = repaired
