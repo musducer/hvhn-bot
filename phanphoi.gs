@@ -618,10 +618,11 @@ function ensureTraiNghiem() {
   ]]);
   kh.getRange(1, 1, 1, 7).setBackground('#8e24aa').setFontColor('#fff').setFontWeight('bold');
   kh.setFrozenRows(1);
+  // Ngày cấp / Ngày hết hạn: ép 24 GIỜ (HH) cho CẢ CỘT (moi dong, ke ca dong cu) — mac dinh
+  // locale la 12h nen 21:34 hien nham 9:34. Format ca cot de khong sot o nao.
+  kh.getRange(2, 3, Math.max(1, kh.getMaxRows() - 1), 2).setNumberFormat('dd/mm/yyyy HH:mm:ss');
   if (kh.getLastRow() > 1) {
     kh.getRange(2, TRIAL_DEL_COL, kh.getLastRow() - 1, 1).insertCheckboxes();
-    // Ngày cấp / Ngày hết hạn: ép 24 GIỜ (HH) — mac dinh locale la 12h nen 21:34 hien nham 9:34.
-    kh.getRange(2, 3, kh.getLastRow() - 1, 2).setNumberFormat('dd/mm/yyyy HH:mm:ss');
   }
 
   let tl = ss.getSheetByName(TRIAL_DOC_TAB);
@@ -1058,7 +1059,7 @@ function decorateRegistry(reg) {
 
   if (lastRow > 1) {
     const n = lastRow - 1;
-    reg.getRange(2, 3, n, 2).setNumberFormat('dd/mm/yyyy HH:mm:ss'); // cột ngày (24 GIỜ; hh=12h gây lệch 21:34->9:34)
+    reg.getRange(2, 3, Math.max(n, reg.getMaxRows() - 1), 2).setNumberFormat('dd/mm/yyyy HH:mm:ss'); // cột ngày, CẢ CỘT (24 GIỜ; hh=12h gây lệch 21:34->9:34)
     reg.getRange(2, HOURS_COL, n, 1).setNumberFormat('0').setHorizontalAlignment('center'); // số giờ nguyên
     reg.getRange(2, RENEW_COL, n, 1).insertCheckboxes();      // ô gia hạn
     reg.getRange(2, DEL_COL, n, 1).insertCheckboxes();        // ô xóa khách
