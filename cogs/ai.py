@@ -173,7 +173,7 @@ def build_context_budget(
 ) -> str:
     parts: list[str] = []
     remaining = max(1200, max_chars)
-    remaining = _budget_append(parts, "KHO PDF HVHN UU TIEN", pdf_chunks, remaining)
+    remaining = _budget_append(parts, "KHO TRI THUC HVHN UU TIEN", pdf_chunks, remaining)
     remaining = _budget_append(parts, "TRI THUC HVHN THU CONG", manual_knowledge, remaining)
     remaining = _budget_append(parts, "GOP Y GIAO VIEN DA SUA", teacher_feedback, remaining)
     remaining = _budget_append(parts, "NGUON WEB TIN CAY BO SUNG", web_results, remaining)
@@ -206,7 +206,7 @@ THEN_SYSTEM_PROMPT = (
     "1. Không được bịa tác giả, tác phẩm, nhân vật, năm sáng tác, hoàn cảnh sáng tác, "
     "trích dẫn, nhận định phê bình, số liệu, hay nội dung bài học.\n"
     "2. Không đặt trong dấu ngoặc kép bất kỳ câu nào nếu câu đó không xuất hiện trong "
-    "văn bản người dùng gửi hoặc KHO PDF/TRI THỨC HVHN LIÊN QUAN.\n"
+    "văn bản người dùng gửi hoặc KHO TRI THỨC HVHN LIÊN QUAN.\n"
     "2b. GÁN TÁC GIẢ: chỉ gán một câu/nhận định cho một người khi (a) ngay cạnh câu đó "
     "trong nguồn có dấu quy kết rõ ('X viết:', '— X', 'theo X'), hoặc (b) ngữ cảnh ghi rõ "
     "'TÁC GIẢ: <tên>' cho đoạn đó — khi ấy người viết đoạn chính là tác giả đó. TUYỆT ĐỐI "
@@ -227,7 +227,7 @@ THEN_SYSTEM_PROMPT = (
     "phân tích; mỗi ý phải gắn với một dẫn chứng hoặc lập luận riêng, không nói suông.\n"
     "9. Người dùng có thể gõ sai chính tả hoặc thiếu dấu tên tác giả/tác phẩm — hãy hiểu "
     "theo nghĩa đúng gần nhất và trả lời, không bắt bẻ lỗi gõ.\n"
-    "10. Ngữ cảnh 'KHO PDF/TRI THỨC HVHN' đưa kèm CÓ THỂ KHÔNG liên quan câu hỏi. Chỉ dùng "
+    "10. Ngữ cảnh 'KHO TRI THỨC HVHN' đưa kèm CÓ THỂ KHÔNG liên quan câu hỏi. Chỉ dùng "
     "phần thực sự khớp với ĐỀ BÀI/tác phẩm đang hỏi. Nếu tài liệu nói về tác giả/tác phẩm "
     "KHÁC (ví dụ đề hỏi bài thơ A nhưng tài liệu nói về Xuân Diệu/Thơ Mới), TUYỆT ĐỐI bỏ qua, "
     "không được lắp nội dung đó vào bài. Với nghị luận xã hội: phân tích từ chính ngữ liệu đề "
@@ -907,7 +907,7 @@ class AI(commands.Cog):
     @staticmethod
     def _compress_prompt_for_groq(prompt: str) -> str:
         head = (
-            "BAN RUT GON CONTEXT: Uu tien bang chung PDF/manual lien quan nhat. "
+            "BAN RUT GON CONTEXT: Uu tien bang chung tai lieu/manual lien quan nhat. "
             "Neu thieu du lieu, noi ro chua du du lieu de khang dinh.\n\n"
         )
         return head + _clip_text(prompt, COMPACT_CONTEXT_MAX_CHARS)
@@ -1851,26 +1851,26 @@ class AI(commands.Cog):
 
     @staticmethod
     def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str, guidance: str = "") -> str:
-        source_block = knowledge or "KHONG CO KHO PDF/TRI THUC HVHN PHU HOP DUOC NAP."
+        source_block = knowledge or "KHONG CO KHO TRI THUC HVHN PHU HOP DUOC NAP."
         web_block = web_context or "KHONG CO NGUON WEB DUOC TRUY XUAT."
         return (
             "Ban la Then, tro giang AI mon Ngu van cua HVHN. Luon tra loi bang tieng Viet co dau, tru khi nguoi dung yeu cau ngon ngu khac.\n"
             f"CHE DO: {mode}\n"
             + (f"{guidance}\n" if guidance else "")
-            + "KHO PDF/TRI THUC/FEEDBACK HVHN DA TRUY XUAT:\n"
+            + "KHO TRI THUC/FEEDBACK HVHN DA TRUY XUAT:\n"
             f"{source_block}\n\n"
             "NGUON WEB DA TRA CUU (neu co):\n"
             f"{web_block}\n\n"
             "QUY TAC BAT BUOC:\n"
             "- Khong bia tac gia, tac pham, nhan vat, nam thang, hoan canh sang tac, trich dan, nhan dinh phe binh.\n"
-            "- Neu KHO PDF/TRI THUC co noi dung lien quan, chi duoc tra loi tu KHO PDF/TRI THUC do; khong dung tri nho ngoai.\n"
+            "- Neu KHO TRI THUC co noi dung lien quan, chi duoc tra loi tu KHO TRI THUC do; khong dung tri nho ngoai.\n"
             "- Neu nguoi dung hoi 'chep nguyen van', 'trich dan', 'nguyen van', phai giu dung tung chu tu context; khong dien giai/paraphrase.\n"
             "- Moi cau tho/cau van dat trong ngoac kep dai hon mot cum tu phai xuat hien NGUYEN VAN trong context/evidence va dung tac gia/tac pham dang hoi. Neu khong thay, bo quote do hoac noi chua du du lieu; khong duoc lay tho nguoi khac gan cho tac gia dang hoi.\n"
             "- Neu nguoi dung hoi 'tong hop', 'tat ca', 'moi nhan dinh', phai di qua tat ca doan [P...] duoc cap va rut ra moi y/trich dan lien quan; khong dung sau 1 doan.\n"
             "- Voi cau hoi theo tai lieu da nap, neu context co evidence thi khong duoc tra loi bang kien thuc chung hay tom tat chung chung.\n"
             "- Chi dat trong ngoac kep neu thay nguyen van trong van ban/context.\n"
             "- Neu context khong du de khang dinh, phai noi ro: chua du du lieu de khang dinh.\n"
-            "- Neu KHO PDF/TRI THUC co bang chung lien quan, bat buoc tra loi dua tren bang chung do; khong duoc tu choi chung chung.\n"
+            "- Neu KHO TRI THUC co bang chung lien quan, bat buoc tra loi dua tren bang chung do; khong duoc tu choi chung chung.\n"
             "- Duoc neu ghi chu nguon ngan gon khi cau tra loi mang tinh su kien/van hoc/can kiem chung.\n"
             "- Khong hien ma noi bo [P1], [S1], [W1] hoac URL dai; neu can, chi neu ten tai lieu/nguon ngan gon.\n"
             "- Tra loi thang vao cau hoi, sau do moi ghi can cu/nguon neu that su can.\n"
@@ -2412,7 +2412,7 @@ class AI(commands.Cog):
     async def _force_grounded_answer(self, prompt: str, knowledge: str, web_context: str, mode: str) -> str | None:
         force_prompt = (
             "BAT BUOC TRA LOI BANG CHUNG DA TRUY XUAT NEU CO. "
-            "Khong duoc noi 'khong du du lieu de khang dinh' khi KHO PDF/TRI THUC ben duoi co doan lien quan. "
+            "Khong duoc noi 'khong du du lieu de khang dinh' khi KHO TRI THUC ben duoi co doan lien quan. "
             "Hay trich y tu evidence, noi ro can cu tu tai lieu nao, va chi tu choi nhung chi tiet khong nam trong evidence.\n\n"
             f"{prompt}"
         )
@@ -2541,7 +2541,7 @@ class AI(commands.Cog):
                     lines.append(f"  + {unit}")
         if not extracted_any:
             return None
-        lines.append("\nGhi chu: phan tren chi lay tu cac doan PDF da truy xuat; khong bo sung bang tri nho ngoai tai lieu.")
+        lines.append("\nGhi chu: phan tren chi lay tu cac doan tai lieu da truy xuat; khong bo sung bang tri nho ngoai tai lieu.")
         return "\n".join(lines).strip()
 
 
