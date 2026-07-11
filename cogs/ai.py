@@ -200,6 +200,16 @@ if len(THEN_SYSTEM_PROMPT_GROQ) > GROQ_SAFE_PROMPT_CHARS:
     THEN_SYSTEM_PROMPT_GROQ = THEN_SYSTEM_PROMPT_GROQ[:GROQ_SAFE_PROMPT_CHARS]
 
 
+def _user_is_teacher(interaction: discord.Interaction) -> bool:
+    # Giáo viên/admin: có quyền manage_guild HOẶC mang role admin/giáo viên cấu hình.
+    if not isinstance(interaction.user, discord.Member):
+        return False
+    if interaction.user.guild_permissions.manage_guild:
+        return True
+    allow = {r.strip().lower() for r in os.getenv("HVHN_TEACHER_ROLES", "HVHN Admin,Giáo viên").split(",") if r.strip()}
+    return any(role.name.strip().lower() in allow for role in interaction.user.roles)
+
+
 class FeedbackModal(discord.ui.Modal, title="Sửa câu trả lời cho Then"):
     correction = discord.ui.TextInput(
         label="Câu sửa / góp ý của giáo viên",
@@ -215,20 +225,24 @@ class FeedbackModal(discord.ui.Modal, title="Sửa câu trả lời cho Then"):
         self.answer = answer
 
     async def on_submit(self, interaction: discord.Interaction):
+        # Chỉ correction của giáo viên/admin được DUYỆT (đưa vào ngữ cảnh AI). Người khác:
+        # lưu dạng CHỜ DUYỆT, không dùng cho tới khi giáo viên duyệt -> chống đầu độc feedback.
+        approved = _user_is_teacher(interaction)
         await self.bot.db.execute(
             """
-            INSERT INTO ai_feedback (user_id, prompt, answer, rating, correction)
-            VALUES ($1, $2, $3, 'needs_fix', $4)
+            INSERT INTO ai_feedback (user_id, prompt, answer, rating, correction, approved)
+            VALUES ($1, $2, $3, 'needs_fix', $4, $5)
             """,
             interaction.user.id,
             self.prompt,
             self.answer,
             str(self.correction),
+            approved,
         )
-        await interaction.response.send_message(
-            "Đã lưu góp ý. Then sẽ dùng dữ liệu này để mài prompt/kho tri thức.",
-            ephemeral=True,
-        )
+        msg = ("Đã lưu góp ý của giáo viên (đã duyệt). Then sẽ dùng để mài câu trả lời."
+               if approved else
+               "Đã ghi nhận góp ý — sẽ được giáo viên xem xét trước khi Then sử dụng. Cảm ơn bạn!")
+        await interaction.response.send_message(msg, ephemeral=True)
 
 
 class FeedbackView(discord.ui.View):
@@ -1340,6 +1354,7 @@ class AI(commands.Cog):
             FROM ai_feedback
             WHERE rating = 'needs_fix'
               AND correction IS NOT NULL
+              AND approved = TRUE
               AND (lower(prompt) LIKE ANY($1::text[]) OR lower(correction) LIKE ANY($1::text[]))
             ORDER BY id DESC
             LIMIT $2
@@ -2163,7 +2178,39 @@ class AI(commands.Cog):
         rows = await self.bot.db.fetch("SELECT rating, count(*) AS n FROM ai_feedback GROUP BY rating ORDER BY rating")
         total_k = await self.bot.db.fetchval("SELECT count(*) FROM ai_knowledge WHERE approved = TRUE")
         text = "\n".join(f"`{row['rating']}`: {row['n']}" for row in rows) or "Chưa có feedback."
-        await interaction.response.send_message(f"Tri thức đã duyệt: `{total_k}`\nFeedback:\n{text}", ephemeral=True)
+        pending = await self.bot.db.fetchval(
+            "SELECT count(*) FROM ai_feedback WHERE rating='needs_fix' AND correction IS NOT NULL AND approved=FALSE")
+        await interaction.response.send_message(
+            f"Tri thức đã duyệt: `{total_k}`\nFeedback:\n{text}\nGóp ý CHỜ DUYỆT: `{pending}` (dùng /ai_feedback_duyet)",
+            ephemeral=True)
+
+    @app_commands.command(name="ai_feedback_duyet",
+                          description="(Admin) Duyệt góp ý: nhập số id, hoặc 'all' để duyệt hết chờ, 'xem' để liệt kê")
+    async def feedback_duyet(self, interaction: discord.Interaction, muc: str):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Bạn cần role HVHN Admin hoặc quyền Manage Server.", ephemeral=True)
+            return
+        muc = (muc or "").strip().lower()
+        if muc == "xem":
+            rows = await self.bot.db.fetch(
+                "SELECT id, left(correction, 120) c FROM ai_feedback "
+                "WHERE rating='needs_fix' AND correction IS NOT NULL AND approved=FALSE ORDER BY id DESC LIMIT 15")
+            if not rows:
+                await interaction.response.send_message("Không có góp ý nào đang chờ duyệt.", ephemeral=True)
+                return
+            body = "\n".join(f"`#{r['id']}` {r['c']}" for r in rows)
+            await interaction.response.send_message(f"Góp ý chờ duyệt (mới nhất):\n{body}", ephemeral=True)
+            return
+        if muc == "all":
+            n = await self.bot.db.execute(
+                "UPDATE ai_feedback SET approved=TRUE WHERE rating='needs_fix' AND correction IS NOT NULL AND approved=FALSE")
+            await interaction.response.send_message(f"Đã duyệt tất cả góp ý đang chờ ({n}).", ephemeral=True)
+            return
+        if muc.isdigit():
+            n = await self.bot.db.execute("UPDATE ai_feedback SET approved=TRUE WHERE id=$1", int(muc))
+            await interaction.response.send_message(f"Đã duyệt góp ý #{muc} ({n}).", ephemeral=True)
+            return
+        await interaction.response.send_message("Cú pháp: `/ai_feedback_duyet xem` | `all` | `<số id>`.", ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

@@ -8,6 +8,7 @@ ADMIN_ONLY_COMMANDS = {
     "announce", "hvhn_themkhach", "hvhn_tailieu_khach", "hvhn_tailieu_khach_link", "hvhn_xoakhach", "hvhn_xoatailieu",
     "hvhn_status_full", "hvhn_retry_failed", "hvhn_khach", "hvhn_giahan",
     "hvhn_debug_retrieval", "ai_kienthuc_them", "ai_feedback_stats", "hvhn_embed_backfill",
+    "ai_feedback_duyet",
 }
 
 PAGE_SIZE = 20
