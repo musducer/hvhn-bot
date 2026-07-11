@@ -32,15 +32,19 @@ GEMINI_FALLBACK_MODELS = [
 ]
 GEMINI_MODELS = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
 # Provider OpenAI-compatible bo sung, free tier khong can the: chi bat khi co key trong env.
+# "models" la chain fallback: model dau la chinh; ID sai/404 thi tu nhay model sau.
 EXTRA_OPENAI_PROVIDERS = [
-    {"name": name, "url": url, "keys": keys, "model": os.getenv(model_env, default_model)}
-    for name, url, keys_env, model_env, default_model in (
+    {"name": name, "url": url, "keys": keys,
+     "models": ([os.getenv(model_env)] if os.getenv(model_env) else []) + default_models}
+    for name, url, keys_env, model_env, default_models in (
         ("cerebras", "https://api.cerebras.ai/v1/chat/completions",
-         "CEREBRAS_API_KEYS", "CEREBRAS_MODEL", "llama-3.3-70b"),
+         "CEREBRAS_API_KEYS", "CEREBRAS_MODEL",
+         ["qwen-3-235b-a22b-instruct-2507", "zai-glm-4.6", "gpt-oss-120b", "llama-3.3-70b"]),
         ("openrouter", "https://openrouter.ai/api/v1/chat/completions",
-         "OPENROUTER_API_KEYS", "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"),
+         "OPENROUTER_API_KEYS", "OPENROUTER_MODEL",
+         ["meta-llama/llama-3.3-70b-instruct:free"]),
         ("mistral", "https://api.mistral.ai/v1/chat/completions",
-         "MISTRAL_API_KEYS", "MISTRAL_MODEL", "mistral-small-latest"),
+         "MISTRAL_API_KEYS", "MISTRAL_MODEL", ["mistral-small-latest"]),
     )
     if (keys := [k.strip() for k in os.getenv(keys_env, "").split(",") if k.strip()])
 ]
@@ -1009,6 +1013,58 @@ class AI(commands.Cog):
                             errors.append(f"Gemini exception: {type(exc).__name__}: {exc}")
                 return None
 
+            async def try_extras() -> str | None:
+                # Provider OpenAI-compatible (Cerebras/OpenRouter/Mistral): moi provider
+                # co chain model rieng; dung prompt/system goc (Cerebras context lon),
+                # chi nen khi qua dai.
+                extra_system = system_prompt
+                extra_prompt = prompt
+                if len(extra_prompt) + len(extra_system) > 60000:
+                    extra_prompt = self._compress_prompt_for_groq(prompt)
+                for provider in EXTRA_OPENAI_PROVIDERS:
+                    for extra_model in provider["models"]:
+                        for index, key in enumerate(provider["keys"], start=1):
+                            self._log_api_event(
+                                "try",
+                                provider=provider["name"],
+                                model=extra_model,
+                                key=key,
+                                key_index=index,
+                                total_keys=len(provider["keys"]),
+                                body=f"prompt_chars={len(extra_prompt) + len(extra_system)}",
+                            )
+                            try:
+                                ok, content = await self.ask_openai_compat(
+                                    session, provider["name"], provider["url"], extra_model, key,
+                                    extra_prompt, extra_system, temperature, top_p, max_tokens,
+                                )
+                                if ok:
+                                    self.last_ai_errors = []
+                                    self._log_api_event(
+                                        "ok", provider=provider["name"], model=extra_model,
+                                        key=key, key_index=index, total_keys=len(provider["keys"]),
+                                    )
+                                    return str(content)
+                                if isinstance(content, dict):
+                                    errors.append(
+                                        f"provider={provider['name']} model={extra_model} status={content.get('status')} body={content.get('body', '')}"
+                                    )
+                                    # Model ID sai/khong ton tai -> bo qua key con lai, nhay model sau.
+                                    if content.get("status") in (400, 404):
+                                        break
+                            except Exception as exc:
+                                errors.append(f"{provider['name']} exception: {type(exc).__name__}: {exc}")
+                return None
+
+            # Cau hoi van hoc: Cerebras (Qwen3-235B, ~1M token/ngay/key) la nhanh
+            # chinh — model lon nhat + quota ben nhat; Gemini/Groq thanh du phong.
+            tried_extras_first = False
+            if prefer_rich_style and EXTRA_OPENAI_PROVIDERS:
+                tried_extras_first = True
+                result = await try_extras()
+                if result is not None:
+                    return result
+
             if prefer_gemini:
                 result = await try_gemini_all("try_long_context_first")
                 if result is not None:
@@ -1122,37 +1178,10 @@ class AI(commands.Cog):
                 if result is not None:
                     return result
 
-            # Cuoi cung: cac provider OpenAI-compatible bo sung (Cerebras/OpenRouter/Mistral)
-            # neu chu du an da nap key. Dung prompt da nen kieu Groq cho an toan context.
-            for provider in EXTRA_OPENAI_PROVIDERS:
-                for index, key in enumerate(provider["keys"], start=1):
-                    self._log_api_event(
-                        "try",
-                        provider=provider["name"],
-                        model=provider["model"],
-                        key=key,
-                        key_index=index,
-                        total_keys=len(provider["keys"]),
-                        body=f"prompt_chars={len(groq_prompt) + len(groq_system_prompt)}",
-                    )
-                    try:
-                        ok, content = await self.ask_openai_compat(
-                            session, provider["name"], provider["url"], provider["model"], key,
-                            groq_prompt, groq_system_prompt, temperature, top_p, max_tokens,
-                        )
-                        if ok:
-                            self.last_ai_errors = []
-                            self._log_api_event(
-                                "ok", provider=provider["name"], model=provider["model"],
-                                key=key, key_index=index, total_keys=len(provider["keys"]),
-                            )
-                            return str(content)
-                        if isinstance(content, dict):
-                            errors.append(
-                                f"provider={provider['name']} model={provider['model']} status={content.get('status')} body={content.get('body', '')}"
-                            )
-                    except Exception as exc:
-                        errors.append(f"{provider['name']} exception: {type(exc).__name__}: {exc}")
+            if not tried_extras_first:
+                result = await try_extras()
+                if result is not None:
+                    return result
         self.last_ai_errors = errors[-8:]
         print(
             "[ai-api] "
