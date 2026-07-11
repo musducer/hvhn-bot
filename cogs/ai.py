@@ -16,6 +16,34 @@ import md_embeddings
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+# Rate limit cua Groq tinh THEO MODEL (moi model 1 quota TPD rieng tren cung key),
+# nen khi model chinh chay het quota thi thu model khac cung key truoc khi bo cuoc.
+GROQ_FALLBACK_MODELS = [
+    m.strip() for m in os.getenv(
+        "GROQ_FALLBACK_MODELS", "moonshotai/kimi-k2-instruct,llama-3.1-8b-instant"
+    ).split(",") if m.strip()
+]
+GROQ_MODELS = [GROQ_MODEL] + [m for m in GROQ_FALLBACK_MODELS if m != GROQ_MODEL]
+# Free tier gemini-2.0-flash da bi Google dua ve 0; 2.5-flash/lite van con free tier.
+GEMINI_FALLBACK_MODELS = [
+    m.strip() for m in os.getenv(
+        "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite"
+    ).split(",") if m.strip()
+]
+GEMINI_MODELS = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+# Provider OpenAI-compatible bo sung, free tier khong can the: chi bat khi co key trong env.
+EXTRA_OPENAI_PROVIDERS = [
+    {"name": name, "url": url, "keys": keys, "model": os.getenv(model_env, default_model)}
+    for name, url, keys_env, model_env, default_model in (
+        ("cerebras", "https://api.cerebras.ai/v1/chat/completions",
+         "CEREBRAS_API_KEYS", "CEREBRAS_MODEL", "llama-3.3-70b"),
+        ("openrouter", "https://openrouter.ai/api/v1/chat/completions",
+         "OPENROUTER_API_KEYS", "OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free"),
+        ("mistral", "https://api.mistral.ai/v1/chat/completions",
+         "MISTRAL_API_KEYS", "MISTRAL_MODEL", "mistral-small-latest"),
+    )
+    if (keys := [k.strip() for k in os.getenv(keys_env, "").split(",") if k.strip()])
+]
 MAX_DISCORD_LEN = 3800
 WEB_RESULT_LIMIT = 3
 WEB_CONTEXT_LIMIT = 3
@@ -839,9 +867,12 @@ class AI(commands.Cog):
             flush=True,
         )
 
-    async def ask_groq(
+    async def ask_openai_compat(
         self,
         session: aiohttp.ClientSession,
+        provider: str,
+        url: str,
+        model: str,
         key: str,
         prompt: str,
         system_prompt: str = SYSTEM_PROMPT,
@@ -849,10 +880,9 @@ class AI(commands.Cog):
         top_p: float = 0.4,
         max_tokens: int | None = None,
     ) -> tuple[bool, str | dict]:
-        url = "https://api.groq.com/openai/v1/chat/completions"
         headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
         payload = {
-            "model": GROQ_MODEL,
+            "model": model,
             "messages": [
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": prompt},
@@ -866,12 +896,28 @@ class AI(commands.Cog):
             if resp.status != 200:
                 body = await resp.text()
                 print(
-                    f"[ai-api] provider=groq model={GROQ_MODEL} non_200 status={resp.status} body={body!r}",
+                    f"[ai-api] provider={provider} model={model} non_200 status={resp.status} body={body!r}",
                     flush=True,
                 )
-                return False, self._api_error("groq", GROQ_MODEL, resp.status, body)
+                return False, self._api_error(provider, model, resp.status, body)
             data = await resp.json()
             return True, data["choices"][0]["message"]["content"].strip()
+
+    async def ask_groq(
+        self,
+        session: aiohttp.ClientSession,
+        key: str,
+        prompt: str,
+        system_prompt: str = SYSTEM_PROMPT,
+        temperature: float = 0.2,
+        top_p: float = 0.4,
+        max_tokens: int | None = None,
+        model: str = GROQ_MODEL,
+    ) -> tuple[bool, str | dict]:
+        return await self.ask_openai_compat(
+            session, "groq", "https://api.groq.com/openai/v1/chat/completions",
+            model, key, prompt, system_prompt, temperature, top_p, max_tokens,
+        )
 
     async def ask_gemini(
         self,
@@ -882,8 +928,9 @@ class AI(commands.Cog):
         temperature: float = 0.2,
         top_p: float = 0.4,
         max_tokens: int | None = None,
+        model: str = GEMINI_MODEL,
     ) -> tuple[bool, str | dict]:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent?key={key}"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={key}"
         generation_config: dict = {"temperature": temperature, "topP": top_p}
         if max_tokens is not None:
             generation_config["maxOutputTokens"] = max_tokens
@@ -896,15 +943,15 @@ class AI(commands.Cog):
             if resp.status != 200:
                 body = await resp.text()
                 print(
-                    f"[ai-api] provider=gemini model={GEMINI_MODEL} non_200 status={resp.status} body={body!r}",
+                    f"[ai-api] provider=gemini model={model} non_200 status={resp.status} body={body!r}",
                     flush=True,
                 )
-                return False, self._api_error("gemini", GEMINI_MODEL, resp.status, body)
+                return False, self._api_error("gemini", model, resp.status, body)
             data = await resp.json()
             try:
                 return True, data["candidates"][0]["content"]["parts"][0]["text"].strip()
             except (KeyError, IndexError):
-                return False, self._api_error("gemini", GEMINI_MODEL, 200, repr(data))
+                return False, self._api_error("gemini", model, 200, repr(data))
 
     async def generate(
         self,
@@ -929,36 +976,43 @@ class AI(commands.Cog):
             flush=True,
         )
         async with aiohttp.ClientSession() as session:
+
+            async def try_gemini_all(event: str) -> str | None:
+                # Thu tung model (free tier tinh theo model) x tung key.
+                for gemini_model in GEMINI_MODELS:
+                    for index, key in enumerate(self.gemini_keys, start=1):
+                        self._log_api_event(
+                            event,
+                            provider="gemini",
+                            model=gemini_model,
+                            key=key,
+                            key_index=index,
+                            total_keys=len(self.gemini_keys),
+                            body=f"prompt_chars={prompt_chars} est_tokens={prompt_tokens}",
+                        )
+                        try:
+                            ok, content = await self.ask_gemini(
+                                session, key, prompt, system_prompt, temperature, top_p, max_tokens, model=gemini_model
+                            )
+                            if ok:
+                                self.last_ai_errors = []
+                                self._log_api_event(
+                                    "ok", provider="gemini", model=gemini_model,
+                                    key=key, key_index=index, total_keys=len(self.gemini_keys),
+                                )
+                                return str(content)
+                            if isinstance(content, dict):
+                                errors.append(
+                                    f"provider=gemini model={gemini_model} status={content.get('status')} body={content.get('body', '')}"
+                                )
+                        except Exception as exc:
+                            errors.append(f"Gemini exception: {type(exc).__name__}: {exc}")
+                return None
+
             if prefer_gemini:
-                for index, key in enumerate(self.gemini_keys, start=1):
-                    self._log_api_event(
-                        "try_long_context_first",
-                        provider="gemini",
-                        model=GEMINI_MODEL,
-                        key=key,
-                        key_index=index,
-                        total_keys=len(self.gemini_keys),
-                        body=f"prompt_chars={prompt_chars} est_tokens={prompt_tokens}",
-                    )
-                    try:
-                        ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature, top_p, max_tokens)
-                        if ok:
-                            self.last_ai_errors = []
-                            self._log_api_event(
-                                "ok",
-                                provider="gemini",
-                                model=GEMINI_MODEL,
-                                key=key,
-                                key_index=index,
-                                total_keys=len(self.gemini_keys),
-                            )
-                            return str(content)
-                        if isinstance(content, dict):
-                            errors.append(
-                                f"provider=gemini model={GEMINI_MODEL} status={content.get('status')} body={content.get('body', '')}"
-                            )
-                    except Exception as exc:
-                        errors.append(f"Gemini exception: {type(exc).__name__}: {exc}")
+                result = await try_gemini_all("try_long_context_first")
+                if result is not None:
+                    return result
 
             # Groq has a much tighter effective context budget than Gemini.
             # If the caller's system prompt is the large THEN_SYSTEM_PROMPT
@@ -979,24 +1033,27 @@ class AI(commands.Cog):
                     f"est_tokens={self._estimated_tokens(groq_prompt, groq_system_prompt)}",
                     flush=True,
                 )
-            for index, key in enumerate(self.groq_keys, start=1):
+            # Quota Groq tinh theo (model x org): model chinh chay het TPD thi cac model
+            # fallback tren cung key van con nguyen quota.
+            for groq_model in GROQ_MODELS:
+              for index, key in enumerate(self.groq_keys, start=1):
                 self._log_api_event(
                     "try",
                     provider="groq",
-                    model=GROQ_MODEL,
+                    model=groq_model,
                     key=key,
                     key_index=index,
                     total_keys=len(self.groq_keys),
                     body=f"prompt_chars={len(groq_prompt) + len(groq_system_prompt)} est_tokens={self._estimated_tokens(groq_prompt, groq_system_prompt)}",
                 )
                 try:
-                    ok, content = await self.ask_groq(session, key, groq_prompt, groq_system_prompt, temperature, top_p, max_tokens)
+                    ok, content = await self.ask_groq(session, key, groq_prompt, groq_system_prompt, temperature, top_p, max_tokens, model=groq_model)
                     if ok:
                         self.last_ai_errors = []
                         self._log_api_event(
                             "ok",
                             provider="groq",
-                            model=GROQ_MODEL,
+                            model=groq_model,
                             key=key,
                             key_index=index,
                             total_keys=len(self.groq_keys),
@@ -1006,7 +1063,7 @@ class AI(commands.Cog):
                         self._log_api_event(
                             "non_200",
                             provider="groq",
-                            model=GROQ_MODEL,
+                            model=groq_model,
                             key=key,
                             key_index=index,
                             total_keys=len(self.groq_keys),
@@ -1014,34 +1071,34 @@ class AI(commands.Cog):
                             body=content.get("body", ""),
                         )
                         errors.append(
-                            f"provider=groq model={GROQ_MODEL} status={content.get('status')} body={content.get('body', '')}"
+                            f"provider=groq model={groq_model} status={content.get('status')} body={content.get('body', '')}"
                         )
                         if self._is_request_too_large(content) and groq_prompt == prompt:
                             retry_prompt = self._compress_prompt_for_groq(prompt)
                             self._log_api_event(
                                 "retry_compressed_after_413",
                                 provider="groq",
-                                model=GROQ_MODEL,
+                                model=groq_model,
                                 key=key,
                                 key_index=index,
                                 total_keys=len(self.groq_keys),
                                 status=content.get("status"),
                                 body=f"retry_chars={len(retry_prompt) + len(groq_system_prompt)} est_tokens={self._estimated_tokens(retry_prompt, groq_system_prompt)}",
                             )
-                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, groq_system_prompt, temperature, top_p, max_tokens)
+                            ok2, content2 = await self.ask_groq(session, key, retry_prompt, groq_system_prompt, temperature, top_p, max_tokens, model=groq_model)
                             if ok2:
                                 self.last_ai_errors = []
                                 return str(content2)
                             if isinstance(content2, dict):
                                 errors.append(
-                                    f"provider=groq model={GROQ_MODEL} retry status={content2.get('status')} body={content2.get('body', '')}"
+                                    f"provider=groq model={groq_model} retry status={content2.get('status')} body={content2.get('body', '')}"
                                 )
                     else:
                         errors.append(f"Groq {content}")
                         self._log_api_event(
                             "error",
                             provider="groq",
-                            model=GROQ_MODEL,
+                            model=groq_model,
                             key=key,
                             key_index=index,
                             total_keys=len(self.groq_keys),
@@ -1053,76 +1110,49 @@ class AI(commands.Cog):
                     self._log_api_event(
                         "exception",
                         provider="groq",
-                        model=GROQ_MODEL,
+                        model=groq_model,
                         key=key,
                         key_index=index,
                         total_keys=len(self.groq_keys),
                         exc=exc,
                     )
 
-            if prefer_gemini:
-                gemini_iter = []
-            else:
-                gemini_iter = list(enumerate(self.gemini_keys, start=1))
-            for index, key in gemini_iter:
-                self._log_api_event(
-                    "try",
-                    provider="gemini",
-                    model=GEMINI_MODEL,
-                    key=key,
-                    key_index=index,
-                    total_keys=len(self.gemini_keys),
-                )
-                try:
-                    ok, content = await self.ask_gemini(session, key, prompt, system_prompt, temperature, top_p, max_tokens)
-                    if ok:
-                        self.last_ai_errors = []
-                        self._log_api_event(
-                            "ok",
-                            provider="gemini",
-                            model=GEMINI_MODEL,
-                            key=key,
-                            key_index=index,
-                            total_keys=len(self.gemini_keys),
-                        )
-                        return str(content)
-                    if isinstance(content, dict):
-                        self._log_api_event(
-                            "non_200",
-                            provider="gemini",
-                            model=GEMINI_MODEL,
-                            key=key,
-                            key_index=index,
-                            total_keys=len(self.gemini_keys),
-                            status=content.get("status"),
-                            body=content.get("body", ""),
-                        )
-                        errors.append(
-                            f"provider=gemini model={GEMINI_MODEL} status={content.get('status')} body={content.get('body', '')}"
-                        )
-                    else:
-                        errors.append(f"Gemini {content}")
-                        self._log_api_event(
-                            "error",
-                            provider="gemini",
-                            model=GEMINI_MODEL,
-                            key=key,
-                            key_index=index,
-                            total_keys=len(self.gemini_keys),
-                            body=str(content),
-                        )
-                except Exception as exc:
-                    msg = f"Gemini exception: {type(exc).__name__}: {exc}"
-                    errors.append(msg)
+            if not prefer_gemini:
+                result = await try_gemini_all("try")
+                if result is not None:
+                    return result
+
+            # Cuoi cung: cac provider OpenAI-compatible bo sung (Cerebras/OpenRouter/Mistral)
+            # neu chu du an da nap key. Dung prompt da nen kieu Groq cho an toan context.
+            for provider in EXTRA_OPENAI_PROVIDERS:
+                for index, key in enumerate(provider["keys"], start=1):
                     self._log_api_event(
-                        "exception",
-                        provider="gemini",
-                        model=GEMINI_MODEL,
+                        "try",
+                        provider=provider["name"],
+                        model=provider["model"],
                         key=key,
                         key_index=index,
-                        total_keys=len(self.gemini_keys),
-                        exc=exc,
+                        total_keys=len(provider["keys"]),
+                        body=f"prompt_chars={len(groq_prompt) + len(groq_system_prompt)}",
                     )
+                    try:
+                        ok, content = await self.ask_openai_compat(
+                            session, provider["name"], provider["url"], provider["model"], key,
+                            groq_prompt, groq_system_prompt, temperature, top_p, max_tokens,
+                        )
+                        if ok:
+                            self.last_ai_errors = []
+                            self._log_api_event(
+                                "ok", provider=provider["name"], model=provider["model"],
+                                key=key, key_index=index, total_keys=len(provider["keys"]),
+                            )
+                            return str(content)
+                        if isinstance(content, dict):
+                            errors.append(
+                                f"provider={provider['name']} model={provider['model']} status={content.get('status')} body={content.get('body', '')}"
+                            )
+                    except Exception as exc:
+                        errors.append(f"{provider['name']} exception: {type(exc).__name__}: {exc}")
         self.last_ai_errors = errors[-8:]
         print(
             "[ai-api] "
@@ -1134,7 +1164,7 @@ class AI(commands.Cog):
 
 
     def _has_ai(self) -> bool:
-        return bool(self.groq_keys or self.gemini_keys)
+        return bool(self.groq_keys or self.gemini_keys or EXTRA_OPENAI_PROVIDERS)
 
     def _ai_error_message(self) -> str:
         joined = " | ".join(self.last_ai_errors)
