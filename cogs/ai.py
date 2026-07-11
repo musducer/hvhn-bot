@@ -1328,7 +1328,37 @@ class AI(commands.Cog):
             footer = f"{footer_base} · Phần {index}/{total}" if total > 1 else footer_base
             embed.set_footer(text=footer)
             view = FeedbackView(self.bot, full_prompt, answer) if index == 1 else None
-            await interaction.followup.send(embed=embed, view=view)
+            if index > 1:
+                await asyncio.sleep(0.35)
+            try:
+                await interaction.followup.send(embed=embed, view=view)
+                print(f"[debug] discord_answer_page_sent page={index}/{total} chars={len(page)} embed=True", flush=True)
+            except Exception as exc:
+                print(
+                    f"[debug] discord_answer_page_embed_failed page={index}/{total} "
+                    f"chars={len(page)} err={type(exc).__name__}: {exc}",
+                    flush=True,
+                )
+                fallback_parts = self._split_answer_pages(page, 1800)
+                for part_index, part in enumerate(fallback_parts, start=1):
+                    fallback = part
+                    if total > 1:
+                        suffix = f" [{part_index}/{len(fallback_parts)}]" if len(fallback_parts) > 1 else ""
+                        fallback = f"**{shown_title}{suffix}**\n\n{part}"
+                    try:
+                        await interaction.followup.send(content=fallback)
+                        print(
+                            f"[debug] discord_answer_page_sent page={index}/{total} "
+                            f"fallback_part={part_index} chars={len(fallback)} embed=False",
+                            flush=True,
+                        )
+                    except Exception as fallback_exc:
+                        print(
+                            f"[debug] discord_answer_page_fallback_failed page={index}/{total} "
+                            f"part={part_index} err={type(fallback_exc).__name__}: {fallback_exc}",
+                            flush=True,
+                        )
+                        break
 
     @staticmethod
     def _retrieval_count(context: str, marker: str) -> int:
