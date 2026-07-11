@@ -415,13 +415,20 @@ async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", autho
     doc_source = source or parsed.get("source", "")
     # Form-priority: tham so author > tac gia phat hien trong file.
     doc_author = (author or parsed.get("author", "") or "").strip()
+    stored_passages = int(current["passage_count"] or 0) if current else 0
+    repair_empty_index = bool(
+        current and current["content_hash"] == content_hash and stored_passages == 0 and parsed["passages"]
+    )
     if current and current["content_hash"] == content_hash:
         # Noi dung khong doi nhung tac gia co the moi (them qua Form / metadata) -> cap nhat rieng.
         if doc_author and (current["author"] or "") != doc_author:
             await db.execute("UPDATE ai_md_documents SET author = $2 WHERE doc_key = $1", doc_key, doc_author)
-        return {"doc_key": doc_key, "title": doc_title, "author": doc_author,
-                "passages": int(current["passage_count"] or 0),
-                "quotes": int(current["quote_count"] or 0), "changed": False}
+        if repair_empty_index:
+            print(f"[md] repair empty unchanged index doc={doc_key} passages={len(parsed['passages'])}", flush=True)
+        else:
+            return {"doc_key": doc_key, "title": doc_title, "author": doc_author,
+                    "passages": stored_passages,
+                    "quotes": int(current["quote_count"] or 0), "changed": False}
     async def _write_once():
         async with db.acquire() if hasattr(db, "acquire") else _null_ctx(db) as conn:
             async with conn.transaction():

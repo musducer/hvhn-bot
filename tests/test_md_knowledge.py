@@ -163,6 +163,43 @@ class IndexMdBytesTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["passages"], 839)
         self.assertEqual(result["quotes"], 180)
 
+    async def test_unchanged_empty_index_is_repaired(self):
+        data = b"# Title\n\nBody"
+
+        class Tx:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+        class FakeDb:
+            def __init__(self):
+                self.inserts = 0
+
+            async def fetchrow(self, *args):
+                from md_knowledge import _content_hash
+                return {"content_hash": _content_hash(data), "author": "",
+                        "passage_count": 0, "quote_count": 0}
+
+            def transaction(self):
+                return Tx()
+
+            async def execute(self, query, *args):
+                if "INSERT INTO ai_md_passages" in query:
+                    self.inserts += 1
+
+        async def noop_schema(db):
+            return None
+
+        db = FakeDb()
+        with patch("md_knowledge.ensure_md_schema", noop_schema):
+            result = await index_md_bytes(db, "Title", data, source="same.md")
+
+        self.assertTrue(result["changed"])
+        self.assertEqual(result["passages"], 1)
+        self.assertEqual(db.inserts, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
