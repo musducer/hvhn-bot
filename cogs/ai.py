@@ -244,6 +244,23 @@ THEN_SYSTEM_PROMPT = (
     "'được mổ xẻ trực diện'. Thay vào đó viết như một người thầy đang say sưa giảng: câu có nhịp, "
     "có chỗ nhấn, có cảm xúc thật trước cái hay của văn chương; dùng hình ảnh sống động nhưng gắn "
     "chặt vào dẫn chứng, không sáo. Được phép giàu hình ảnh, chỉ cấm mơ hồ và rỗng nghĩa.\n"
+    "15. GIỌNG CHU VĂN SƠN — BẮT BUỘC, KHÔNG THƯƠNG LƯỢNG (bài phân tích văn học):\n"
+    "  (a) MỔ MỘT CHỮ ĐẮT: mỗi bài PHẢI dừng lại soi ÍT NHẤT MỘT chữ/nhãn tự cụ thể — trỏ đúng chữ đó "
+    "ra, hỏi vì sao Nam Cao/tác giả chọn CHÍNH chữ ấy chứ không phải chữ khác (vd chữ 'ươn ướt' chứ "
+    "không phải 'khóc'; 'thấy' chứ không phải 'nghĩ'). Phân tích Ý mà không mổ CHỮ là hỏng, viết lại.\n"
+    "  (b) CÓ 'TÔI' THẬT dẫn dắt: dám nêu chính kiến ('Tôi nghĩ...', 'Tôi cho rằng...', 'Không hẳn.'), "
+    "trò chuyện với người đọc, KHÔNG tuyên ngôn vô ngã.\n"
+    "  (c) NHỊP: đan câu dài–ngắn; sau một đoạn phân tích dày phải có MỘT câu cực ngắn dằn giọng chốt ý "
+    "('Không hẳn.', 'Chỉ một chữ thôi.', 'Thế là đủ.'). Ít nhất MỘT câu hỏi tu từ mở ý rồi tự trả lời.\n"
+    "  (d) CẤM TUYỆT ĐỐI lối bài văn mẫu: KHÔNG tiêu đề tiểu mục kiểu 'Bát cháo hành — Hiện thân của...'; "
+    "KHÔNG các cụm đao to búa lớn rỗng ('kết tinh toàn bộ tư tưởng nhân đạo', 'tài năng nghệ thuật bậc "
+    "thầy', 'chân lý nghệ thuật', 'cứu rỗi một linh hồn', 'giá trị nhân văn sâu sắc'). Mọi khái quát lớn "
+    "phải mọc LÊN TỪ một chữ/một dẫn chứng vừa mổ, không phán từ trên trời.\n"
+    "16. TƯ DUY PHẢI CHẶT VÀ CÓ PHÁT HIỆN RIÊNG: (a) không nói lại điều sách giáo khoa ai cũng biết — bài "
+    "phải có ÍT NHẤT MỘT ý mới mẻ, một góc nhìn/phát hiện của riêng mình (một nghịch lí, một chi tiết bị "
+    "bỏ quên, một cách đọc lệch khỏi lối mòn). (b) Lập luận phải có phản đề hoặc đặt cạnh một cách hiểu "
+    "khác rồi bác lại/bổ sung ('Người ta thường bảo... nhưng...'), không xuôi chiều một mạch. (c) Mỗi "
+    "luận điểm phải THẮT vào luận điểm trước, dẫn tới một kết luận KHÔNG đoán trước được từ câu mở.\n"
     "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ, viết như người thật chứ không như "
     "bản mẫu. Câu hỏi đơn giản thì trả lời gọn; câu hỏi cần phân tích thì đi sâu có lớp lang, "
     "tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
@@ -2085,6 +2102,40 @@ class AI(commands.Cog):
                 "Lo ten nguon noi bo va day nguoi hoi di kiem chung/tra cuu toan van tren bao/trang khac. "
                 "Bo han cau do; ket bai bang mot nhan dinh cua chinh minh, khong nhac ten bao/trang/tai lieu."
             )
+        # ==== SIET GIONG CHU VAN SON: chi soi bai phan tich van hoc dai (>=1200 ky tu van xuoi) ====
+        if len(plain) >= 1200:
+            # (1) Dao to bua lon rong nghia — cam theo LUAT 15(d).
+            grand = (
+                "ket tinh toan bo", "tai nang nghe thuat bac thay", "tai nang bac thay", "chan ly nghe thuat",
+                "cuu roi mot linh hon", "cuu roi linh hon", "gia tri nhan dao sau sac", "gia tri nhan van sau sac",
+                "tuyet tac", "kiet tac", "dinh cao nghe thuat", "song mai voi thoi gian", "muon doi", "bat hu",
+                "sa mac lanh leo", "vien ngoc sang", "buc tranh tuyet dep", "thang hoa cam xuc",
+            )
+            ghits = [p for p in grand if p in plain]
+            if ghits:
+                defects.append(
+                    "Dao to bua lon rong nghia (cac cum: " + ", ".join(ghits) + "). Bo het. Moi khai quat lon PHAI "
+                    "moc len tu mot chu/mot dan chung vua mo ra, khong phan tu tren troi. Thay 'ket tinh toan bo tu "
+                    "tuong nhan dao' bang mot nhan xet cu the ve chinh chi tiet dang phan tich."
+                )
+            # (2) Tieu de tieu muc kieu bai van mau 'X — Y' (LUAT 15d).
+            header_re = re.compile(r"^\s*[^\n]{4,70}\s+[—–-]\s+[A-ZÀ-ỹĐ][^\n]{4,}$", re.MULTILINE)
+            heads = [h for h in header_re.findall(answer or "") if len(h) < 90]
+            if len(heads) >= 2:
+                defects.append(
+                    "Bo cuc bai van mau: cac tieu de tieu muc kieu 'Bat chao hanh — Hien than cua...'. Chu Van Son "
+                    "khong chia bai bang tieu de dat san; hay de mach van tu chay lien, moi doan mo bang mot chu/ "
+                    "mot dan chung cu the roi dan len y, khong dat tieu de tong ket truoc."
+                )
+            # (3) Thieu chu ky Chu Van Son: khong cai 'toi' dan dat VA khong cau hoi tu tu (LUAT 15b,c).
+            has_first_person = bool(re.search(r"\btoi (nghi|cho|thay|tin|ngo|do|muon|xin chia)\b|theo toi\b|\bta thu\b", plain))
+            has_rhetoric = "?" in (answer or "")
+            if not has_first_person and not has_rhetoric:
+                defects.append(
+                    "Thieu chu ky giong Chu Van Son: khong co cai 'toi' binh luan dan dat, cung khong mot cau hoi tu tu "
+                    "nao. Them chinh kien that ('Toi nghi...', 'Khong han.') va it nhat mot cau hoi tu tu mo y roi tu "
+                    "tra loi, va mot cau cuc ngan dan giong sau doan phan tich day."
+                )
         return defects
 
     @staticmethod
