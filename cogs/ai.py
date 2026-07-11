@@ -40,6 +40,14 @@ for _model in [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS:
     if _model.lower() in GEMINI_SKIP_MODELS or _model in GEMINI_MODELS:
         continue
     GEMINI_MODELS.append(_model)
+# Cau van hoc (prefer_rich_style): thu Gemini 2.5 Pro TRUOC (tieng Viet tot nhat trong
+# dam free, hieu sac thai van chuong). Free tier Pro gioi han request/ngay -> het quota
+# thi tu rot xuong Cerebras gpt-oss-120b roi Gemini flash. KHONG dung cho factual/verifier
+# de khong dot quota Pro quy. Env GEMINI_LIT_MODELS de chinh.
+GEMINI_LIT_MODELS = [
+    m.strip() for m in os.getenv("GEMINI_LIT_MODELS", "gemini-2.5-pro").split(",")
+    if m.strip() and m.strip().lower() not in GEMINI_SKIP_MODELS
+]
 # Provider OpenAI-compatible bo sung, free tier khong can the: chi bat khi co key trong env.
 # "models" la chain fallback: model dau la chinh; ID sai/404 thi tu nhay model sau.
 EXTRA_OPENAI_PROVIDERS = [
@@ -270,6 +278,13 @@ THEN_SYSTEM_PROMPT = (
     "bỏ quên, một cách đọc lệch khỏi lối mòn). (b) Lập luận phải có phản đề hoặc đặt cạnh một cách hiểu "
     "khác rồi bác lại/bổ sung ('Người ta thường bảo... nhưng...'), không xuôi chiều một mạch. (c) Mỗi "
     "luận điểm phải THẮT vào luận điểm trước, dẫn tới một kết luận KHÔNG đoán trước được từ câu mở.\n"
+    "17. TUYỆT ĐỐI KHÔNG BIẾN CÂU TRẢ LỜI THÀNH BẢN KIỂM KÊ TÀI LIỆU. Ngữ cảnh/trích dẫn kèm theo chỉ "
+    "là NGUYÊN LIỆU để bạn viết bài, KHÔNG phải đối tượng để mô tả. CẤM: 'Tóm tắt các tài liệu liên quan "
+    "nhất', lập bảng liệt kê trích dẫn của từng tác giả, 'Đánh giá mức độ đầy đủ dữ liệu', 'các trích dẫn "
+    "trên là tài liệu ưu tiên nhất', bàn xem 'có/không đủ dữ liệu để...'. Người hỏi cần một BÀI NGHỊ LUẬN "
+    "hoàn chỉnh trả lời thẳng câu hỏi bằng lập luận và chính kiến của bạn — được dùng dẫn chứng trong ngữ "
+    "cảnh nhưng phải DỆT chúng vào mạch phân tích, không kê khai. Nếu ngữ cảnh không đủ hoặc lạc đề, cứ tự "
+    "phân tích bằng kiến thức văn học của mình; TUYỆT ĐỐI không quay ra tường thuật/xếp hạng tài liệu.\n"
     "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ, viết như người thật chứ không như "
     "bản mẫu. Câu hỏi đơn giản thì trả lời gọn; câu hỏi cần phân tích thì đi sâu có lớp lang, "
     "tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
@@ -1044,9 +1059,9 @@ class AI(commands.Cog):
         )
         async with aiohttp.ClientSession() as session:
 
-            async def try_gemini_all(event: str) -> str | None:
+            async def try_gemini_all(event: str, models: list[str] | None = None) -> str | None:
                 # Thu tung model (free tier tinh theo model) x tung key.
-                for gemini_model in GEMINI_MODELS:
+                for gemini_model in (models if models is not None else GEMINI_MODELS):
                     for index, key in enumerate(self.gemini_keys, start=1):
                         self._log_api_event(
                             event,
@@ -1119,9 +1134,16 @@ class AI(commands.Cog):
                                 errors.append(f"{provider['name']} exception: {type(exc).__name__}: {exc}")
                 return None
 
-            # Cau hoi van hoc: Cerebras la nhanh chinh (thu TRUOC Gemini/Groq) — CHI khi
-            # co CEREBRAS_API_KEYS. Model chinh THUC TE la gpt-oss-120b (qwen-3-235b/glm-4.6
-            # tra 404 no-access voi key free); chain: gpt-oss-120b -> qwen-3-32b -> llama-3.3-70b.
+            # Cau hoi van hoc — thu tu uu tien chat luong tieng Viet:
+            #  1) Gemini 2.5 Pro (tot nhat cho van Viet; free tier gioi han/ngay)
+            #  2) Cerebras gpt-oss-120b (quota ben, chi khi co CEREBRAS_API_KEYS;
+            #     qwen-3-235b/glm-4.6 tra 404 no-access voi key free)
+            #  3) Gemini flash  4) Groq
+            if prefer_rich_style and self.gemini_keys and GEMINI_LIT_MODELS:
+                result = await try_gemini_all("try_lit_gemini_pro", models=GEMINI_LIT_MODELS)
+                if result is not None:
+                    return result
+
             tried_extras_first = False
             if prefer_rich_style and EXTRA_OPENAI_PROVIDERS:
                 tried_extras_first = True
@@ -2163,11 +2185,16 @@ class AI(commands.Cog):
                 "Lo ten nguon noi bo va day nguoi hoi di kiem chung/tra cuu toan van tren bao/trang khac. "
                 "Bo han cau do; ket bai bang mot nhan dinh cua chinh minh, khong nhac ten bao/trang/tai lieu."
             )
-        # ==== CHE DO 'THU THU': liet ke/xep hang doan tai lieu thay vi TRA LOI cau hoi ====
+        # ==== CHE DO 'THU THU': liet ke/xep hang/tom tat corpus thay vi TRA LOI cau hoi ====
         librarian = (
             "tu kho pdf", "kho pdf/hvhn", "noi dung uu tien tu kho", "cac doan lien quan",
             "nen duoc uu tien su dung", "chua nhung cau trich nguyen van quan trong",
             "uu tien su dung khi can dan chung", "cac doan p1", "cac doan p3",
+            # bien the: tom tat/xep hang/danh gia do day du cua kho tai lieu
+            "tom tat ngan gon cac tai lieu", "tai lieu / thu", "tai lieu uu tien nhat",
+            "la tai lieu uu tien", "danh gia muc do day du", "muc do day du du lieu",
+            "du du lieu de tom tat", "cac trich dan tren la tai lieu", "cac trich dan tren deu",
+            "y chinh (trich nguyen van)", "cac tai lieu / ", "cac tai lieu lien quan nhat",
         )
         lib_hits = [p for p in librarian if p in plain]
         bracketless_p = bool(re.search(r"(?<![a-z])p\d+\s*,\s*p\d+", plain) or re.search(r"(?<![a-z])p\d+\s+va\s+p\d+", plain))
@@ -2618,6 +2645,12 @@ class AI(commands.Cog):
         r"|(?:các|cac)\s+đoạn\s+(?:liên quan|lien quan)"
         r"|.*\bP\d+\s+(?:và|va)\s+P\d+\b"
         r"|.*(?:nên được|nen duoc)\s+ưu tiên\s+sử dụng"
+        # bien the tom tat/xep hang/danh gia do day du cua kho tai lieu
+        r"|(?:tóm tắt|tom tat)\b[^\n]*\b(?:tài liệu|tai lieu|trích dẫn|trich dan)\b[^\n]*\b(?:liên quan|lien quan|ưu tiên|uu tien)"
+        r"|(?:đánh giá|danh gia)\s+mức độ\s+(?:đầy đủ|day du)\s+(?:dữ liệu|du lieu)"
+        r"|.*\b(?:là|la)\s+(?:tài liệu|tai lieu)\s+ưu tiên\s+nhất"
+        r"|.*(?:các|cac)\s+(?:trích dẫn|trich dan)\s+trên\s+(?:là|la|đều|deu)\b"
+        r"|\|\s*(?:Tác giả|Tac gia)\s*\|"  # dong tieu de bang "| Tac gia | Y chinh |"
         r")\b.*$",
         re.IGNORECASE,
     )
