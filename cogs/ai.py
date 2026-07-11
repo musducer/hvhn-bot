@@ -121,6 +121,20 @@ def _load_bonus_fewshot() -> str:
 BONUS_FEWSHOT = _load_bonus_fewshot()
 
 
+def _load_style_guide() -> str:
+    path = Path(__file__).resolve().parents[1] / "STYLE VAN PHONG.txt"
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+    if len(text) > SYSTEM_EXTRA_MAX_CHARS:
+        text = text[:SYSTEM_EXTRA_MAX_CHARS] + "\n...(rut gon STYLE vi qua dai)"
+    return text
+
+
+STYLE_GUIDE = _load_style_guide()
+
+
 def _clip_text(value: str, max_chars: int) -> str:
     value = (value or "").strip()
     if len(value) <= max_chars:
@@ -243,6 +257,9 @@ THEN_SYSTEM_PROMPT = _THEN_SYSTEM_PROMPT_CORE + (
 ) + (
     ("\n\n=== VI DU XAU -> TOT (tranh dung cac loi nay: chen chu Trung, bia chi tiet, hoi hot) ===\n"
      + BONUS_FEWSHOT) if BONUS_FEWSHOT else ""
+) + (
+    ("\n\n=== VAN PHONG MAU — HOC THEO GIONG AM/SONG (khong khô, khong sao rong) ===\n"
+     + STYLE_GUIDE) if STYLE_GUIDE else ""
 )
 
 # Compact system prompt used for the Groq path only. Groq has a much smaller
