@@ -21,6 +21,24 @@ const DEL_COL = 8;     // cột H ở tab Khách hàng: ô tick "Xóa khách"
 const HOURS_COL = 9;   // cột I ở tab Khách hàng: số giờ gia hạn (trống = SUB_HOURS)
 
 const HVHN_PARENT_FOLDER_ID_EARLY = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs';
+
+// C1: allowlist người quản lý được phép gửi Form (thêm khách/tài liệu). ĐỂ TRỐNG = TẮT
+// (nhận mọi đơn như cũ, tương thích ngược). BẬT: điền email quản lý vào đây + trong TỪNG Form
+// bật "Settings → Responses → Collect email addresses". Đơn từ email lạ sẽ bị bỏ qua + ghi log.
+const MANAGER_EMAILS = []; // vd: ['chu@gmail.com', 'quanly2@gmail.com']
+
+function _formAllowed(e) {
+  if (!MANAGER_EMAILS.length) return true; // tính năng tắt
+  var email = '';
+  try {
+    email = String((e && e.response && e.response.getRespondentEmail && e.response.getRespondentEmail()) || '').toLowerCase();
+  } catch (err) {}
+  var allow = MANAGER_EMAILS.map(function (x) { return String(x).toLowerCase().trim(); });
+  var ok = email && allow.indexOf(email) >= 0;
+  if (!ok) { try { ghiLog('Từ chối đơn Form (ngoài allowlist)', email || '(chưa bật thu thập email)'); } catch (e2) {} }
+  return ok;
+}
+
 const XOA_KHACH_NAME = '_don_xoa_khach';
 const XOA_TAILIEU_NAME = '_don_xoa_tai_lieu';
 const SHEET_XOA_KHACH_NAME = '_don_sheet_xoa_khach';
@@ -1721,6 +1739,7 @@ function taoLaiFormKhachTraiNghiem() {
 // onFormSubmit (installable trigger) -> được phép gọi DriveApp.
 // Thêm dòng vào tab Khách trải nghiệm (hạn 72h) + cấp quyền xem folder chung NGAY.
 function xuLyFormKhachTraiNghiem(e) {
+  if (!_formAllowed(e)) return;
   let name = '', email = '';
   e.response.getItemResponses().forEach(it => {
     const t = it.getItem().getTitle().toLowerCase();
@@ -1757,6 +1776,7 @@ function taoLaiFormTaiLieuTraiNghiem() {
 
 // Handler: copy PDF trải nghiệm vào folder đơn _don_them_tai_lieu_trai_nghiem (watcher render).
 function xuLyFormTaiLieuTraiNghiem(e) {
+  if (!_formAllowed(e)) return;
   const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
   const incoming = getOrCreateFolder(parent, INCOMING_TRIAL_NAME);
   let tenTL = '';
@@ -1825,6 +1845,7 @@ function caiDatForm() {
 
 // Handler khi có người submit Form "Thêm khách": ghi 1 file đơn .txt vào folder _don_them_khach.
 function xuLyFormKhach(e) {
+  if (!_formAllowed(e)) return;
   const props = PropertiesService.getScriptProperties();
   const jobsFolder = DriveApp.getFolderById(props.getProperty('JOBS_KHACH_ID'));
   let name = '', email = '';
@@ -1839,6 +1860,7 @@ function xuLyFormKhach(e) {
 
 // Handler khi có người submit Form "Thêm tài liệu": copy file PDF vào folder _don_them_tai_lieu.
 function xuLyFormTaiLieu(e) {
+  if (!_formAllowed(e)) return;
   const props = PropertiesService.getScriptProperties();
   const incoming = DriveApp.getFolderById(props.getProperty('INCOMING_DOCS_ID'));
   let tenTL = '';
@@ -1861,6 +1883,7 @@ function xuLyFormTaiLieu(e) {
 }
 
 function xuLyFormTaiLieuBot(e) {
+  if (!_formAllowed(e)) return;
   const props = PropertiesService.getScriptProperties();
   const incoming = DriveApp.getFolderById(props.getProperty('BOT_DOCS_FORM_ID'));
   let tenTL = '';
@@ -1884,6 +1907,7 @@ function xuLyFormTaiLieuBot(e) {
 
 // Handler khi có người submit Form "Nạp .md cho bot": copy file .md vào folder _don_them_tai_lieu_bot_md.
 function xuLyFormMd(e) {
+  if (!_formAllowed(e)) return;
   const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
   const incoming = getOrCreateFolder(parent, INCOMING_BOT_MD_NAME);
   let tenTL = '', tacGia = '';
