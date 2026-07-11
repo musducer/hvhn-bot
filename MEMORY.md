@@ -35,7 +35,7 @@ Phân phối tài liệu (đề/tài liệu ôn thi Ngữ Văn) cho học viên 
                                                                                                     │
    folder SOURCE (mirror) ◄── ghi PDF đã đóng dấu + new_rows_*.csv ──────────────────────────────────┘
         │
-        └─ trigger tuDongXuLyFileMoi (5') ─► phanPhoi: copy sang folder từng khách + share email + khoá tải
+        └─ trigger hvhnTuDongHoa (5') ─► tuDongXuLyFileMoi → phanPhoi: copy sang folder từng khách + share email + khoá tải
                                                     │
                                               tab khách + tab "Khách hàng" (hạn dùng) + Dashboard
    trigger kiemTraHetHan (hằng ngày) ─► quá 30 ngày: gỡ quyền + xoá file
@@ -87,7 +87,7 @@ Sheet: **"Phân phối - HVHN"** = `1KwCP7JcKCAR_GGlIPLUXYMk8_tdQu2Wo-E-nD5nRf6Y
 - `onOpen` tạo menu **HVHN** + đảm bảo các tab.
 - `onEdit`: ô tìm kiếm Dashboard (B1) → lọc; tick cột G tab Khách hàng → `giaHanMotDong(...,false)` (chỉ sửa sheet, để trigger phân phối lại nếu cần).
 - `phanPhoi()`: quét mọi tab khách, copy file từ SOURCE→DEST **idempotent** (đã có thì dùng lại, KHÔNG đẻ trùng), chỉ `addViewer` nếu chưa có quyền (tránh spam mail), `Drive.Files.update copyRequiresWriterPermission` bọc try riêng (thiếu Drive service vẫn không kẹt). Cuối gọi `dongBoKhachHang` + `capNhatDashboard`.
-- `tuDongXuLyFileMoi()`: (trigger 5') quét mọi `new_rows*.csv` trong SOURCE → merge vào tab khách → `phanPhoi()`.
+- `tuDongXuLyFileMoi()`: (hàm được `hvhnTuDongHoa` gọi mỗi 5') quét mọi `new_rows*.csv` trong SOURCE → merge vào tab khách → `phanPhoi()`.
 - `hvhnTuDongHoa()`: trigger tổng chạy mỗi 5 phút, gom toàn bộ cập nhật tự động: quét `new_rows*.csv`, phân phối, xử lý tick gia hạn, kiểm tra hết hạn, xử lý tick xoá khách/tài liệu, cập nhật tab Tài liệu + Dashboard.
 - `caiDatTuDongHoa()`: chạy 1 lần sau khi dán code Apps Script để xoá trigger cũ trùng và tạo trigger `hvhnTuDongHoa` mỗi 5 phút + `kiemTraHetHan` hằng ngày.
 - `dongBoKhachHang()`: khách mới vào tab "Khách hàng", hạn = hôm nay + 30 ngày.
@@ -103,7 +103,7 @@ Sheet: **"Phân phối - HVHN"** = `1KwCP7JcKCAR_GGlIPLUXYMk8_tdQu2Wo-E-nD5nRf6Y
 
 ## 7. Triggers cần có (Apps Script > ⏰ Triggers)
 
-1. `tuDongXuLyFileMoi` — Time-driven, Minutes, **every 5 minutes**.
+1. `hvhnTuDongHoa` — Time-driven, Minutes, **every 5 minutes** (gọi tuDongXuLyFileMoi + toàn bộ tự động hoá).
 2. `kiemTraHetHan` — Time-driven, **Day timer**, 1-2 AM.
 3. (tự tạo bởi `caiDatForm`) `xuLyFormKhach`, `xuLyFormTaiLieu` — onFormSubmit.
 
