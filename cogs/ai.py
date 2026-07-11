@@ -1555,6 +1555,7 @@ class AI(commands.Cog):
             "- Khong bia tac gia, tac pham, nhan vat, nam thang, hoan canh sang tac, trich dan, nhan dinh phe binh.\n"
             "- Neu KHO PDF/TRI THUC co noi dung lien quan, chi duoc tra loi tu KHO PDF/TRI THUC do; khong dung tri nho ngoai.\n"
             "- Neu nguoi dung hoi 'chep nguyen van', 'trich dan', 'nguyen van', phai giu dung tung chu tu context; khong dien giai/paraphrase.\n"
+            "- Moi cau tho/cau van dat trong ngoac kep dai hon mot cum tu phai xuat hien NGUYEN VAN trong context/evidence va dung tac gia/tac pham dang hoi. Neu khong thay, bo quote do hoac noi chua du du lieu; khong duoc lay tho nguoi khac gan cho tac gia dang hoi.\n"
             "- Neu nguoi dung hoi 'tong hop', 'tat ca', 'moi nhan dinh', phai di qua tat ca doan [P...] duoc cap va rut ra moi y/trich dan lien quan; khong dung sau 1 doan.\n"
             "- Voi cau hoi theo tai lieu da nap, neu context co evidence thi khong duoc tra loi bang kien thuc chung hay tom tat chung chung.\n"
             "- Chi dat trong ngoac kep neu thay nguyen van trong van ban/context.\n"
@@ -1569,6 +1570,10 @@ class AI(commands.Cog):
             "- Cam cau rong neu khong co phan tich rieng: 'thong diep sau sac', 'gia tri y nghia', 'ngon ngu giau hinh anh', 'the hien su sang tao phong phu'.\n"
             "- Khong noi 'tac gia muon nhan manh', 'duoc viet dua tren trai nghiem cua tac gia', 'hoan canh sang tac' neu context khong cap bang chung.\n"
             "- Voi cau hoi so sanh: moi truc phai co A -> B -> diem gap/lech; khong gom hai tac pham vao mot nhan xet chung.\n"
+            "- Voi cau hoi ve phong cach tac gia qua mot bai tho: phai neu mot luan de phong cach ro rang, roi phan tich 2-3 net dac sac qua tu ngu, hinh anh, nhip dieu, cai toi tru tinh, cam giac/thoi gian/khong gian. Khong chi liet ke 'lang man, tinh te, sau sac'.\n"
+            "- Neu goi ten bien phap tu tu (so sanh/an du/diep ngu...), phai chi ra dau hieu ngon ngu cu the. Khong duoc goi la 'so sanh' khi cau dan khong co phe so sanh.\n"
+            "- Van phong phan tich van hoc phai co chat van: mo bang mot truc tu tuong/hinh anh trung tam; dung dong tu co luc nhu 'bung len', 'ro ri', 'ket tinh', 'va cham', 'keo cang', 'chuyen hoa'; cau van co nhip ngan-dai dan xen. Tuyet doi khong viet nhu bao cao muc 'Ve noi dung/ve nghe thuat/tong ket'.\n"
+            "- Hinh anh hoa lap luan nhung khong bay khoi evidence: moi an du/so sanh trong loi binh phai neo vao chi tiet van ban dang phan tich.\n"
             "- Truoc khi chot, tu kiem: co dan chung cu the cho tung tac pham chua, co suy doan ngoai context khong, co cau nao co the gan cho moi tac pham khong.\n\n"
             "YEU CAU NGUOI DUNG:\n"
             f"{prompt}"
@@ -1626,6 +1631,79 @@ class AI(commands.Cog):
         )
         marker_hits = sum(1 for marker in evidence_markers if marker in plain)
         return marker_hits < 3
+
+    @staticmethod
+    def _looks_like_weak_style_analysis(answer: str) -> bool:
+        plain = AI._plain_text(answer or "")
+        if len(plain) < 300:
+            return False
+        if "phong cach" not in plain:
+            return False
+        weak_labels = (
+            "lang man tinh te va sau sac",
+            "lang man, tinh te va sau sac",
+            "ngon ngu tho giau hinh anh va am thanh",
+            "bien phap tu tu tinh te",
+            "cau truc tho linh hoat",
+            "khong gian tho rong lon va sau sac",
+            "tao ra nhung hinh anh dep",
+            "am thanh em ai",
+            "cau truc tho khong deu",
+        )
+        weak_hits = sum(1 for phrase in weak_labels if phrase in plain)
+        if weak_hits >= 2:
+            return True
+        wrong_device_patterns = (
+            "nhung so sanh nay giup",
+            "nhung bien phap tu tu nay giup tao ra mot khong gian tho rong lon",
+        )
+        if any(pattern in plain for pattern in wrong_device_patterns):
+            return True
+        style_operations = (
+            "cai toi", "cam giac", "nhip dieu", "thoi gian", "khong gian", "tu ngu",
+            "hinh anh", "giong dieu", "nhan vat tru tinh", "chu the tru tinh",
+        )
+        return weak_hits >= 1 and sum(1 for op in style_operations if op in plain) < 3
+
+    @staticmethod
+    def _has_unverified_long_quotes(answer: str, evidence: str) -> bool:
+        evidence_plain = AI._plain_text(evidence or "")
+        for quote in QuoteExtractor.quoted_units(answer or ""):
+            quote_plain = AI._plain_text(quote)
+            # Short quoted titles/terms are allowed; long quoted units are treated as verbatim evidence.
+            if len(quote_plain) < 24:
+                continue
+            if quote_plain not in evidence_plain:
+                return True
+        return False
+
+    @staticmethod
+    def _looks_like_dry_literary_style(answer: str) -> bool:
+        plain = AI._plain_text(answer or "")
+        if len(plain) < 350:
+            return False
+        if not any(term in plain for term in ("bai tho", "tac pham", "phong cach", "hinh tuong", "nhan vat")):
+            return False
+        dry_markers = (
+            "ve noi dung",
+            "ve nghe thuat",
+            "tong ket",
+            "tong quan",
+            "duoc the hien qua",
+            "tao ra mot",
+            "giup tao ra",
+            "rat giau hinh anh",
+            "rat sau sac",
+            "co gia tri",
+        )
+        dry_hits = sum(1 for marker in dry_markers if marker in plain)
+        vivid_markers = (
+            "bung", "ro ri", "ket tinh", "va cham", "keo cang", "chuyen hoa",
+            "nhip dap", "mach ngam", "du am", "am anh", "khac khoai", "cuong nhiet",
+            "mong manh", "ran nut", "thao thuc", "tram tich",
+        )
+        vivid_hits = sum(1 for marker in vivid_markers if marker in plain)
+        return dry_hits >= 3 and vivid_hits < 2
 
     @staticmethod
     def _pdf_reference_lines(knowledge: str) -> list[tuple[str, str]]:
@@ -1690,6 +1768,14 @@ class AI(commands.Cog):
             "Dong thoi tu cham chat luong nhu giao vien HSG: neu cau tra loi chung chung, lap lai tu khoa, "
             "thieu chi tiet van ban cho tung tac pham, hoac co cau kieu 'thong diep sau sac/gia tri y nghia/ngon ngu giau hinh anh' "
             "ma khong phan tich rieng, hay viet lai thanh lap luan co dan chung cu the. "
+            "Voi cau hoi phong cach tac gia qua mot bai tho, phai co luan de phong cach, phan tich tu ngu/hinh anh/nhip dieu/cai toi tru tinh; "
+            "xoa cac nhan xet rong nhu 'lang man, tinh te, sau sac', 'bien phap tu tu tinh te', 'cau truc linh hoat' neu khong duoc chung minh. "
+            "Neu cau tra loi goi ten phep so sanh/an du/diep ngu sai voi dan chung, hay sua ten thao tac hoac bo han. "
+            "Neu van phong kho nhu bao cao ('ve noi dung/ve nghe thuat/tong ket', lap 'duoc the hien qua/tao ra'), "
+            "hay viet lai giau hinh anh hon: mo bang truc tu tuong/hinh anh trung tam, dung dong tu co luc, cau ngan-dai co nhip, "
+            "nhung moi hinh anh binh luan van phai bam sat evidence. "
+            "Kiem tung cau dat trong ngoac kep: neu cau tho/cau van do khong xuat hien nguyen van trong BANG CHUNG RUT GON, "
+            "hoac xuat hien nhung khong gan dung tac gia/tac pham ma cau hoi yeu cau, phai xoa quote va khong duoc phan tich nhu tho cua tac gia do. "
             "Voi cau hoi so sanh, moi truc phai co tac pham A, tac pham B, diem gap va diem lech. "
             "Khong hien ma noi bo [P1]/[S1]/[W1] hoac URL dai. "
             "CHI tra ve NOI DUNG cau tra loi da sua cho hoc sinh; TUYET DOI khong kem loi dan/nhan xet "
@@ -1735,14 +1821,26 @@ class AI(commands.Cog):
         if RETRIEVAL_DEBUG:
             print(f"[debug] final_prompt\n{full_prompt}", flush=True)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.05)
+        evidence_for_quote_check = "\n\n".join(part for part in (knowledge, web_context) if part)
         needs_repair = bool(answer) and (
-            self._looks_like_source_dump(answer) or self._looks_like_generic_literary_answer(answer)
+            self._looks_like_source_dump(answer)
+            or self._looks_like_generic_literary_answer(answer)
+            or self._looks_like_weak_style_analysis(answer)
+            or self._looks_like_dry_literary_style(answer)
+            or self._has_unverified_long_quotes(answer, evidence_for_quote_check)
         )
         if answer and needs_repair:
             repair_prompt = (
                 "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon, "
                 "khong van mau rong. Moi luan diem van hoc phai co chi tiet/hinh tuong/tinh huong/bieu tuong cu the "
-                "va loi binh rieng. Voi cau hoi so sanh, moi truc phai co A -> B -> diem gap/lech. "
+                "va loi binh rieng. Voi cau hoi phong cach tac gia qua mot bai tho, phai co luan de phong cach, "
+                "phan tich tu ngu/hinh anh/nhip dieu/cai toi tru tinh; khong dung nhan xet rong nhu 'lang man, tinh te, sau sac'. "
+                "Viet lai co chat van hon: mo bang mot truc tu tuong/hinh anh trung tam, dung dong tu co luc, "
+                "cau ngan-dai dan xen, co du am; nhung khong them hinh anh nao khong bam vao context. "
+                "Neu neu bien phap tu tu, phai goi dung phep dua tren dau hieu ngon ngu trong dan chung. "
+                "Moi cau tho/cau van trong ngoac kep phai co nguyen van trong context va dung tac gia/tac pham; "
+                "neu khong, xoa quote do va khong phan tich no nhu dan chung. "
+                "Voi cau hoi so sanh, moi truc phai co A -> B -> diem gap/lech. "
                 "Khong them thong tin moi ngoai context. Neu du lieu khong du, noi ro chua du du lieu de khang dinh.\n\n"
                 f"CAU TRA LOI CAN SUA:\n{answer}"
             )
