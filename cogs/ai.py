@@ -220,6 +220,16 @@ THEN_SYSTEM_PROMPT = (
     "chứng → (c) phân tích VÌ SAO thủ pháp đó tạo ra hiệu quả ấy (đi vào cơ chế, không nói "
     "chung 'thể hiện sự phong phú') → (d) khái quát lên tư tưởng/phong cách. Không kết bài bằng "
     "cách tóm lại y hệt thân bài. Không lặp lại cùng một cụm khái quát quá một lần trong bài.\n"
+    "13. Ngữ cảnh kèm theo (Nguồn:, tên báo, tên trang, tên tài liệu) CHỈ để bạn tự đối chiếu, "
+    "TUYỆT ĐỐI KHÔNG nêu tên nguồn nội bộ đó trong bài (không viết 'theo báo X', 'trên trang báo Y', "
+    "'trong tài liệu Z'). CẤM kết bài bằng lời khuyên đi kiểm chứng/tra cứu/đọc toàn văn bài viết ở "
+    "một tờ báo hay trang nào — người hỏi cần một bài hoàn chỉnh, không phải chỉ dẫn đi đọc chỗ khác. "
+    "Kết bài phải chốt lại bằng một nhận định của chính mình.\n"
+    "14. VĂN PHẢI CÓ HƠI THỞ, đừng khô như báo cáo học thuật. Tránh lối viết cứng đờ, đầy thuật ngữ "
+    "biên khảo kiểu 'cơ chế biểu hiện của sự kế thừa', 'kiến tạo kiểu nhân vật', 'vùng thẩm mỹ', "
+    "'được mổ xẻ trực diện'. Thay vào đó viết như một người thầy đang say sưa giảng: câu có nhịp, "
+    "có chỗ nhấn, có cảm xúc thật trước cái hay của văn chương; dùng hình ảnh sống động nhưng gắn "
+    "chặt vào dẫn chứng, không sáo. Được phép giàu hình ảnh, chỉ cấm mơ hồ và rỗng nghĩa.\n"
     "Giọng văn: sắc, ấm, giàu hình ảnh nhưng không mơ hồ, viết như người thật chứ không như "
     "bản mẫu. Câu hỏi đơn giản thì trả lời gọn; câu hỏi cần phân tích thì đi sâu có lớp lang, "
     "tách rõ nội dung, nghệ thuật và liên hệ mở rộng."
@@ -2008,6 +2018,26 @@ class AI(commands.Cog):
                     "hai ve trai nghia la TUONG PHAN/DOI LAP. Chi goi ten phep co dau hieu that trong dan chung."
                 )
                 break
+        # Van kho khan kieu bao cao hoc thuat: dem thuat ngu bien khao cung do; >=3 la kho, thieu hoi tho.
+        academic = (
+            "co che bieu hien", "co che tha hoa", "mo xe truc dien", "vung tham my",
+            "kien tao kieu nhan vat", "kien tao nen kieu", "pham tru", "binh dien",
+            "the hien ro net qua thuc tien", "duoc the hien ro net", "chuyen hoa cac",
+        )
+        hits = [p for p in academic if p in plain]
+        if len(hits) >= 3:
+            defects.append(
+                "Van kho khan, cung nhu bao cao bien khao (cac cum: " + ", ".join(hits) + "). Viet lai cho "
+                "co hoi tho: nhu mot nguoi thay dang say sua giang, cau co nhip va cho nhan, co cam xuc that "
+                "truoc cai hay cua van chuong, dung hinh anh song dong bam vao dan chung. Van GIU do sau va "
+                "dan chung, chi bo lop vo thuat ngu cung do."
+            )
+        # Lo nguon noi bo / day di doc cho khac (bao X, toan van bai viet).
+        if AI._SOURCE_REFERRAL.search(answer or ""):
+            defects.append(
+                "Lo ten nguon noi bo va day nguoi hoi di kiem chung/tra cuu toan van tren bao/trang khac. "
+                "Bo han cau do; ket bai bang mot nhan dinh cua chinh minh, khong nhac ten bao/trang/tai lieu."
+            )
         return defects
 
     @staticmethod
@@ -2357,6 +2387,28 @@ class AI(commands.Cog):
         re.IGNORECASE,
     )
 
+    # Cau/doan "di kiem chung toan van bai viet tren bao X / trong tai lieu Y" — lo ten nguon
+    # noi bo va day nguoi hoi di doc cho khac. Bat theo dau hieu dong-tu-kiem-chung + doi-tuong-nguon.
+    _SOURCE_REFERRAL = re.compile(
+        r"(?:kiểm chứng|tra cứu|tra c[uứ]|tìm đọc|tìm hiểu thêm|đối chiếu|tham khảo)"
+        r"[^.\n]*?"
+        r"(?:toàn văn|bài viết|bài báo|trang báo|tờ báo|\bbáo\s+\w|nguồn tài liệu|tài liệu (?:gốc|liên quan))",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _strip_source_referral(cls, answer: str) -> str:
+        """Xoa doan/cau ket day nguoi hoi 'di tra cuu toan van tren bao X' (lo nguon noi bo)."""
+        blocks = re.split(r"\n\s*\n", answer)
+        kept = []
+        for block in blocks:
+            # Trong tung doan, bo rieng cau vi pham; giu phan con lai.
+            sentences = re.split(r"(?<=[.!?])\s+", block)
+            keep = [s for s in sentences if not cls._SOURCE_REFERRAL.search(s)]
+            if keep:
+                kept.append(" ".join(keep).strip())
+        return "\n\n".join(b for b in kept if b).strip()
+
     @classmethod
     def _strip_internal_markers(cls, answer: str) -> str:
         lines = []
@@ -2366,7 +2418,7 @@ class AI(commands.Cog):
             if cls._META_LINE.match(line.strip()):
                 continue  # bỏ dòng meta ("Dưới đây là phiên bản sửa đổi", "Tôi đã giữ nguyên...")
             lines.append(line.rstrip())
-        return "\n".join(lines).strip()
+        return cls._strip_source_referral("\n".join(lines).strip())
 
     _strip_visible_sources = _strip_internal_markers
 
