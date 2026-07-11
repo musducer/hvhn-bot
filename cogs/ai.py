@@ -1637,6 +1637,7 @@ class AI(commands.Cog):
             "- Hinh anh hoa lap luan nhung khong bay khoi evidence: moi an du/so sanh trong loi binh phai neo vao chi tiet van ban dang phan tich.\n"
             "- Truoc khi chot, tu kiem: co dan chung cu the cho tung tac pham chua, co suy doan ngoai context khong, co cau nao co the gan cho moi tac pham khong.\n"
             "- DO SAU & DO DAI (voi cau hoi phan tich/cam nhan/phong cach): trien khai IT NHAT 3-4 luan diem, moi luan diem la mot doan day du theo 4 tang: (a) goi ten thu phap/nhan tu cu the -> (b) trich NGUYEN VAN dan chung, GIU nguyen diep tu/diep ngu ('va... va... va', 'nay day... nay day', 'cho... cho...'), khong rut gon/dien xuoi tho -> (c) phan tich VI SAO thu phap ay tao ra hieu qua ay (co che ngon ngu, khong noi chung 'the hien su phong phu') -> (d) khai quat len tu tuong/phong cach. Bai phai du day dan, co chieu sau, KHONG duoc chi 3-4 doan ngan hoi hot.\n"
+            "- CHONG DON THO: khong dan khoi trich qua 3 dong lien; trich 1-3 cau roi phan tich NGAY nhan tu cua doan do (chu nao dat nhat, vi sao), phan tich phai DAI hon phan trich; sau do moi trich tiep. Trich 10 cau roi binh 1 cau chung chung la bai hong.\n"
             "- CHONG VAN AI: han che toi da danh hoa 'su ...', 'viec ...' ('the hien su mong muon' -> 'cho thay ong khat khao'); dung dong tu manh, hinh anh cu the thay cho danh tu truu tuong.\n"
             "- CHONG LAP & CHONG CUT: khong lap lai cung mot cum khai quat (vd 'quan niem ve thoi gian va tuoi tre') qua mot lan; ket bai khong duoc tom lai y het than bai bang tu khac; moi doan phai them thong tin moi.\n\n"
             "YEU CAU NGUOI DUNG:\n"
@@ -1859,6 +1860,19 @@ class AI(commands.Cog):
                 "'su khan truong' -> 'khan truong', 'the hien su mong muon' -> 'cho thay ong khat khao', "
                 "'su tuong phan giua su vinh cuu va su ngan ngui' -> 'troi dat thi con mai, doi nguoi thi huu han'."
             )
+        # Don tho thay phan tich: trich khoi dai roi phan mot cau chung chung.
+        spans = QuoteExtractor.quote_spans(answer)
+        quoted_chars = sum(s.end - s.start for s in spans)
+        prose_chars = max(len(answer) - quoted_chars, 1)
+        # quote_spans da collapse newline -> do bang do dai: ~200 chars ~ 4-5 dong tho.
+        has_long_block = any(len(s.quote) >= 200 for s in spans)
+        if has_long_block or quoted_chars / (quoted_chars + prose_chars) > 0.35:
+            defects.append(
+                "Trich dan chiem qua nhieu bai (don tho thay phan tich). Moi lan chi trich 1-3 cau, "
+                "phan tich NGAY nhan tu cua doan vua trich (vd 'ngon' trong 'Thang gieng ngon nhu mot cap moi gan' "
+                "— vi giac hoa mua xuan, lay con nguoi lam chuan cai dep; 'rom vi chia phoi' — thoi gian duoc nem "
+                "bang vi giac), roi moi trich tiep. Phan phan tich phai DAI HON phan trich."
+            )
         for wrong in ("bien phap doi xung", "phep doi xung"):
             if wrong in plain:
                 defects.append(
@@ -2047,6 +2061,11 @@ class AI(commands.Cog):
         if answer:
             answer = await self._verify_answer(answer, prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
             answer = self._strip_internal_markers(answer)
+            # Chot chan cuoi: du di duong nao (repair thanh cong nhung van lap, verifier viet lai...),
+            # cau lap gan nguyen van cung bi cat truoc khi gui.
+            if self._repeated_phrase_defects(answer):
+                answer = self._strip_repeated_sentences(answer)
+                print("[debug] final_guard=strip_repeated_sentences", flush=True)
         return answer, full_prompt
 
     async def _force_grounded_answer(self, prompt: str, knowledge: str, web_context: str, mode: str) -> str | None:
@@ -2183,6 +2202,8 @@ class AI(commands.Cog):
         r"|câu trả lời\s+(?:của bạn|trên|này|ban đầu).*(?:tốt|cải thiện|sửa|chỉnh|hoàn thiện|đáng)"
         r"|(?:tôi|mình)\s+(?:đã|xin|sẽ)?\s*(?:giữ nguyên|thêm|bổ sung|sửa|chỉnh|cải thiện|viết lại|điều chỉnh|tinh chỉnh)"
         r"|(?:phiên bản|bản)\s+(?:sửa đổi|cải thiện|chỉnh sửa|hoàn thiện)"
+        r"|câu hỏi của bạn\s+(?:yêu cầu|đề nghị|muốn)"
+        r"|(?:dưới đây|sau đây)\s+là\s+câu trả lời"
         r")\b.*$",
         re.IGNORECASE,
     )
