@@ -1209,6 +1209,101 @@ class AI(commands.Cog):
         return "AI API failed. Provider details: " + compact
 
     @staticmethod
+    def _split_answer_pages(answer: str, max_chars: int = MAX_DISCORD_LEN) -> list[str]:
+        text = (answer or "").strip()
+        if not text:
+            return [""]
+        if len(text) <= max_chars:
+            return [text]
+
+        pages: list[str] = []
+        current = ""
+
+        def flush_current() -> None:
+            nonlocal current
+            if current.strip():
+                pages.append(current.strip())
+                current = ""
+
+        def push_unit(unit: str) -> None:
+            nonlocal current
+            unit = unit.strip()
+            if not unit:
+                return
+            if len(unit) > max_chars:
+                flush_current()
+                for part in AI._split_oversized_unit(unit, max_chars):
+                    pages.append(part)
+                return
+            candidate = f"{current}\n\n{unit}".strip() if current else unit
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                flush_current()
+                current = unit
+
+        for block in re.split(r"\n\s*\n", text):
+            push_unit(block)
+        flush_current()
+        return pages or [text[:max_chars].rstrip()]
+
+    @staticmethod
+    def _split_oversized_unit(unit: str, max_chars: int) -> list[str]:
+        sentences = re.findall(r".+?(?:[.!?…]+(?:\s+|$)|$)", unit, flags=re.S)
+        parts: list[str] = []
+        current = ""
+        for sentence in sentences:
+            sentence = sentence.strip()
+            if not sentence:
+                continue
+            if len(sentence) > max_chars:
+                if current.strip():
+                    parts.append(current.strip())
+                    current = ""
+                words = sentence.split()
+                chunk = ""
+                for word in words:
+                    candidate = f"{chunk} {word}".strip()
+                    if len(candidate) <= max_chars:
+                        chunk = candidate
+                    else:
+                        if chunk:
+                            parts.append(chunk)
+                        chunk = word[:max_chars]
+                if chunk:
+                    parts.append(chunk)
+                continue
+            candidate = f"{current} {sentence}".strip() if current else sentence
+            if len(candidate) <= max_chars:
+                current = candidate
+            else:
+                if current.strip():
+                    parts.append(current.strip())
+                current = sentence
+        if current.strip():
+            parts.append(current.strip())
+        return parts
+
+    async def _send_answer_embeds(
+        self,
+        interaction: discord.Interaction,
+        *,
+        title: str,
+        answer: str,
+        full_prompt: str,
+    ) -> None:
+        pages = self._split_answer_pages(answer, MAX_DISCORD_LEN)
+        total = len(pages)
+        footer_base = f"Then trả lời {interaction.user.display_name} · thấy chỗ nào cần chỉnh, bấm nút góp ý giúp Then nhé."
+        for index, page in enumerate(pages, start=1):
+            shown_title = f"{title} ({index}/{total})" if total > 1 else title
+            embed = discord.Embed(title=shown_title, description=page, color=discord.Color.green())
+            footer = f"{footer_base} · Phần {index}/{total}" if total > 1 else footer_base
+            embed.set_footer(text=footer)
+            view = FeedbackView(self.bot, full_prompt, answer) if index == 1 else None
+            await interaction.followup.send(embed=embed, view=view)
+
+    @staticmethod
     def _retrieval_count(context: str, marker: str) -> int:
         return len(re.findall(rf"^\[{re.escape(marker)}\d+\]", context or "", flags=re.M))
 
@@ -2363,11 +2458,7 @@ class AI(commands.Cog):
                 f"chunks={pdf_meta.get('selected_count', 0)} quotes={len(quote_evidence)} chars={len(answer)}",
                 flush=True,
             )
-            if len(answer) > MAX_DISCORD_LEN:
-                answer = answer[:MAX_DISCORD_LEN] + "\n\n*(đã rút gọn để vừa Discord; dùng /hvhn_debug_retrieval để xem thêm evidence)*"
-            embed = discord.Embed(title=title, description=answer, color=discord.Color.green())
-            embed.set_footer(text=f"Then trả lời {interaction.user.display_name} · thấy chỗ nào cần chỉnh, bấm nút góp ý giúp Then nhé.")
-            await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
+            await self._send_answer_embeds(interaction, title=title, answer=answer, full_prompt=full_prompt)
             print(f"[debug] final_answer_sent deterministic=True chars={len(answer)}", flush=True)
             return
         # Luon nhet cac trich dan/nhan dinh DA XAC MINH vao ngu canh khi co — ke ca intent CHAT
@@ -2413,12 +2504,7 @@ class AI(commands.Cog):
             if reason and "REASON_CODE:" not in answer:
                 answer = answer.rstrip() + f"\n\n`REASON_CODE: {reason}`"
 
-        if len(answer) > MAX_DISCORD_LEN:
-            answer = answer[:MAX_DISCORD_LEN] + "\n\n*(da rut gon de vua Discord)*"
-
-        embed = discord.Embed(title=title, description=answer, color=discord.Color.green())
-        embed.set_footer(text=f"Then trả lời {interaction.user.display_name} · thấy chỗ nào cần chỉnh, bấm nút góp ý giúp Then nhé.")
-        await interaction.followup.send(embed=embed, view=FeedbackView(self.bot, full_prompt, answer))
+        await self._send_answer_embeds(interaction, title=title, answer=answer, full_prompt=full_prompt)
         print(
             f"[debug] final_answer_sent insufficient={self._insufficient_answer(answer)} "
             f"chars={len(answer)} reason_code={'REASON_CODE:' in answer}",
