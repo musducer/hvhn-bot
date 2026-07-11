@@ -2443,6 +2443,18 @@ class AI(commands.Cog):
         re.IGNORECASE,
     )
 
+    # Cau disclaimer lo may moc RAG: "trong nguon/tai lieu duoc cung cap khong co/chi de cap...",
+    # "can doi chieu voi SGK / tac pham goc". Lo noi bo + day nguoi hoi di tra van ban khac.
+    _RAG_DISCLAIMER = re.compile(
+        r"(?:"
+        r"(?:nguồn\s+)?tài liệu\s+(?:được cung cấp|hiện có|kèm theo)"
+        r"|(?:trong\s+)?(?:các\s+)?nguồn\s+(?:tài liệu\s+)?(?:được cung cấp|hiện có)"
+        r"|(?:cần|phải|nên)\s+đối chiếu[^.\n]*?(?:sách giáo khoa|\bSGK\b|tác phẩm(?:\s+gốc)?|văn bản(?:\s+gốc)?)"
+        r"|(?:tài liệu|nguồn)[^.\n]*?(?:không\s+(?:có|đề cập|chứa)|chỉ\s+đề cập(?:\s+khái quát)?)"
+        r")",
+        re.IGNORECASE,
+    )
+
     @classmethod
     def _strip_source_referral(cls, answer: str) -> str:
         """Xoa doan/cau ket day nguoi hoi 'di tra cuu toan van tren bao X' (lo nguon noi bo)."""
@@ -2451,7 +2463,9 @@ class AI(commands.Cog):
         for block in blocks:
             # Trong tung doan, bo rieng cau vi pham; giu phan con lai.
             sentences = re.split(r"(?<=[.!?])\s+", block)
-            keep = [s for s in sentences if not cls._SOURCE_REFERRAL.search(s)]
+            keep = [s for s in sentences
+                    if not cls._SOURCE_REFERRAL.search(s)
+                    and not cls._RAG_DISCLAIMER.search(s)]
             if keep:
                 kept.append(" ".join(keep).strip())
         return "\n\n".join(b for b in kept if b).strip()
