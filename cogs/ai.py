@@ -1435,6 +1435,38 @@ class AI(commands.Cog):
         return {"quote": quote, "aggregate": aggregate, "document_only": document_only}
 
     @classmethod
+    def _context_off_subject(cls, query: str, plan, pdf_meta: dict) -> bool:
+        """True khi cau hoi neu ro tac gia/tac pham NHUNG cac doan truy xuat khong he
+        nhac toi chung -> kho tra ve tai lieu LAC tac pham (vd hoi Tuong Ve Huu ma tra
+        ve Chi Pheo). Chan de khong nhoi noi dung sai vao bai."""
+        subjects: list[str] = []
+        if plan.author_filter:
+            subjects.append(cls._plain_text(plan.author_filter))
+        # Ten tac pham dat trong ngoac kep moi loai (thang, cong, cong xoan).
+        for m in re.findall(r"[\"'“”‘’«»]([^\"'“”‘’«»]{2,60})[\"'“”‘’«»]", query or ""):
+            t = cls._plain_text(m).strip()
+            if len(t) >= 3:
+                subjects.append(t)
+        subjects = [s for s in subjects if s]
+        if not subjects:
+            return False  # khong ro chu de -> khong phan xet
+        chunks = pdf_meta.get("chunks") or []
+        if not chunks:
+            return False
+        haystack = cls._plain_text(" ".join(
+            (c.get("title") or "") + " " + (c.get("first_500") or "") + " " + (c.get("excerpt") or "")
+            for c in chunks
+        ))
+        for subj in subjects:
+            if subj in haystack:
+                return False
+            # ho tac gia (tu cuoi) cung tinh la khop, vd 'thiep' trong 'nguyen huy thiep'.
+            last = subj.split()[-1] if subj.split() else ""
+            if len(last) >= 4 and re.search(r"\b" + re.escape(last) + r"\b", haystack):
+                return False
+        return True
+
+    @classmethod
     def _retrieval_hit(cls, query: str, pdf_meta: dict) -> bool:
         terms = cls._query_terms(query)
         if not terms:
@@ -2117,6 +2149,23 @@ class AI(commands.Cog):
                 "Lo ten nguon noi bo va day nguoi hoi di kiem chung/tra cuu toan van tren bao/trang khac. "
                 "Bo han cau do; ket bai bang mot nhan dinh cua chinh minh, khong nhac ten bao/trang/tai lieu."
             )
+        # ==== CHE DO 'THU THU': liet ke/xep hang doan tai lieu thay vi TRA LOI cau hoi ====
+        librarian = (
+            "tu kho pdf", "kho pdf/hvhn", "noi dung uu tien tu kho", "cac doan lien quan",
+            "nen duoc uu tien su dung", "chua nhung cau trich nguyen van quan trong",
+            "uu tien su dung khi can dan chung", "cac doan p1", "cac doan p3",
+        )
+        lib_hits = [p for p in librarian if p in plain]
+        bracketless_p = bool(re.search(r"(?<![a-z])p\d+\s*,\s*p\d+", plain) or re.search(r"(?<![a-z])p\d+\s+va\s+p\d+", plain))
+        if lib_hits or bracketless_p:
+            defects.append(
+                "SAI NGHIEM TRONG: dang o che do 'thu thu' — tom tat/xep hang cac doan tai lieu (P1, P2, "
+                "'kho PDF/HVHN', 'nen uu tien su dung khi can dan chung') thay vi TRA LOI cau hoi. Vut bo hoan "
+                "toan loi liet ke do. Viet lai thanh MOT bai phan tich hoan chinh tra loi DUNG chi tiet/tac pham "
+                "duoc hoi, khong nhac P1/P2/kho PDF/tai lieu, khong ban ve 'nen dung doan nao'. Neu kho khong co "
+                "du lieu ve tac pham dang hoi thi tu phan tich bang kien thuc van hoc cua chinh minh — TUYET DOI "
+                "khong lap noi dung cua mot tac pham KHAC (vd dang hoi Tuong Ve Huu ma noi ve Chi Pheo)."
+            )
         # ==== SIET GIONG CHU VAN SON: chi soi bai phan tich van hoc dai (>=1200 ky tu van xuoi) ====
         if len(plain) >= 1200:
             # (1) Dao to bua lon rong nghia — cam theo LUAT 15(d).
@@ -2545,14 +2594,31 @@ class AI(commands.Cog):
                 kept.append(" ".join(keep).strip())
         return "\n\n".join(b for b in kept if b).strip()
 
+    # Dong meta lo may moc RAG: "Tom tat ... tu kho PDF/HVHN", "Cac doan lien quan khac",
+    # "noi dung uu tien tu kho", "cac doan P1/P2 ... nen duoc uu tien su dung khi can dan chung".
+    _LIBRARIAN_LINE = re.compile(
+        r"^\s*(?:"
+        r".*\bkho\s+PDF\b"
+        r"|.*\bPDF/HVHN\b"
+        r"|.*(?:nội dung|noi dung)\s+ưu tiên\s+từ\s+kho"
+        r"|(?:các|cac)\s+đoạn\s+(?:liên quan|lien quan)"
+        r"|.*\bP\d+\s+(?:và|va)\s+P\d+\b"
+        r"|.*(?:nên được|nen duoc)\s+ưu tiên\s+sử dụng"
+        r")\b.*$",
+        re.IGNORECASE,
+    )
+
     @classmethod
     def _strip_internal_markers(cls, answer: str) -> str:
         lines = []
         for line in answer.splitlines():
             line = re.sub(r"\s*\[(?:P|S|W)\d+\]", "", line)
+            # Marker doan tran khong ngoac ("P1", "P3, P4, P6"): chi xuat hien khi lo noi bo.
+            line = re.sub(r"(?<![A-Za-z])P\d+(?:\s*,\s*P\d+)*(?:\s+(?:và|va)\s+P\d+)?", "", line)
             line = re.sub(r"URL:\s*https?://\S+", "", line)
-            if cls._META_LINE.match(line.strip()):
-                continue  # bỏ dòng meta ("Dưới đây là phiên bản sửa đổi", "Tôi đã giữ nguyên...")
+            stripped = line.strip()
+            if cls._META_LINE.match(stripped) or cls._LIBRARIAN_LINE.match(stripped):
+                continue  # bỏ dòng meta / dòng "thủ thư" xếp hạng đoạn
             lines.append(line.rstrip())
         return cls._strip_source_referral("\n".join(lines).strip())
 
@@ -2574,6 +2640,11 @@ class AI(commands.Cog):
         if plan.genre == "NLXH":
             # NLXH khong dung dan chung/ly luan van hoc -> khong nhoi kho phe binh (vd Ba dinh cao Tho Moi).
             print("[debug] md_suppressed reason=NLXH", flush=True)
+            pdf_meta = dict(_empty_meta)
+        elif self._context_off_subject(user_prompt, plan, pdf_meta):
+            # Kho tra ve tai lieu LAC tac gia/tac pham dang hoi (vd hoi Tuong Ve Huu -> tra Chi Pheo).
+            # Bo han: thà đe model tra loi bang kien thuc rieng con hon nhoi noi dung sai tac pham.
+            print(f"[debug] md_suppressed reason=off_subject author={plan.author_filter!r} top_score={pdf_meta.get('top_score')}", flush=True)
             pdf_meta = dict(_empty_meta)
         elif (float(pdf_meta.get("top_score") or 0) < MD_MIN_RELEVANCE
               and not (profile["quote"] or profile["aggregate"]) and not plan.author_filter):
