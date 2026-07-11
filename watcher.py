@@ -888,8 +888,9 @@ async def _index_md_for_ai(path):
         return "db_failed"
     try:
         result = await index_md_path(DATABASE_URL, path)
-        print(f"[AI MD] {os.path.basename(path)} -> {result.get('passages', 0)} passage", flush=True)
-        await _set_runtime_status("ai_md_last_indexed", f"{result.get('title')} ({result.get('passages', 0)} passage)")
+        status = "indexed" if result.get("changed", True) else "unchanged"
+        print(f"[AI MD] {os.path.basename(path)} -> {result.get('passages', 0)} passage ({status})", flush=True)
+        await _set_runtime_status("ai_md_last_indexed", f"{result.get('title')} ({result.get('passages', 0)} passage, {status})")
         return "indexed"
     except Exception as exc:
         print(f"[AI MD] index_failed file={os.path.basename(path)} err={type(exc).__name__}: {exc}", flush=True)

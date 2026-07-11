@@ -1,8 +1,10 @@
 import inspect
 import unittest
+from unittest.mock import patch
 from md_knowledge import parse_markdown
 from md_knowledge import MD_KNOWLEDGE_SCHEMA
 from md_knowledge import build_md_context
+from md_knowledge import index_md_bytes
 from md_knowledge import index_md_path
 
 
@@ -136,6 +138,30 @@ class IndexMdPathTest(unittest.TestCase):
         src = inspect.getsource(index_md_path)
         self.assertIn("index_md_bytes", src)
         self.assertIn("connect", src)
+
+
+class IndexMdBytesTest(unittest.IsolatedAsyncioTestCase):
+    async def test_unchanged_document_returns_existing_counts(self):
+        data = b"# Title\n\nBody"
+
+        class FakeDb:
+            async def fetchrow(self, *args):
+                from md_knowledge import _content_hash
+                return {"content_hash": _content_hash(data), "author": "",
+                        "passage_count": 839, "quote_count": 180}
+
+            async def execute(self, *args):
+                raise AssertionError("unchanged document should not rewrite passages")
+
+        async def noop_schema(db):
+            return None
+
+        with patch("md_knowledge.ensure_md_schema", noop_schema):
+            result = await index_md_bytes(FakeDb(), "Title", data, source="same.md")
+
+        self.assertFalse(result["changed"])
+        self.assertEqual(result["passages"], 839)
+        self.assertEqual(result["quotes"], 180)
 
 
 if __name__ == "__main__":

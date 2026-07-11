@@ -401,7 +401,15 @@ async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", autho
     await ensure_md_schema(db)
     doc_key = (source or title or _content_hash(data)[:16]).strip().lower()
     content_hash = _content_hash(data)
-    current = await db.fetchrow("SELECT content_hash, author FROM ai_md_documents WHERE doc_key = $1", doc_key)
+    current = await db.fetchrow(
+        """
+        SELECT d.content_hash, d.author, d.passage_count,
+               (SELECT count(*) FROM ai_md_quotes q WHERE q.doc_key = d.doc_key) AS quote_count
+        FROM ai_md_documents d
+        WHERE d.doc_key = $1
+        """,
+        doc_key,
+    )
     parsed = parse_markdown(data.decode("utf-8", errors="replace"))
     doc_title = title or parsed["title"] or doc_key
     doc_source = source or parsed.get("source", "")
@@ -411,7 +419,9 @@ async def index_md_bytes(db, title: str, data: bytes, *, source: str = "", autho
         # Noi dung khong doi nhung tac gia co the moi (them qua Form / metadata) -> cap nhat rieng.
         if doc_author and (current["author"] or "") != doc_author:
             await db.execute("UPDATE ai_md_documents SET author = $2 WHERE doc_key = $1", doc_key, doc_author)
-        return {"doc_key": doc_key, "title": doc_title, "author": doc_author, "passages": 0, "quotes": 0, "changed": False}
+        return {"doc_key": doc_key, "title": doc_title, "author": doc_author,
+                "passages": int(current["passage_count"] or 0),
+                "quotes": int(current["quote_count"] or 0), "changed": False}
     async def _write_once():
         async with db.acquire() if hasattr(db, "acquire") else _null_ctx(db) as conn:
             async with conn.transaction():
