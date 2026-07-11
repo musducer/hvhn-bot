@@ -665,6 +665,16 @@ class Formatter:
 
 
 class Scaffold:
+    _COMPARE = (
+        "Day la cau hoi SO SANH: khong viet theo kieu giong nhau/khac nhau chung chung.\n"
+        "Voi moi truc so sanh, phai di theo nhip A -> B -> diem gap/lech: "
+        "(1) lam ro khai niem/truc so sanh; (2) tac pham A: chi tiet/hinh tuong/tinh huong cu the -> y nghia; "
+        "(3) tac pham B: chi tiet/hinh tuong/tinh huong cu the -> y nghia; "
+        "(4) diem gap va do lech giua hai tac pham; (5) danh gia nang cao.\n"
+        "Neu de bai co cac khai niem nhu chuc nang, hien thuc, sang tao, phai giai thich ngan tung khai niem "
+        "roi moi ap vao tac pham. Khong neu hoan canh sang tac, trai nghiem tac gia, y do tac gia neu context "
+        "khong cung cap bang chung."
+    )
     _NLXH_THUONG = (
         "Mở bài: dẫn dắt tự nhiên rồi nêu thẳng vấn đề nghị luận.\n"
         "Thân bài: (1) Giải thích từ khóa/khái niệm cốt lõi; (2) Bàn luận — khẳng định "
@@ -708,6 +718,19 @@ class Scaffold:
 
     @classmethod
     def for_plan(cls, plan: RAGPlan) -> str:
+        if plan.intent == "COMPARE":
+            if plan.genre == "NONE":
+                return (
+                    "KHUNG TU DUY LAP LUAN:\n"
+                    "Nhiem vu: tra loi theo truc so sanh co dan chung cu the; tranh van mau rong.\n"
+                    f"{cls._COMPARE}"
+                )
+            skeleton = cls._skeleton(plan)
+            return (
+                "KHUNG TU DUY LAP LUAN:\n"
+                "Nhiem vu: lap dan y/tra loi theo truc so sanh, moi y phai co bang chung van ban va loi binh rieng.\n"
+                f"{cls._COMPARE}\n{skeleton}"
+            )
         if plan.genre == "NONE":
             return ""
         skeleton = cls._skeleton(plan)
@@ -1541,6 +1564,12 @@ class AI(commands.Cog):
             "- Khong hien ma noi bo [P1], [S1], [W1] hoac URL dai; neu can, chi neu ten tai lieu/nguon ngan gon.\n"
             "- Tra loi thang vao cau hoi, sau do moi ghi can cu/nguon neu that su can.\n"
             "- Khong dung web neu kho HVHN da du; web chi bo sung thong tin thoi su/kiem chung.\n\n"
+            "CHUAN CHAT LUONG HVHN:\n"
+            "- Moi luan diem van hoc phai neo vao chi tiet van ban, hinh tuong, nhan vat, tinh huong, giong dieu, ket cau hoac bieu tuong cu the.\n"
+            "- Cam cau rong neu khong co phan tich rieng: 'thong diep sau sac', 'gia tri y nghia', 'ngon ngu giau hinh anh', 'the hien su sang tao phong phu'.\n"
+            "- Khong noi 'tac gia muon nhan manh', 'duoc viet dua tren trai nghiem cua tac gia', 'hoan canh sang tac' neu context khong cap bang chung.\n"
+            "- Voi cau hoi so sanh: moi truc phai co A -> B -> diem gap/lech; khong gom hai tac pham vao mot nhan xet chung.\n"
+            "- Truoc khi chot, tu kiem: co dan chung cu the cho tung tac pham chua, co suy doan ngoai context khong, co cau nao co the gan cho moi tac pham khong.\n\n"
             "YEU CAU NGUOI DUNG:\n"
             f"{prompt}"
         )
@@ -1571,6 +1600,32 @@ class AI(commands.Cog):
         has_dump_intro = any(phrase in lowered[:350] for phrase in source_dump_phrases)
         has_many_source_bullets = len(re.findall(r"^\s*[-•]\s+.*\[(?:w|W)\d+\]", answer, re.M)) >= 3
         return has_dump_intro or has_many_source_bullets
+
+    @staticmethod
+    def _looks_like_generic_literary_answer(answer: str) -> bool:
+        plain = AI._plain_text(answer or "")
+        if len(plain) < 250:
+            return False
+        generic_phrases = (
+            "thong diep sau sac",
+            "gia tri va y nghia",
+            "gia tri y nghia",
+            "ngon ngu giau hinh anh",
+            "su sang tao phong phu",
+            "ve cuoc song con nguoi",
+            "moi quan he giua con nguoi voi thien nhien",
+            "tac gia muon nhan manh",
+            "dua tren nhung trai nghiem",
+        )
+        hits = sum(1 for phrase in generic_phrases if phrase in plain)
+        if hits < 2:
+            return False
+        evidence_markers = (
+            "nhan vat", "hinh tuong", "tinh huong", "chi tiet", "bieu tuong", "giong dieu",
+            "ket cau", "santiago", "ca kiem", "bien ca", "dan ca map", "di san", "rung",
+        )
+        marker_hits = sum(1 for marker in evidence_markers if marker in plain)
+        return marker_hits < 3
 
     @staticmethod
     def _pdf_reference_lines(knowledge: str) -> list[tuple[str, str]]:
@@ -1632,6 +1687,10 @@ class AI(commands.Cog):
             "Hay giu cau dung, xoa hoac viet lai moi khang dinh khong du can cu thanh 'chua du du lieu de khang dinh'. "
             "Neu BANG CHUNG RUT GON co thong tin lien quan, khong duoc bien cau tra loi thanh tu choi chung chung; hay sua de tra loi bang evidence. "
             "Tuyet doi khong them tac gia/tac pham/nam/trich dan/nhan dinh moi. "
+            "Dong thoi tu cham chat luong nhu giao vien HSG: neu cau tra loi chung chung, lap lai tu khoa, "
+            "thieu chi tiet van ban cho tung tac pham, hoac co cau kieu 'thong diep sau sac/gia tri y nghia/ngon ngu giau hinh anh' "
+            "ma khong phan tich rieng, hay viet lai thanh lap luan co dan chung cu the. "
+            "Voi cau hoi so sanh, moi truc phai co tac pham A, tac pham B, diem gap va diem lech. "
             "Khong hien ma noi bo [P1]/[S1]/[W1] hoac URL dai. "
             "CHI tra ve NOI DUNG cau tra loi da sua cho hoc sinh; TUYET DOI khong kem loi dan/nhan xet "
             "ve chinh cau tra loi (khong viet 'Duoi day la phien ban sua doi', 'Cau tra loi cua ban da tot', "
@@ -1676,10 +1735,14 @@ class AI(commands.Cog):
         if RETRIEVAL_DEBUG:
             print(f"[debug] final_prompt\n{full_prompt}", flush=True)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.05)
-        needs_repair = bool(answer) and self._looks_like_source_dump(answer)
+        needs_repair = bool(answer) and (
+            self._looks_like_source_dump(answer) or self._looks_like_generic_literary_answer(answer)
+        )
         if answer and needs_repair:
             repair_prompt = (
-                "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon. "
+                "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon, "
+                "khong van mau rong. Moi luan diem van hoc phai co chi tiet/hinh tuong/tinh huong/bieu tuong cu the "
+                "va loi binh rieng. Voi cau hoi so sanh, moi truc phai co A -> B -> diem gap/lech. "
                 "Khong them thong tin moi ngoai context. Neu du lieu khong du, noi ro chua du du lieu de khang dinh.\n\n"
                 f"CAU TRA LOI CAN SUA:\n{answer}"
             )

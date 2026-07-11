@@ -1,9 +1,13 @@
 import unittest
-from cogs.ai import Scaffold, RAGPlan
+from cogs.ai import Scaffold, RAGPlan, _plain_ascii
 
 
 def _plan(genre, level="THUONG", write_essay=False):
     return RAGPlan(intent="ANALYSIS", genre=genre, level=level, write_essay=write_essay)
+
+
+def _compare_plan(genre="NONE", level="THUONG"):
+    return RAGPlan(intent="COMPARE", genre=genre, level=level)
 
 
 class ScaffoldTest(unittest.TestCase):
@@ -40,6 +44,17 @@ class ScaffoldTest(unittest.TestCase):
     def test_write_essay_switches_to_essay(self):
         block = Scaffold.for_plan(_plan("NLVH", write_essay=True))
         self.assertIn("bài văn hoàn chỉnh", block)
+
+    def test_compare_has_scaffold_even_without_genre(self):
+        block = Scaffold.for_plan(_compare_plan())
+        self.assertIn("SO SANH", block)
+        self.assertIn("A -> B", block)
+        self.assertIn("hoan canh sang tac", block)
+
+    def test_compare_nlvh_keeps_literary_depth(self):
+        block = Scaffold.for_plan(_compare_plan("NLVH", "HSG"))
+        self.assertIn("SO SANH", block)
+        self.assertIn("ly luan van hoc", _plain_ascii(block).lower())
 
 
 if __name__ == "__main__":
