@@ -451,7 +451,7 @@ async def _fetch_discord_jobs():
             _mark_db_success("watcher", started)
 
 
-async def _mark_discord_job(job_id, status, error=None):
+async def _mark_discord_job(job_id, status, error=None, clear_file=False):
     global _db_acquire_count, _db_release_count
     if not DATABASE_URL:
         return
@@ -465,17 +465,21 @@ async def _mark_discord_job(job_id, status, error=None):
         async with pool.acquire() as conn:
             _db_acquire_count += 1
             try:
+                # clear_file=True khi job xong: xoá file_data BYTEA để không giữ PDF vĩnh viễn
+                # trong Postgres (B4) — cũng chặn re-materialize ghi trùng nếu job bị retry.
                 await _db_call(
                     "mark_job_update",
                     conn.execute,
                     """
                     UPDATE hvhn_doc_jobs
-                    SET status = $2, error = $3, processed_at = now()
+                    SET status = $2, error = $3, processed_at = now(),
+                        file_data = CASE WHEN $4 THEN NULL ELSE file_data END
                     WHERE id = $1
                     """,
                     job_id,
                     status,
                     error,
+                    clear_file,
                 )
                 ok = True
             finally:
@@ -500,8 +504,11 @@ def _materialize_discord_job(job):
         filename = job["file_name"] or f"discord_tai_lieu_{job['id']}.pdf"
         if not filename.lower().endswith(".pdf"):
             raise ValueError("Tài liệu từ Discord không phải PDF")
+        data = bytes(job["file_data"] or b"")
+        if not data:
+            return None  # file_data đã bị xoá (job đã xử lý trước) -> đánh done, không ghi trùng
         target = _unique_path(INCOMING_DOCS, filename)
-        _write_atomic(target, bytes(job["file_data"] or b""))
+        _write_atomic(target, data)
         return target
     elif job_type == "add_document_url":
         url = (job["text_payload"] or "").strip()
@@ -511,9 +518,12 @@ def _materialize_discord_job(job):
         filename = job["file_name"] or f"bot_tai_lieu_{job['id']}.pdf"
         if not filename.lower().endswith(".pdf"):
             raise ValueError("Tài liệu bot từ Discord không phải PDF")
+        data = bytes(job["file_data"] or b"")
+        if not data:
+            return None  # đã xử lý trước (file_data đã xoá) -> đánh done, không ghi trùng
         os.makedirs(BOT_DOCS_DIR, exist_ok=True)
         target = _unique_path(BOT_DOCS_DIR, filename)
-        _write_atomic(target, bytes(job["file_data"] or b""))
+        _write_atomic(target, data)
         return target
     elif job_type == "add_bot_document_url":
         url = (job["text_payload"] or "").strip()
@@ -547,7 +557,7 @@ async def _xu_ly_don_discord():
             final_status = "done"
             if path and str(path).lower().endswith(".pdf"):
                 final_status = await _index_pdf_for_ai(path)
-            await _mark_discord_job(job["id"], final_status)
+            await _mark_discord_job(job["id"], final_status, clear_file=True)
             print(f"[DISCORD] don #{job['id']} -> {final_status}", flush=True)
         except Exception as exc:
             status = "download_failed" if "download_failed" in str(exc).lower() else "error"
@@ -618,6 +628,10 @@ async def _sync_runtime_status():
             _db_acquire_count += 1
             try:
                 await _db_call("runtime_status_schema", conn.execute, DOC_JOB_SCHEMA)
+                # B5: gói toàn bộ cập nhật cache vào 1 transaction (TRUNCATE+INSERT atomic) —
+                # tránh dashboard rỗng tạm thời nếu lỗi mạng xảy ra giữa TRUNCATE và INSERT.
+                _tr = conn.transaction()
+                await _tr.start()
                 for key, value in status.items():
                     await _upsert_runtime_status(conn, key, value)
                 for key, value in _db_health_snapshot().items():
@@ -703,6 +717,7 @@ async def _sync_runtime_status():
                             [(d.get("doc_name") or "", int(d.get("client_count") or 0)) for d in sheet_docs if d.get("doc_name")],
                         )
                     await _upsert_runtime_status(conn, "sheet_status_exported_at", str(snapshot.get("exported_at") or ""))
+                await _tr.commit()  # B5: chốt transaction — mọi cache đổi cùng lúc hoặc không đổi gì
                 ok = True
             finally:
                 _db_release_count += 1
