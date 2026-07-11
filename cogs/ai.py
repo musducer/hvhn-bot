@@ -1617,7 +1617,10 @@ class AI(commands.Cog):
             "Hay giu cau dung, xoa hoac viet lai moi khang dinh khong du can cu thanh 'chua du du lieu de khang dinh'. "
             "Neu BANG CHUNG RUT GON co thong tin lien quan, khong duoc bien cau tra loi thanh tu choi chung chung; hay sua de tra loi bang evidence. "
             "Tuyet doi khong them tac gia/tac pham/nam/trich dan/nhan dinh moi. "
-            "Khong hien ma noi bo [P1]/[S1]/[W1] hoac URL dai. Tra lai ban da sua, tieng Viet.\n\n"
+            "Khong hien ma noi bo [P1]/[S1]/[W1] hoac URL dai. "
+            "CHI tra ve NOI DUNG cau tra loi da sua cho hoc sinh; TUYET DOI khong kem loi dan/nhan xet "
+            "ve chinh cau tra loi (khong viet 'Duoi day la phien ban sua doi', 'Cau tra loi cua ban da tot', "
+            "'Toi da giu nguyen/them...'). Tra lai ban da sua, tieng Viet.\n\n"
             f"CAU HOI/PROMPT:\n{prompt}\n\n"
             f"BANG CHUNG RUT GON:\n{compact_evidence or 'KHONG CO'}\n\n"
             f"CAU TRA LOI CAN KIEM:\n{compact_answer}"
@@ -1804,12 +1807,25 @@ class AI(commands.Cog):
         return "\n".join(lines).strip()
 
 
-    @staticmethod
-    def _strip_internal_markers(answer: str) -> str:
+    # Lời dẫn/nhận xét META do bước verifier/refine đôi khi chèn vào — phải lọc khỏi câu trả lời cuối.
+    _META_LINE = re.compile(
+        r"^\s*(?:"
+        r"(?:dưới đây|sau đây)\s+là.*(?:phiên bản|câu trả lời|bản\s+(?:sửa|chỉnh|cải thiện))"
+        r"|câu trả lời\s+(?:của bạn|trên|này|ban đầu).*(?:tốt|cải thiện|sửa|chỉnh|hoàn thiện|đáng)"
+        r"|(?:tôi|mình)\s+(?:đã|xin|sẽ)?\s*(?:giữ nguyên|thêm|bổ sung|sửa|chỉnh|cải thiện|viết lại|điều chỉnh|tinh chỉnh)"
+        r"|(?:phiên bản|bản)\s+(?:sửa đổi|cải thiện|chỉnh sửa|hoàn thiện)"
+        r")\b.*$",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _strip_internal_markers(cls, answer: str) -> str:
         lines = []
         for line in answer.splitlines():
             line = re.sub(r"\s*\[(?:P|S|W)\d+\]", "", line)
             line = re.sub(r"URL:\s*https?://\S+", "", line)
+            if cls._META_LINE.match(line.strip()):
+                continue  # bỏ dòng meta ("Dưới đây là phiên bản sửa đổi", "Tôi đã giữ nguyên...")
             lines.append(line.rstrip())
         return "\n".join(lines).strip()
 
