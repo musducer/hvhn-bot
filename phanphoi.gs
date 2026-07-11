@@ -543,6 +543,22 @@ function capQuyenFolderKhachHangTuDong() {
   const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
   const granted = {};
 
+  // Chi cap quyen cho khach CON HAN. Truoc day cap cho moi khach khong xet han ->
+  // khach het han (da bi kiemTraHetHan go) bi cap lai o vong phanPhoi ke tiep.
+  const now = _now();
+  const conHan = {}; // email(lower) -> con han?
+  const reg = ensureRegistry();
+  if (reg.getLastRow() > 1) {
+    reg.getRange(2, 1, reg.getLastRow() - 1, 6).getValues().forEach(r => {
+      const email = String(r[1] || '').toLowerCase();
+      if (!email) return;
+      const expiry = r[3];
+      const status = r[5];
+      const ok = !!expiry && new Date(expiry).getTime() > now.getTime() && status !== 'Đã gỡ quyền';
+      conHan[email] = conHan[email] || ok; // nhieu dong cung email: chi can 1 dong con han
+    });
+  }
+
   ss.getSheets().forEach(sheet => {
     if (isSystemTab(sheet.getName())) return;
     const data = sheet.getDataRange().getValues();
@@ -556,6 +572,9 @@ function capQuyenFolderKhachHangTuDong() {
       const key = String(name) + '|' + String(email).toLowerCase();
       if (granted[key]) continue;
       granted[key] = true;
+
+      // Khach het han -> KHONG cap lai quyen (kiemTraHetHan lo viec go).
+      if (!conHan[String(email).toLowerCase()]) break;
 
       const folders = destRoot.getFoldersByName(name);
       if (folders.hasNext()) _ensureOnlyViewer(folders.next(), email);
@@ -599,7 +618,11 @@ function ensureTraiNghiem() {
   ]]);
   kh.getRange(1, 1, 1, 7).setBackground('#8e24aa').setFontColor('#fff').setFontWeight('bold');
   kh.setFrozenRows(1);
-  if (kh.getLastRow() > 1) kh.getRange(2, TRIAL_DEL_COL, kh.getLastRow() - 1, 1).insertCheckboxes();
+  if (kh.getLastRow() > 1) {
+    kh.getRange(2, TRIAL_DEL_COL, kh.getLastRow() - 1, 1).insertCheckboxes();
+    // Ngày cấp / Ngày hết hạn: ép 24 GIỜ (HH) — mac dinh locale la 12h nen 21:34 hien nham 9:34.
+    kh.getRange(2, 3, kh.getLastRow() - 1, 2).setNumberFormat('dd/mm/yyyy HH:mm:ss');
+  }
 
   let tl = ss.getSheetByName(TRIAL_DOC_TAB);
   if (!tl) tl = ss.insertSheet(TRIAL_DOC_TAB);
@@ -1035,7 +1058,7 @@ function decorateRegistry(reg) {
 
   if (lastRow > 1) {
     const n = lastRow - 1;
-    reg.getRange(2, 3, n, 2).setNumberFormat('dd/mm/yyyy hh:mm'); // cột ngày (có giờ)
+    reg.getRange(2, 3, n, 2).setNumberFormat('dd/mm/yyyy HH:mm:ss'); // cột ngày (24 GIỜ; hh=12h gây lệch 21:34->9:34)
     reg.getRange(2, HOURS_COL, n, 1).setNumberFormat('0').setHorizontalAlignment('center'); // số giờ nguyên
     reg.getRange(2, RENEW_COL, n, 1).insertCheckboxes();      // ô gia hạn
     reg.getRange(2, DEL_COL, n, 1).insertCheckboxes();        // ô xóa khách

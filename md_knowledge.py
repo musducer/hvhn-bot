@@ -289,7 +289,13 @@ async def ensure_md_schema(db) -> None:
         pass
     # pgvector: tra cuu ngu nghia. Neu khong co ext thi bo qua (hybrid tu dong lui ve tu khoa).
     try:
-        from md_embeddings import active_dim, active_signature
+        from md_embeddings import active_dim, active_signature, has_keys
+        # AN TOAN: process KHONG co embedding key (vd watcher tren PC) TUYET DOI khong duoc
+        # dong vao schema embedding — truoc day no lam active_signature() mac dinh 'gemini:768'
+        # roi DROP cot, xoa sach embedding cua provider that (Jina/Voyage) do bot Render tao.
+        # Chi tien trinh CO key (bot/backfill) moi so huu migration embedding.
+        if not has_keys():
+            return
         dimension = active_dim()
         signature = active_signature()
         await db.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -336,10 +342,12 @@ async def has_passage_embeddings(db) -> bool:
 
 
 async def count_missing_embeddings(db) -> int:
+    # Tra -1 khi query loi (vd chua co cot embedding) — KHONG tra 0 gia (0 nghia la "da xong het").
     try:
         return int(await db.fetchval("SELECT count(*) FROM ai_md_passages WHERE embedding IS NULL") or 0)
-    except Exception:
-        return 0
+    except Exception as exc:
+        print(f"[md] count_missing_embeddings_error {exc}", flush=True)
+        return -1
 
 
 async def backfill_embeddings(db, embed_fn, *, batch: int = 40, max_passages: int = 5000,

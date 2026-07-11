@@ -363,9 +363,10 @@ class IntentClassifier:
 class Planner:
     @staticmethod
     def author_filter(message: str) -> str:
+        # \.? sau moi token de bat ten viet tat co dau cham: "A. Camus", "F. Kafka".
         patterns = [
-            r"(?:của|cua)\s+([A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*(?:\s+[A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*){0,4})",
-            r"(?:tác giả|tac gia)\s+([A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*(?:\s+[A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*){0,4})",
+            r"(?:của|cua)\s+([A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*\.?(?:\s+[A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*\.?){0,4})",
+            r"(?:tác giả|tac gia)\s+([A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*\.?(?:\s+[A-ZÀ-ỸĐ][\wÀ-ỹĐđ]*\.?){0,4})",
         ]
         for pattern in patterns:
             match = re.search(pattern, message or "")
@@ -531,13 +532,30 @@ class QuoteExtractor:
             return name, 0.7
         return cls.UNKNOWN, 0.0
 
+    @staticmethod
+    def _author_matches(requested_plain: str, author_plain: str) -> bool:
+        # Khop bien the ten: "Albert Camus" == "A. Camus" == "A.Camus" (cung ho),
+        # nhung KHONG nham "Nam Cao" voi "Cao Ba Quat" (chi chung 1 token giua).
+        if not requested_plain:
+            return True
+        if requested_plain == author_plain:
+            return True
+        rt = [t for t in re.split(r"[^0-9a-zà-ỹđ]+", requested_plain) if len(t) >= 2]
+        at = [t for t in re.split(r"[^0-9a-zà-ỹđ]+", author_plain) if len(t) >= 2]
+        if not rt or not at:
+            return False
+        if rt[-1] == at[-1]:            # cung HO (token cuoi)
+            return True
+        rs, as_ = set(rt), set(at)
+        return rs <= as_ or as_ <= rs  # ten nay la tap con ten kia (vd viet tat)
+
     @classmethod
     def extract(cls, pdf_meta: dict, plan: RAGPlan, query: str) -> list[QuoteEvidence]:
         requested_plain = _rag_plain(plan.author_filter)
         evidences: list[QuoteEvidence] = []
         for fact in pdf_meta.get("quotes") or []:
             author = (fact.get("author") or cls.UNKNOWN).strip() or cls.UNKNOWN
-            if requested_plain and _rag_plain(author) != requested_plain:
+            if requested_plain and not cls._author_matches(requested_plain, _rag_plain(author)):
                 continue
             quote = re.sub(r"\s+", " ", fact.get("quote") or "").strip()
             if not quote:
@@ -559,7 +577,7 @@ class QuoteExtractor:
             spans = cls.quote_spans(text)
             for span in spans:
                 author, confidence = cls.infer_author(text, span)
-                if requested_plain and _rag_plain(author) != requested_plain:
+                if requested_plain and not cls._author_matches(requested_plain, _rag_plain(author)):
                     continue
                 score = int(confidence * 100) + AI._unit_score(query, span.quote)
                 evidences.append(QuoteEvidence(

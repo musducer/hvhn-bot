@@ -70,7 +70,9 @@ def active_signature() -> str:
         return f"jina:{_JINA_MODEL}:{_JINA_DIM}"
     if provider == "voyage":
         return f"voyage:{_VOYAGE_MODEL}:{_VOYAGE_DIM}"
-    return f"gemini:{_GEMINI_DIM}"
+    if provider == "gemini":
+        return f"gemini:{_GEMINI_DIM}"
+    return ""  # khong co key -> khong dinh danh provider (tranh gia dinh gemini nham xoa embedding)
 
 
 def backfill_pace_seconds() -> float:
