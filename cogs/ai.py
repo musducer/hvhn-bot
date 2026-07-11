@@ -28,8 +28,8 @@ VERIFIER_EVIDENCE_MAX_CHARS = 6000
 # Sampling cho nhanh sinh cau tra loi VAN HOC chinh: noi rong de van co chat,
 # giau tu vung, khong khô/lap; do dai du de phan tich sau. Cac nhanh factual/
 # verifier van giu mac dinh chat (temp thap, top_p 0.4) de khong tang ao giac.
-LIT_TEMPERATURE = float(os.getenv("HVHN_LIT_TEMPERATURE", "0.6"))
-LIT_TOP_P = float(os.getenv("HVHN_LIT_TOP_P", "0.92"))
+LIT_TEMPERATURE = float(os.getenv("HVHN_LIT_TEMPERATURE", "0.7"))
+LIT_TOP_P = float(os.getenv("HVHN_LIT_TOP_P", "0.95"))
 LIT_MAX_TOKENS = int(os.getenv("HVHN_LIT_MAX_TOKENS", "3000"))
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 # Duoi nguong nay coi nhu truy xuat .md lac de -> khong nhoi vao context (tranh chep tai lieu khong lien quan).
@@ -913,11 +913,14 @@ class AI(commands.Cog):
         temperature: float = 0.2,
         top_p: float = 0.4,
         max_tokens: int | None = None,
+        prefer_rich_style: bool = False,
     ) -> str | None:
         errors: list[str] = []
         prompt_chars = len(prompt) + len(system_prompt)
         prompt_tokens = self._estimated_tokens(prompt, system_prompt)
-        prefer_gemini = prompt_chars > GROQ_SAFE_PROMPT_CHARS and bool(self.gemini_keys)
+        # prefer_rich_style: cau tra loi van hoc can chat van -> uu tien Gemini vi nhanh Groq
+        # phai cat gan het chi thi van phong + vut BONUS few-shot (gioi han context), van se kho.
+        prefer_gemini = (prompt_chars > GROQ_SAFE_PROMPT_CHARS or prefer_rich_style) and bool(self.gemini_keys)
         print(
             "[ai-api] "
             f"event=generate_start groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)} "
@@ -1686,6 +1689,9 @@ class AI(commands.Cog):
         wrong_device_patterns = (
             "nhung so sanh nay giup",
             "nhung bien phap tu tu nay giup tao ra mot khong gian tho rong lon",
+            # "nay day... nay day" la diep ngu/liet ke, khong phai doi xung — loi goi sai thu phap hay gap.
+            "bien phap doi xung",
+            "phep doi xung",
         )
         if any(pattern in plain for pattern in wrong_device_patterns):
             return True
@@ -1725,6 +1731,10 @@ class AI(commands.Cog):
             "rat giau hinh anh",
             "rat sau sac",
             "co gia tri",
+            "tho mong va bay bong",
+            "tao nen mot",
+            "day la mot cach the hien",
+            "muon gui den nguoi doc thong diep",
         )
         dry_hits = sum(1 for marker in dry_markers if marker in plain)
         vivid_markers = (
@@ -1734,6 +1744,42 @@ class AI(commands.Cog):
         )
         vivid_hits = sum(1 for marker in vivid_markers if marker in plain)
         return dry_hits >= 3 and vivid_hits < 2
+
+    @staticmethod
+    def _repeated_phrase_defects(answer: str) -> list[str]:
+        """Bat cac cau/cum bi lap gan nguyen van trong cau tra loi (loi 'dan cung mot ket luan
+        sau moi dan chung' + 'ket bai chep lai mo bai'). Tra ve danh sach cum bi lap de nhet
+        vao repair prompt cho model biet dich danh phai viet lai cho nao."""
+        plain = AI._plain_text(answer or "")
+        if len(plain) < 300:
+            return []
+        # Bo phan trich dan (tho lap "nay day..." la co y cua tac gia, khong phai loi cua bot).
+        # Dung QuoteExtractor de ghep cap ngoac dung; regex don gian se coi dau dong " nhu dau mo
+        # moi va nuot luon van xuoi giua hai trich dan.
+        without_quotes = answer
+        for span in sorted(QuoteExtractor.quote_spans(answer), key=lambda s: s.start, reverse=True):
+            without_quotes = without_quotes[:span.start] + " " + without_quotes[span.end:]
+        sentences = [s.strip() for s in re.split(r"[.!?\n]+", without_quotes) if len(s.strip()) >= 25]
+        norm = [re.sub(r"\s+", " ", AI._plain_text(s)) for s in sentences]
+        defects: list[str] = []
+        seen: set[str] = set()
+        # 1) Cau gan trung nhau: so shingle 8-tu giua moi cap cau.
+        def shingles(s: str) -> set[str]:
+            words = s.split()
+            return {" ".join(words[i:i + 8]) for i in range(len(words) - 7)}
+        shingle_sets = [shingles(s) for s in norm]
+        for i in range(len(norm)):
+            if not shingle_sets[i]:
+                continue
+            for j in range(i + 1, len(norm)):
+                common = shingle_sets[i] & shingle_sets[j]
+                if common:
+                    key = min(common)
+                    if key not in seen:
+                        seen.add(key)
+                        defects.append(sentences[i][:160])
+                    break
+        return defects[:5]
 
     @staticmethod
     def _pdf_reference_lines(knowledge: str) -> list[tuple[str, str]]:
@@ -1856,17 +1902,30 @@ class AI(commands.Cog):
             temperature=LIT_TEMPERATURE,
             top_p=LIT_TOP_P,
             max_tokens=LIT_MAX_TOKENS,
+            prefer_rich_style=True,
         )
         evidence_for_quote_check = "\n\n".join(part for part in (knowledge, web_context) if part)
+        repeated_defects = self._repeated_phrase_defects(answer or "")
         needs_repair = bool(answer) and (
             self._looks_like_source_dump(answer)
             or self._looks_like_generic_literary_answer(answer)
             or self._looks_like_weak_style_analysis(answer)
             or self._looks_like_dry_literary_style(answer)
             or self._has_unverified_long_quotes(answer, evidence_for_quote_check)
+            or bool(repeated_defects)
         )
         if answer and needs_repair:
+            repetition_note = ""
+            if repeated_defects:
+                listed = "\n".join(f"  - \"{d}\"" for d in repeated_defects)
+                repetition_note = (
+                    "LOI LAP PHAT HIEN DUOC (nghiem trong): cac cau/y sau xuat hien GAN NGUYEN VAN "
+                    "nhieu lan trong bai. Moi lan chi duoc noi mot y MOT LAN; sau moi dan chung phai "
+                    "rut ra mot phat hien RIENG cho dan chung do, khong dan lai cung ket luan; ket bai "
+                    "phai nang len tam khai quat moi chu khong chep lai mo bai:\n" + listed + "\n"
+                )
             repair_prompt = (
+                repetition_note +
                 "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon, "
                 "khong van mau rong. Moi luan diem van hoc phai co chi tiet/hinh tuong/tinh huong/bieu tuong cu the "
                 "va loi binh rieng. Voi cau hoi phong cach tac gia qua mot bai tho, phai co luan de phong cach, "
@@ -1886,6 +1945,7 @@ class AI(commands.Cog):
                 temperature=LIT_TEMPERATURE,
                 top_p=LIT_TOP_P,
                 max_tokens=LIT_MAX_TOKENS,
+                prefer_rich_style=True,
             )
             if repaired:
                 answer = repaired
