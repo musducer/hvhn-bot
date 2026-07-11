@@ -760,18 +760,10 @@ async def _set_runtime_status(key, value):
 
 
 async def _index_pdf_for_ai(path):
-    if not DATABASE_URL:
-        return "db_failed"
-    try:
-        result = await index_pdf_path(DATABASE_URL, path)
-        status = "zero_chunks" if result["chunks"] == 0 else "indexed"
-        print(f"[AI PDF] {os.path.basename(path)} -> {result['chunks']} doan status={status}", flush=True)
-        await _set_runtime_status("ai_pdf_last_indexed", f"{result['title']} ({result['chunks']} doan, {status})")
-        return status
-    except Exception as exc:
-        print(f"[AI PDF] db_failed/index_failed file={os.path.basename(path)} err={type(exc).__name__}: {exc}", flush=True)
-        traceback.print_exc()
-        return "db_failed"
+    # C3: NGỪNG index PDF vào kho AI (ai_pdf_*). AI hiện chỉ đọc kho .md (ai_md_*), nên OCR/index
+    # PDF là công việc thừa + tốn DB. Pipeline render + phân phối PDF cho khách KHÔNG bị ảnh hưởng
+    # (đường xử lý riêng). Trả 'done' để job Discord vẫn hoàn tất.
+    return "done"
 
 
 async def _remove_pdf_from_ai(doc_base):
@@ -787,7 +779,10 @@ async def _remove_pdf_from_ai(doc_base):
 
 
 async def _sync_pdf_knowledge(force=False):
-    global LAST_PDF_SYNC
+    # C3: đã ngừng đồng bộ PDF -> kho AI (ai_pdf_*). AI chỉ đọc kho .md. No-op để không OCR/index thừa.
+    return
+    # (giữ code cũ bên dưới để tham khảo, không chạy)
+    global LAST_PDF_SYNC  # noqa
     if not DATABASE_URL:
         return
     now = time.time()
