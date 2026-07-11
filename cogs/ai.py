@@ -1119,8 +1119,9 @@ class AI(commands.Cog):
                                 errors.append(f"{provider['name']} exception: {type(exc).__name__}: {exc}")
                 return None
 
-            # Cau hoi van hoc: Cerebras (Qwen3-235B, ~1M token/ngay/key) la nhanh
-            # chinh — model lon nhat + quota ben nhat; Gemini/Groq thanh du phong.
+            # Cau hoi van hoc: Cerebras la nhanh chinh (thu TRUOC Gemini/Groq) — CHI khi
+            # co CEREBRAS_API_KEYS. Model chinh THUC TE la gpt-oss-120b (qwen-3-235b/glm-4.6
+            # tra 404 no-access voi key free); chain: gpt-oss-120b -> qwen-3-32b -> llama-3.3-70b.
             tried_extras_first = False
             if prefer_rich_style and EXTRA_OPENAI_PROVIDERS:
                 tried_extras_first = True
