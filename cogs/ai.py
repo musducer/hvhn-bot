@@ -1435,36 +1435,49 @@ class AI(commands.Cog):
         return {"quote": quote, "aggregate": aggregate, "document_only": document_only}
 
     @classmethod
-    def _context_off_subject(cls, query: str, plan, pdf_meta: dict) -> bool:
-        """True khi cau hoi neu ro tac gia/tac pham NHUNG cac doan truy xuat khong he
-        nhac toi chung -> kho tra ve tai lieu LAC tac pham (vd hoi Tuong Ve Huu ma tra
-        ve Chi Pheo). Chan de khong nhoi noi dung sai vao bai."""
+    def _query_subjects(cls, query: str, plan) -> list[str]:
+        """Tac gia + ten tac pham dat trong ngoac kep -> chu de bat buoc cua cau hoi."""
         subjects: list[str] = []
-        if plan.author_filter:
+        if getattr(plan, "author_filter", ""):
             subjects.append(cls._plain_text(plan.author_filter))
-        # Ten tac pham dat trong ngoac kep moi loai (thang, cong, cong xoan).
         for m in re.findall(r"[\"'“”‘’«»]([^\"'“”‘’«»]{2,60})[\"'“”‘’«»]", query or ""):
             t = cls._plain_text(m).strip()
             if len(t) >= 3:
                 subjects.append(t)
-        subjects = [s for s in subjects if s]
+        return [s for s in subjects if s]
+
+    @classmethod
+    def _text_mentions_subject(cls, subjects: list[str], text: str) -> bool:
+        """True neu text co nhac toi it nhat mot chu de (ten tac pham/tac gia hoac ho tac gia)."""
         if not subjects:
-            return False  # khong ro chu de -> khong phan xet
+            return True  # khong ro chu de -> khong phan xet
+        haystack = cls._plain_text(text or "")
+        if not haystack.strip():
+            return False
+        for subj in subjects:
+            if subj in haystack:
+                return True
+            last = subj.split()[-1] if subj.split() else ""
+            if len(last) >= 4 and re.search(r"\b" + re.escape(last) + r"\b", haystack):
+                return True
+        return False
+
+    @classmethod
+    def _context_off_subject(cls, query: str, plan, pdf_meta: dict) -> bool:
+        """True khi cau hoi neu ro tac gia/tac pham NHUNG cac doan truy xuat khong he
+        nhac toi chung -> kho tra ve tai lieu LAC tac pham (vd hoi Tuong Ve Huu ma tra
+        ve Chi Pheo). Chan de khong nhoi noi dung sai vao bai."""
+        subjects = cls._query_subjects(query, plan)
+        if not subjects:
+            return False
         chunks = pdf_meta.get("chunks") or []
         if not chunks:
             return False
-        haystack = cls._plain_text(" ".join(
+        haystack = " ".join(
             (c.get("title") or "") + " " + (c.get("first_500") or "") + " " + (c.get("excerpt") or "")
             for c in chunks
-        ))
-        for subj in subjects:
-            if subj in haystack:
-                return False
-            # ho tac gia (tu cuoi) cung tinh la khop, vd 'thiep' trong 'nguyen huy thiep'.
-            last = subj.split()[-1] if subj.split() else ""
-            if len(last) >= 4 and re.search(r"\b" + re.escape(last) + r"\b", haystack):
-                return False
-        return True
+        )
+        return not cls._text_mentions_subject(subjects, haystack)
 
     @classmethod
     def _retrieval_hit(cls, query: str, pdf_meta: dict) -> bool:
@@ -2444,9 +2457,9 @@ class AI(commands.Cog):
             lines.append("Phần trên là trích ý trực tiếp từ evidence; cần đối chiếu thêm tài liệu gốc nếu muốn diễn giải sâu hơn.")
             return "\n".join(lines)
         if manual_knowledge:
-            return "Dựa trên tri thức HVHN đã truy xuất:\n" + _clip_text(manual_knowledge, 1800)
+            return "Dựa trên tri thức HVHN đã truy xuất:\n" + AI._strip_internal_markers(_clip_text(manual_knowledge, 1800))
         if web_context:
-            return "Dựa trên nguồn web đã truy xuất:\n" + _clip_text(web_context, 1800)
+            return "Dựa trên nguồn web đã truy xuất:\n" + AI._strip_internal_markers(_clip_text(web_context, 1800))
         return "Chưa có evidence đủ rõ để trả lời."
 
 
@@ -2654,6 +2667,15 @@ class AI(commands.Cog):
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
+        # Cau hoi neu ro tac gia/tac pham nhung kho thu cong/feedback lac han chu de
+        # (vd hoi Tuong Ve Huu -> tra ve phong cach tho To Huu, 100+ trich dan NLXH): bo di.
+        _subjects = self._query_subjects(user_prompt, plan)
+        if _subjects and manual_knowledge and not self._text_mentions_subject(_subjects, manual_knowledge):
+            print("[debug] manual_suppressed reason=off_subject", flush=True)
+            manual_knowledge = ""
+        if _subjects and feedback_knowledge and not self._text_mentions_subject(_subjects, feedback_knowledge):
+            print("[debug] feedback_suppressed reason=off_subject", flush=True)
+            feedback_knowledge = ""
         retrieval_hit = self._retrieval_hit(user_prompt, pdf_meta)
         quote_evidence = QuoteExtractor.extract(pdf_meta, plan, user_prompt)
         self._log_top_pdf_chunks(pdf_meta)
