@@ -32,7 +32,14 @@ GEMINI_FALLBACK_MODELS = [
         "GEMINI_FALLBACK_MODELS", "gemini-flash-latest,gemini-flash-lite-latest"
     ).split(",") if m.strip()
 ]
-GEMINI_MODELS = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+GEMINI_SKIP_MODELS = {
+    m.strip().lower() for m in os.getenv("HVHN_GEMINI_SKIP_MODELS", "gemini-2.0-flash").split(",") if m.strip()
+}
+GEMINI_MODELS = []
+for _model in [GEMINI_MODEL] + GEMINI_FALLBACK_MODELS:
+    if _model.lower() in GEMINI_SKIP_MODELS or _model in GEMINI_MODELS:
+        continue
+    GEMINI_MODELS.append(_model)
 # Provider OpenAI-compatible bo sung, free tier khong can the: chi bat khi co key trong env.
 # "models" la chain fallback: model dau la chinh; ID sai/404 thi tu nhay model sau.
 EXTRA_OPENAI_PROVIDERS = [
@@ -67,6 +74,8 @@ VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LIT_TEMPERATURE = float(os.getenv("HVHN_LIT_TEMPERATURE", "0.7"))
 LIT_TOP_P = float(os.getenv("HVHN_LIT_TOP_P", "0.95"))
 LIT_MAX_TOKENS = int(os.getenv("HVHN_LIT_MAX_TOKENS", "3000"))
+AI_ANSWER_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_ANSWER_TIMEOUT_SECONDS", "105"))
+AI_FORCE_FALLBACK_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_FORCE_FALLBACK_TIMEOUT_SECONDS", "35"))
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 # Duoi nguong nay coi nhu truy xuat .md lac de -> khong nhoi vao context (tranh chep tai lieu khong lien quan).
 MD_MIN_RELEVANCE = float(os.getenv("HVHN_MD_MIN_RELEVANCE", "2.0"))
@@ -493,6 +502,8 @@ class Planner:
         "nghi luan van hoc", "nlvh", "tac pham", "nhan vat", "doan tho", "bai tho",
         "doan trich", "kho tho", "hinh tuong", "chi tiet nghe thuat", "gia tri nhan dao",
         "binh giang", "cam nhan ve", "phan tich bai", "phan tich doan", "phan tich nhan vat",
+        "truyen ngan", "truyen dai", "tieu thuyet", "kich", "chi tiet trong", "chi tiet",
+        "tinh huong truyen", "ngoi ke", "diem nhin tran thuat",
     )
     NLXH_MARKERS = (
         "nghi luan xa hoi", "nlxh", "tu tuong dao li", "hien tuong doi song", "hien tuong",
@@ -513,7 +524,11 @@ class Planner:
     @classmethod
     def classify_composition(cls, message: str, intent: str, author: str) -> tuple[str, str, bool]:
         q = _rag_plain(message)
-        if any(m in q for m in cls.NLVH_MARKERS):
+        literary_context = (
+            any(m in q for m in cls.NLVH_MARKERS)
+            or (author and any(m in q for m in ("truyen", "bai", "tho", "tac pham", "chi tiet", "nhan vat")))
+        )
+        if literary_context:
             genre = "NLVH"
         elif any(m in q for m in cls.NLXH_MARKERS):
             genre = "NLXH"
@@ -2361,6 +2376,15 @@ class AI(commands.Cog):
         return None
 
     @staticmethod
+    def _timeout_fallback_answer(pdf_meta: dict, manual_knowledge: str, web_context: str, elapsed_seconds: int) -> str:
+        base = (
+            f"Then bị quá thời gian phản hồi sau khoảng {elapsed_seconds} giây nên không để bạn chờ trong trạng thái “thinking” nữa.\n\n"
+            "Mình gửi trước phần căn cứ đã truy xuất được; bạn có thể hỏi lại ngắn hơn hoặc chạy `/hvhn_debug_retrieval` để xem evidence."
+        )
+        evidence = AI._evidence_fallback_answer(pdf_meta, manual_knowledge, web_context)
+        return base + "\n\n---\n\n" + evidence
+
+    @staticmethod
     def _evidence_fallback_answer(pdf_meta: dict, manual_knowledge: str, web_context: str) -> str:
         chunks = pdf_meta.get("chunks") or []
         if chunks:
@@ -2639,7 +2663,21 @@ class AI(commands.Cog):
                 teacher_feedback=feedback_knowledge,
             )
         guidance = Scaffold.for_plan(plan)
-        answer, full_prompt = await self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit, guidance=guidance)
+        full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode, guidance)
+        try:
+            answer, full_prompt = await asyncio.wait_for(
+                self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit, guidance=guidance),
+                timeout=AI_ANSWER_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            print(
+                f"[debug] ai_answer_timeout mode={mode} seconds={AI_ANSWER_TIMEOUT_SECONDS} "
+                f"query={user_prompt[:180]!r}",
+                flush=True,
+            )
+            answer = self._timeout_fallback_answer(
+                pdf_meta, manual_knowledge, web_context, AI_ANSWER_TIMEOUT_SECONDS
+            )
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
             return
@@ -2655,7 +2693,17 @@ class AI(commands.Cog):
             if self._has_strong_evidence(pdf_meta, manual_count, feedback_count, web_count):
                 if reason == "UNKNOWN":
                     reason = "PROMPT_FILTERED"
-                forced = await self._force_grounded_answer(prompt, knowledge, web_context, mode)
+                try:
+                    forced = await asyncio.wait_for(
+                        self._force_grounded_answer(prompt, knowledge, web_context, mode),
+                        timeout=AI_FORCE_FALLBACK_TIMEOUT_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    forced = None
+                    print(
+                        f"[debug] force_grounded_timeout mode={mode} seconds={AI_FORCE_FALLBACK_TIMEOUT_SECONDS}",
+                        flush=True,
+                    )
                 if forced and not self._insufficient_answer(forced):
                     print(f"[debug] refusal_suppressed_by=force_grounded original_reason={reason}", flush=True)
                     answer = forced

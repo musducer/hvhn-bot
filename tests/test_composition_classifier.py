@@ -13,6 +13,12 @@ class CompositionClassifierTest(unittest.TestCase):
         p = Planner.build("Phân tích nhân vật Chí Phèo trong tác phẩm cùng tên")
         self.assertEqual(p.genre, "NLVH")
 
+    def test_literary_detail_question_is_not_nlxh(self):
+        p = Planner.build(
+            'Suy nghi ve chi tiet nhung nhau thai trong truyen ngan "Tuong ve huu" cua Nguyen Huy Thiep'
+        )
+        self.assertEqual(p.genre, "NLVH")
+
     def test_hsg_signal(self):
         p = Planner.build("Đề thi HSG: Bàn về ý kiến cho rằng thơ là tiếng nói của tâm hồn")
         self.assertEqual(p.level, "HSG")
