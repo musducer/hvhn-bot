@@ -20,14 +20,16 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
 # nen khi model chinh chay het quota thi thu model khac cung key truoc khi bo cuoc.
 GROQ_FALLBACK_MODELS = [
     m.strip() for m in os.getenv(
-        "GROQ_FALLBACK_MODELS", "moonshotai/kimi-k2-instruct,llama-3.1-8b-instant"
+        "GROQ_FALLBACK_MODELS", "moonshotai/kimi-k2-instruct-0905,llama-3.1-8b-instant"
     ).split(",") if m.strip()
 ]
 GROQ_MODELS = [GROQ_MODEL] + [m for m in GROQ_FALLBACK_MODELS if m != GROQ_MODEL]
 # Free tier gemini-2.0-flash da bi Google dua ve 0; 2.5-flash/lite van con free tier.
 GEMINI_FALLBACK_MODELS = [
     m.strip() for m in os.getenv(
-        "GEMINI_FALLBACK_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite"
+        # Alias "-latest" luon tro ve model flash hien hanh — tranh 404 "no longer
+        # available to new users" nhu gemini-2.5-flash (da gap 2026-07-11).
+        "GEMINI_FALLBACK_MODELS", "gemini-flash-latest,gemini-flash-lite-latest"
     ).split(",") if m.strip()
 ]
 GEMINI_MODELS = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
@@ -37,9 +39,11 @@ EXTRA_OPENAI_PROVIDERS = [
     {"name": name, "url": url, "keys": keys,
      "models": ([os.getenv(model_env)] if os.getenv(model_env) else []) + default_models}
     for name, url, keys_env, model_env, default_models in (
+        # gpt-oss-120b la model lon nhat free tier Cerebras thuc su cap quyen
+        # (qwen-235b/glm-4.6 tra 404 "no access" voi key free — da thu 2026-07-11).
         ("cerebras", "https://api.cerebras.ai/v1/chat/completions",
          "CEREBRAS_API_KEYS", "CEREBRAS_MODEL",
-         ["qwen-3-235b-a22b-instruct-2507", "zai-glm-4.6", "gpt-oss-120b", "llama-3.3-70b"]),
+         ["gpt-oss-120b", "qwen-3-32b", "llama-3.3-70b"]),
         ("openrouter", "https://openrouter.ai/api/v1/chat/completions",
          "OPENROUTER_API_KEYS", "OPENROUTER_MODEL",
          ["meta-llama/llama-3.3-70b-instruct:free"]),
@@ -2008,6 +2012,20 @@ class AI(commands.Cog):
             if retrieval_hit and self._insufficient_answer(verified):
                 print("[debug] verifier_override=retrieval_hit_prevents_false_insufficient", flush=True)
                 return answer
+            # Verifier co the roi vao model yeu (fallback 8B) va nghien nat bai tot
+            # thanh vai doan cut. Neu ban "da kiem" ngan hon han ban goc ma ban goc
+            # khong co van de trich dan, giu ban goc.
+            if (
+                len(verified) < 0.6 * len(answer)
+                and not self._insufficient_answer(answer)
+                and not self._has_unverified_long_quotes(answer, compact_evidence)
+            ):
+                print(
+                    f"[debug] verifier_override=rewrite_too_short kept_original "
+                    f"original_chars={len(answer)} verified_chars={len(verified)}",
+                    flush=True,
+                )
+                return answer
             return verified
         print(f"[debug] verifier_result mode={mode} skipped=True", flush=True)
         return answer
@@ -2037,6 +2055,13 @@ class AI(commands.Cog):
         evidence_for_quote_check = "\n\n".join(part for part in (knowledge, web_context) if part)
         repeated_defects = self._repeated_phrase_defects(answer or "")
         style_defects = self._ai_flavored_style_defects(answer or "")
+        # Cau phan tich van hoc ma tra ve vai doan cut la chua dat do sau yeu cau.
+        if answer and mode.startswith("literature") and len(answer) < 1500:
+            style_defects = style_defects + [
+                "Bai qua ngan so voi yeu cau phan tich (duoi 1500 ky tu). Trien khai it nhat 3-4 luan diem "
+                "du 4 tang (thu phap -> trich nguyen van 1-3 cau -> phan tich co che -> khai quat phong cach), "
+                "dung evidence trong context; khong don tho, khong lap y."
+            ]
         needs_repair = bool(answer) and (
             self._looks_like_source_dump(answer)
             or self._looks_like_generic_literary_answer(answer)
