@@ -304,6 +304,7 @@ function caiDatTuDongHoa() {
     hvhnTuDongHoa: true,
     tuDongXuLyFileMoi: true,
     kiemTraHetHan: true,
+    khoaTaiTraiNghiemLienTuc: true,
   };
   ScriptApp.getProjectTriggers().forEach(t => {
     if (keepHandlers[t.getHandlerFunction()]) ScriptApp.deleteTrigger(t);
@@ -312,6 +313,11 @@ function caiDatTuDongHoa() {
   ScriptApp.newTrigger('hvhnTuDongHoa')
     .timeBased()
     .everyMinutes(5)
+    .create();
+
+  ScriptApp.newTrigger('khoaTaiTraiNghiemLienTuc')
+    .timeBased()
+    .everyMinutes(1)
     .create();
 
   ScriptApp.newTrigger('kiemTraHetHan')
@@ -325,7 +331,7 @@ function caiDatTuDongHoa() {
   ensureRegistry();
   capNhatTaiLieu();
   capNhatDashboard();
-  ghiLog('Cài tự động hoá', 'hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h');
+  ghiLog('Cài tự động hoá', 'hvhnTuDongHoa mỗi 5 phút; khóa tải trải nghiệm mỗi 1 phút; kiemTraHetHan hằng ngày 1h');
   ss.toast('Đã cài tự động hoá. Từ giờ không cần bấm menu để cập nhật sheet.');
 }
 
@@ -699,13 +705,44 @@ function capNhatTaiLieuTraiNghiem() {
   const files = shared.getFiles();
   while (files.hasNext()) {
     const f = files.next();
-    try { Drive.Files.update({ copyRequiresWriterPermission: true }, f.getId()); } catch (e2) {}
+    _khoaTaiFileTraiNghiem(f);
     rows.push([f.getName(), 'Trong chương trình', oldTicks[f.getName()] === true]);
   }
   if (tl.getLastRow() > 1) tl.getRange(2, 1, tl.getLastRow() - 1, 3).clearContent();
   if (rows.length) {
     tl.getRange(2, 1, rows.length, 3).setValues(rows);
     tl.getRange(2, TRIAL_DOC_DEL_COL, rows.length, 1).insertCheckboxes();
+  }
+}
+
+function _khoaTaiFileTraiNghiem(file) {
+  try {
+    Drive.Files.update({ copyRequiresWriterPermission: true }, file.getId());
+    return true;
+  } catch (e) {
+    ghiLog('LỖI khóa tải tài liệu trải nghiệm',
+      file.getName() + ' -> ' + (e && e.message ? e.message : String(e)));
+    return false;
+  }
+}
+
+// Trigger riêng 1 phút: thu hẹp khoảng hở giữa lúc watcher render file lên Drive và lúc Apps Script khóa tải.
+// Lưu ý: owner/editor vẫn thấy nút Download; thiết lập này chặn viewer/commenter.
+function khoaTaiTraiNghiemLienTuc() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    ensureTraiNghiem();
+    const shared = _trialSharedFolder();
+    const files = shared.getFiles();
+    let total = 0, failed = 0;
+    while (files.hasNext()) {
+      total++;
+      if (!_khoaTaiFileTraiNghiem(files.next())) failed++;
+    }
+    if (failed) ghiLog('Khóa tải trải nghiệm còn lỗi', failed + '/' + total + ' file');
+  } finally {
+    lock.releaseLock();
   }
 }
 
