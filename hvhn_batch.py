@@ -13,10 +13,33 @@ DOCS_DIR = os.path.join(BASE_DIR, "docs")
 # (mirror đang tải), tự fallback về ./output và in cảnh báo.
 MIRROR_SOURCE = r"D:\Mirror Files Drive\TÀI LIỆU ĐỘC QUYỀN HVHN\TÀI LIỆU ĐÃ WATERMARK CHƯA PHÂN PHỐI"
 LOCAL_FALLBACK = os.path.join(BASE_DIR, "output")
-MIRROR_READY = os.path.isdir(MIRROR_SOURCE)
-OUT_ROOT = MIRROR_SOURCE if MIRROR_READY else LOCAL_FALLBACK
-# new_rows.csv ghi vào cùng OUT_ROOT: khi mirror sẵn sàng, file này tự lên Drive Source,
-# trigger Apps Script tuDongXuLyFileMoi() sẽ tự nhặt → không cần thao tác tay.
+
+
+def mirror_ready():
+    return os.path.isdir(MIRROR_SOURCE)
+
+
+def out_root():
+    # B3: kiểm mirror ĐỘNG mỗi lần render — nếu watcher khởi động trước khi Google Drive
+    # đồng bộ xong, không bị KẸT vào ./output vĩnh viễn tới khi restart.
+    return MIRROR_SOURCE if mirror_ready() else LOCAL_FALLBACK
+
+
+def _max_workers():
+    # B3: giới hạn worker để render (rasterize nặng) không chiếm hết CPU của máy chạy watcher.
+    try:
+        env = int(os.getenv("HVHN_RENDER_WORKERS", "0"))
+    except ValueError:
+        env = 0
+    if env > 0:
+        return env
+    cpu = os.cpu_count() or 2
+    return max(1, min(cpu - 1, 4))
+
+
+# Tương thích ngược (ảnh chụp lúc import); code render dùng out_root()/mirror_ready() ĐỘNG.
+MIRROR_READY = mirror_ready()
+OUT_ROOT = out_root()
 NEW_ROWS_CSV = os.path.join(OUT_ROOT, "new_rows.csv")
 
 WARNING_TEXT = (
@@ -76,7 +99,7 @@ def remove_doc(doc_base):
 def _render_job(doc_path, recipient):
     doc_name = os.path.splitext(os.path.basename(doc_path))[0]
     file_name = f'{recipient["name"]}__{doc_name}.pdf'
-    out_path = os.path.join(OUT_ROOT, file_name)
+    out_path = os.path.join(out_root(), file_name)
 
     convert_to_secure_image_pdf(
         doc_path, out_path,
@@ -101,37 +124,48 @@ def render_trial(doc_path, out_folder, *, name="Nguyễn Văn A", email="nguyenv
     return file_name
 
 
-def render_batch(docs, recipients):
-    os.makedirs(OUT_ROOT, exist_ok=True)
-    jobs = [(doc, r) for doc in docs for r in recipients]
+def render_batch(docs, recipients, *, retries=2):
+    os.makedirs(out_root(), exist_ok=True)
     rows = []
-
-    with ProcessPoolExecutor(max_workers=os.cpu_count()) as pool:
-        futures = {pool.submit(_render_job, doc, r): (doc, r) for doc, r in jobs}
-        for fut in as_completed(futures):
-            doc, r = futures[fut]
-            try:
-                file_name = fut.result()
-                rows.append((r["name"], r["email"], file_name))
-                print(f"OK  {r['name']} <- {os.path.basename(doc)} -> {file_name}")
-            except Exception as e:
-                print(f"LỖI {r['name']} <- {os.path.basename(doc)}: {e}")
+    pending = [(doc, r) for doc in docs for r in recipients]
+    attempt = 0
+    # B2: retry CHÍNH XÁC các bản render thất bại (chỉ job lỗi được thử lại), tránh mất bản render.
+    while pending and attempt <= retries:
+        if attempt:
+            print(f">> Thử lại {len(pending)} bản render lỗi (lần {attempt}/{retries})...")
+        failed = []
+        with ProcessPoolExecutor(max_workers=_max_workers()) as pool:
+            futures = {pool.submit(_render_job, doc, r): (doc, r) for doc, r in pending}
+            for fut in as_completed(futures):
+                doc, r = futures[fut]
+                try:
+                    file_name = fut.result()
+                    rows.append((r["name"], r["email"], file_name))
+                    print(f"OK  {r['name']} <- {os.path.basename(doc)} -> {file_name}")
+                except Exception as e:
+                    print(f"LỖI {r['name']} <- {os.path.basename(doc)}: {e}")
+                    failed.append((doc, r))
+        pending = failed
+        attempt += 1
+    if pending:
+        print(f">> CÒN {len(pending)} bản render THẤT BẠI sau {retries} lần thử — cần xử lý tay.")
     return rows
 
 
 def write_new_rows_csv(rows, filename="new_rows.csv"):
     if not rows:
         return
-    out_path = os.path.join(OUT_ROOT, filename)
-    os.makedirs(OUT_ROOT, exist_ok=True)
+    root = out_root()
+    out_path = os.path.join(root, filename)
+    os.makedirs(root, exist_ok=True)
     with open(out_path, "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["TenNguoiNhan", "Email", "TenFile"])
         writer.writerows(rows)
 
     print(f"\nĐã ghi {len(rows)} dòng vào {out_path}")
-    if MIRROR_READY:
+    if mirror_ready():
         print(">> Mirror SẴN SÀNG: file PDF + csv sẽ tự lên Drive; trigger tự phân phối.")
     else:
         print(">> CẢNH BÁO: folder mirror chưa đồng bộ, đang ghi tạm vào ./output")
-        print(f">> Sau khi mirror xong, copy các file trong {OUT_ROOT} vào folder Source trên Drive.")
+        print(f">> Sau khi mirror xong, copy các file trong {root} vào folder Source trên Drive.")
