@@ -1607,6 +1607,7 @@ class AI(commands.Cog):
             "- Hinh anh hoa lap luan nhung khong bay khoi evidence: moi an du/so sanh trong loi binh phai neo vao chi tiet van ban dang phan tich.\n"
             "- Truoc khi chot, tu kiem: co dan chung cu the cho tung tac pham chua, co suy doan ngoai context khong, co cau nao co the gan cho moi tac pham khong.\n"
             "- DO SAU & DO DAI (voi cau hoi phan tich/cam nhan/phong cach): trien khai IT NHAT 3-4 luan diem, moi luan diem la mot doan day du theo 4 tang: (a) goi ten thu phap/nhan tu cu the -> (b) trich NGUYEN VAN dan chung, GIU nguyen diep tu/diep ngu ('va... va... va', 'nay day... nay day', 'cho... cho...'), khong rut gon/dien xuoi tho -> (c) phan tich VI SAO thu phap ay tao ra hieu qua ay (co che ngon ngu, khong noi chung 'the hien su phong phu') -> (d) khai quat len tu tuong/phong cach. Bai phai du day dan, co chieu sau, KHONG duoc chi 3-4 doan ngan hoi hot.\n"
+            "- CHONG VAN AI: han che toi da danh hoa 'su ...', 'viec ...' ('the hien su mong muon' -> 'cho thay ong khat khao'); dung dong tu manh, hinh anh cu the thay cho danh tu truu tuong.\n"
             "- CHONG LAP & CHONG CUT: khong lap lai cung mot cum khai quat (vd 'quan niem ve thoi gian va tuoi tre') qua mot lan; ket bai khong duoc tom lai y het than bai bang tu khac; moi doan phai them thong tin moi.\n\n"
             "YEU CAU NGUOI DUNG:\n"
             f"{prompt}"
@@ -1782,6 +1783,30 @@ class AI(commands.Cog):
         return defects[:5]
 
     @staticmethod
+    def _ai_flavored_style_defects(answer: str) -> list[str]:
+        """Bat 'mau AI': lam dung danh hoa 'su .../viec ...' va goi sai thu phap,
+        khong phu thuoc gate 'phong cach' cua weak_style."""
+        plain = AI._plain_text(answer or "")
+        if len(plain) < 300:
+            return []
+        defects: list[str] = []
+        su_count = len(re.findall(r"\bsu [a-z]", plain)) + len(re.findall(r"\bviec [a-z]", plain))
+        if su_count >= 6:
+            defects.append(
+                f"Lam dung danh hoa kieu AI ('su ...', 'viec ...') {su_count} lan. Viet lai bang dong tu/tinh tu truc tiep: "
+                "'su khan truong' -> 'khan truong', 'the hien su mong muon' -> 'cho thay ong khat khao', "
+                "'su tuong phan giua su vinh cuu va su ngan ngui' -> 'troi dat thi con mai, doi nguoi thi huu han'."
+            )
+        for wrong in ("bien phap doi xung", "phep doi xung"):
+            if wrong in plain:
+                defects.append(
+                    "Goi sai thu phap 'doi xung'. Kiem tra dau hieu ngon ngu: lap tu dau cau la DIEP NGU/DIEP CAU TRUC; "
+                    "hai ve trai nghia la TUONG PHAN/DOI LAP. Chi goi ten phep co dau hieu that trong dan chung."
+                )
+                break
+        return defects
+
+    @staticmethod
     def _pdf_reference_lines(knowledge: str) -> list[tuple[str, str]]:
         if "PDF" not in knowledge and "pdf" not in knowledge:
             return []
@@ -1906,6 +1931,7 @@ class AI(commands.Cog):
         )
         evidence_for_quote_check = "\n\n".join(part for part in (knowledge, web_context) if part)
         repeated_defects = self._repeated_phrase_defects(answer or "")
+        style_defects = self._ai_flavored_style_defects(answer or "")
         needs_repair = bool(answer) and (
             self._looks_like_source_dump(answer)
             or self._looks_like_generic_literary_answer(answer)
@@ -1913,12 +1939,15 @@ class AI(commands.Cog):
             or self._looks_like_dry_literary_style(answer)
             or self._has_unverified_long_quotes(answer, evidence_for_quote_check)
             or bool(repeated_defects)
+            or bool(style_defects)
         )
         if answer and needs_repair:
             repetition_note = ""
+            if style_defects:
+                repetition_note += "LOI VAN PHONG PHAT HIEN DUOC:\n" + "\n".join(f"  - {d}" for d in style_defects) + "\n"
             if repeated_defects:
                 listed = "\n".join(f"  - \"{d}\"" for d in repeated_defects)
-                repetition_note = (
+                repetition_note += (
                     "LOI LAP PHAT HIEN DUOC (nghiem trong): cac cau/y sau xuat hien GAN NGUYEN VAN "
                     "nhieu lan trong bai. Moi lan chi duoc noi mot y MOT LAN; sau moi dan chung phai "
                     "rut ra mot phat hien RIENG cho dan chung do, khong dan lai cung ket luan; ket bai "
