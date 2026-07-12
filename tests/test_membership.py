@@ -94,6 +94,9 @@ class FakeDB:
         return None
 
     async def fetchval(self, sql, *args):
+        if "SELECT 1 FROM hvhn_doc_jobs" in sql:
+            email = args[0].lower()
+            return 1 if any(j["job_type"] == "add_client" and email in j["text_payload"].lower() for j in self.jobs) else None
         if sql.strip().upper().startswith("INSERT INTO HVHN_DOC_JOBS"):
             self._job_id += 1
             self.jobs.append({"id": self._job_id, "job_type": args[0], "text_payload": args[1], "requested_by": args[2]})
@@ -228,6 +231,22 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([j["job_type"] for j in m.bot.db.jobs], ["add_client", "remove_client", "add_client"])
         self.assertEqual(m.bot.db.jobs[1]["text_payload"], "wrong@example.com")
         self.assertEqual(m.bot.db.jobs[2]["text_payload"], "An\tright@example.com")
+
+    async def test_active_customer_without_add_job_gets_backfilled(self):
+        m = self._cog()
+        await m._create_pending_invite("abc", 7, 999)
+        await m._mark_invite_joined("abc", 111)
+        row = m.bot.db.rows[0]
+        row["status"] = "active"
+        row["name"] = "An"
+        row["email"] = "an@example.com"
+        row["granted_at"] = NOW
+        row["expires_at"] = NOW + timedelta(days=7)
+        expires, note, corrected = await m._activate_customer(111, "An", "an@example.com", 111)
+        self.assertTrue(corrected)
+        self.assertEqual(len(m.bot.db.jobs), 1)
+        self.assertEqual(m.bot.db.jobs[0]["job_type"], "add_client")
+        self.assertEqual(m.bot.db.jobs[0]["text_payload"], "An\tan@example.com")
 
     async def test_activation_requires_member_still_in_guild(self):
         m = self._cog()

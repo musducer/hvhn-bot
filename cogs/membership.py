@@ -236,6 +236,14 @@ class Membership(commands.Cog):
             job_type, text_payload, requested_by,
         )
 
+    async def _has_add_client_job(self, email: str) -> bool:
+        return bool(await self.bot.db.fetchval(
+            "SELECT 1 FROM hvhn_doc_jobs "
+            "WHERE job_type='add_client' AND lower(coalesce(text_payload,'')) LIKE '%' || lower($1) || '%' "
+            "LIMIT 1",
+            email,
+        ))
+
     async def _create_pending_invite(self, invite_code: str, days: int, created_by: int) -> int:
         return await self.bot.db.fetchval(
             "INSERT INTO hvhn_members(invite_code,duration_days,status,created_by) "
@@ -302,7 +310,8 @@ class Membership(commands.Cog):
         if corrected and old_email and old_email != email:
             jid_remove = await self._enqueue("remove_client", old_email, requested_by)
             notes.append(f" Đã xếp thu hồi email cũ #{jid_remove}.")
-        if (not corrected) or old_email != email:
+        needs_backfill_job = corrected and old_email == email and not await self._has_add_client_job(email)
+        if (not corrected) or old_email != email or needs_backfill_job:
             jid_add = await self._enqueue("add_client", f"{name}\t{email}", requested_by)
             notes.append(f" Đã xếp cấp tài liệu #{jid_add}.")
         return expires, "".join(notes), corrected
