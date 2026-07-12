@@ -2120,13 +2120,26 @@ function caiDatThanhToanTuDong() {
   v = ask('4/5. Giá 1 gói (VND, chỉ nhập số, vd 99000).', props.getProperty('PMT_PRICE'));
   if (v === null) return; if (v) props.setProperty('PMT_PRICE', String(parseInt(v.replace(/\D/g, ''), 10) || 0));
 
-  v = ask('5/5. Số ngày mỗi gói (vd 30).', props.getProperty('PMT_DAYS'));
+  v = ask('5/6. Số ngày mỗi gói (vd 30).', props.getProperty('PMT_DAYS'));
   if (v === null) return; if (v) props.setProperty('PMT_DAYS', String(parseInt(v.replace(/\D/g, ''), 10) || 30));
 
-  ui.alert('✅ Đã lưu cài đặt thanh toán.\n\nTiếp theo:\n' +
+  // Token khoá webhook: tự sinh nếu chưa có (bạn không cần nghĩ ra).
+  let token = props.getProperty('PMT_WEBHOOK_TOKEN') || '';
+  v = ask('6/6. Mật khẩu khoá webhook (dán vào cuối URL SePay). Để TRỐNG rồi OK để hệ thống tự tạo giúp.',
+          token || '(sẽ tự tạo)');
+  if (v === null) return;
+  if (v) token = v.replace(/[^A-Za-z0-9_-]/g, '');
+  if (!token) token = 'tk_' + _pmtRandCode() + _pmtRandCode();
+  props.setProperty('PMT_WEBHOOK_TOKEN', token);
+
+  ui.alert('✅ Đã lưu cài đặt thanh toán.\n\n' +
+    'MẬT KHẨU KHOÁ WEBHOOK của bạn: ' + token + '\n' +
+    '(lát nữa dán vào cuối URL SePay, xem bước dưới)\n\n' +
+    'Tiếp theo:\n' +
     '1) HVHN > 💳 Thanh toán tự động > "Tạo/lấy lại Form đặt mua" rồi đăng link cho khách.\n' +
     '2) Deploy (góc phải) > New deployment > loại Web app > Who has access: Anyone > Deploy.\n' +
-    '3) Copy "Web app URL" dán vào ô webhook của SePay.\n\n' +
+    '3) Lấy "Web app URL" rồi THÊM ?token=' + token + ' vào cuối, dán chuỗi ĐÓ vào ô webhook SePay.\n' +
+    '   Ví dụ: https://script.google.com/macros/s/XXXX/exec?token=' + token + '\n\n' +
     'Lưu ý: mỗi lần sửa code phải Deploy > Manage deployments > Edit > version: New.');
 }
 
@@ -2137,7 +2150,9 @@ function xemCaiDatThanhToan() {
     '• Mật khẩu: ' + (p.getProperty('PMT_SECRET') ? '(đã đặt)' : '(chưa đặt)') + '\n' +
     '• Ngân hàng: ' + (p.getProperty('PMT_BANK') || '(chưa đặt)') + '\n' +
     '• Giá gói: ' + (p.getProperty('PMT_PRICE') || '(chưa đặt)') + ' VND\n' +
-    '• Số ngày/gói: ' + (p.getProperty('PMT_DAYS') || '30'));
+    '• Số ngày/gói: ' + (p.getProperty('PMT_DAYS') || '30') + '\n' +
+    '• Token webhook: ' + (p.getProperty('PMT_WEBHOOK_TOKEN') || '(chưa đặt)') + '\n' +
+    '  (dán vào cuối URL SePay dạng ...?token=<token>)');
 }
 
 // ---- Form đặt mua (khách tự điền) ----
@@ -2188,7 +2203,20 @@ function xuLyFormDatMua(e) {
 // ---- SePay webhook: có tiền về -> khớp mã đơn -> xin link từ bot -> gửi khách ----
 function doPost(e) {
   try {
+    // Lớp khoá bằng token trong URL (Apps Script không đọc được header nên dùng query ?token=).
+    // Nếu đã đặt PMT_WEBHOOK_TOKEN mà URL gọi tới không kèm đúng token -> từ chối.
+    const need = _pmtProp('PMT_WEBHOOK_TOKEN', '');
+    if (need) {
+      const got = (e && e.parameter && e.parameter.token) || '';
+      if (got !== need) {
+        ghiLog('doPost bị từ chối (sai token)', 'nhận token="' + got + '"');
+        return _pmtOut('unauthorized');
+      }
+    }
     const data = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    // Chỉ xử lý tiền VÀO (bỏ qua giao dịch chuyển đi nếu SePay có gửi).
+    const loai = String(data.transferType || data.type || 'in').toLowerCase();
+    if (loai && loai.indexOf('out') >= 0) return _pmtOut('bo_qua_tien_ra');
     const noiDung = String(data.content || data.description || data.transferContent || data.addInfo || '').toUpperCase();
     const soTien = Number(data.transferAmount || data.amount || data.amountIn || 0);
     const sheet = _pmtOrderSheet();
