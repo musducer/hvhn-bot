@@ -82,7 +82,35 @@ Mục tiêu: bỏ hẳn việc admin gõ tay thông tin khách. Luồng CHỦ Đ
 
 ---
 
-## PHASE 3 — Tự nhận chuyển khoản → tự gửi link (kiến trúc ĐÃ CHỐT: "Cách A")
+## PHASE 3 — Tự nhận chuyển khoản → tự gửi link (kiến trúc "Cách A")
+
+> **TRẠNG THÁI: phần BOT đã làm xong** (endpoint mint + idempotency + prefill modal). Phần còn lại
+> là cấu hình BÊN NGOÀI repo: SePay + Apps Script (xem "Việc còn lại bên ngoài" ở cuối mục này).
+
+### Đã có trong repo (bot side — ĐỪNG làm lại)
+- Endpoint `POST /mint-invite` trong `keep_alive.py` (Flask, chạy sẵn cho Render web service):
+  - Header `X-HVHN-Secret` phải khớp env **`HVHN_MINT_SECRET`** (nếu env trống → 503, endpoint tắt).
+  - Body JSON `{order_code, name, email, duration_days}`. Trả `{invite_url, order_code, reused, ...}`.
+  - Gọi coroutine bot qua `asyncio.run_coroutine_threadsafe` (Flask ở thread riêng, bot ở loop chính).
+- `Membership.mint_invite_for_order(order_code, name, email, days)` (`cogs/membership.py`):
+  tạo invite-1-lần + INSERT `hvhn_members` dòng `pending` gắn `order_code`, prefill `name/email`.
+  **Idempotent theo `order_code`** (đơn đã xử lý → trả lại link cũ, không tạo trùng) → chống double-credit.
+- Cột `hvhn_members.order_code` (+ index) trong `bot.py` SCHEMA.
+- Modal Phase 2 giờ **điền sẵn** name/email từ form (qua `_prefill_for`) → khách chỉ xác nhận.
+- Test: `tests/test_membership.py::MintInviteTest` (tạo dòng, idempotent, chặn email/duration sai).
+- `keep_alive(bot)` được gọi sau khi tạo bot trong `bot.py::main`.
+
+### Việc còn lại bên ngoài repo (chủ tự làm, KHÔNG code được từ đây)
+1. **SePay**: kết nối tài khoản VCB/MB, đặt webhook trỏ tới **Web App URL của Apps Script**.
+2. **Apps Script** (bộ não): nhận webhook → tách `order_code` từ memo → tra Sheet đơn (tên/email/giá) →
+   đối chiếu **số tiền ≥ giá gói** → đánh dấu đơn đã xử lý (chống trùng) →
+   `UrlFetchApp.fetch("<bot>/mint-invite", {method:'post', headers:{'X-HVHN-Secret': SECRET},
+   payload: JSON})` → lấy `invite_url` → `MailApp.sendEmail(email, "...", "...link...")`.
+3. Đặt env trên Render: `HVHN_MINT_SECRET` (chuỗi ngẫu nhiên mạnh), tuỳ chọn `HVHN_MINT_TIMEOUT`,
+   `HVHN_KHACH_INVITE_HOURS`, `HVHN_KHACH_INVITE_CHANNEL_ID`.
+4. Kiểm thử: gửi thử 1 POST `/mint-invite` với secret đúng → nhận `invite_url`, join thử, xác nhận modal.
+
+### (Tham khảo) kiến trúc gốc — "Cách A"
 
 Bối cảnh nghiệp vụ (chủ đã chốt):
 - Khách đến từ nơi bán (fanpage/Zalo) → điền **Google Form** (ĐÃ CÓ) thu **Họ tên + Email (+ SĐT)**.

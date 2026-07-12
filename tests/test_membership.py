@@ -71,6 +71,14 @@ class FakeDB:
         self._job_id = 0
 
     async def fetchrow(self, sql, *args):
+        if "FROM hvhn_members WHERE order_code=$1" in sql:
+            code = args[0]
+            cand = [r for r in self.rows if r.get("order_code") == code]
+            cand.sort(key=lambda r: r["id"], reverse=True)
+            if not cand:
+                return None
+            r = cand[0]
+            return {"invite_code": r.get("invite_code"), "status": r["status"]}
         if "WHERE discord_id=$1 AND status IN ('joined','active')" in sql:
             did = args[0]
             cand = [r for r in self.rows if r["discord_id"] == did and r["status"] in ("joined", "active")]
@@ -108,6 +116,15 @@ class FakeDB:
                 "invite_code": args[0], "duration_days": args[1], "granted_at": None,
                 "expires_at": None, "status": "pending", "notified_expiry": False,
                 "created_by": args[2], "created_at": datetime.now(timezone.utc),
+            })
+            return self._id
+        if "INSERT INTO hvhn_members(invite_code,duration_days,status,order_code,name,email)" in sql:
+            self._id += 1
+            self.rows.append({
+                "id": self._id, "discord_id": None, "name": args[3], "email": args[4],
+                "invite_code": args[0], "duration_days": args[1], "granted_at": None,
+                "expires_at": None, "status": "pending", "notified_expiry": False,
+                "order_code": args[2], "created_by": None, "created_at": datetime.now(timezone.utc),
             })
             return self._id
         if "INSERT INTO hvhn_members(discord_id,name,email,duration_days" in sql:
@@ -257,6 +274,80 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         await m._mark_invite_joined("abc", 111)
         with self.assertRaises(RuntimeError):
             await m._activate_customer(111, "An", "an@example.com", 111)
+
+
+class FakeInvite:
+    def __init__(self, code):
+        self.code = code
+        self.url = f"https://discord.gg/{code}"
+
+
+class FakeInviteChannel:
+    name = "sảnh-chào-mừng"
+
+    def __init__(self):
+        self.created = 0
+
+    async def create_invite(self, **kwargs):
+        self.created += 1
+        return FakeInvite(f"code{self.created}")
+
+
+class FakeGuildG:
+    def __init__(self):
+        self.chan = FakeInviteChannel()
+        self.text_channels = [self.chan]
+        self.system_channel = self.chan
+
+
+class FakeBotG:
+    def __init__(self, db, guild):
+        self.db = db
+        self.guilds = [guild]
+
+    def get_guild(self, gid):
+        return None
+
+
+class MintInviteTest(unittest.IsolatedAsyncioTestCase):
+    def _cog(self):
+        m = Membership.__new__(Membership)
+        guild = FakeGuildG()
+        m.bot = FakeBotG(FakeDB(), guild)
+        return m, guild
+
+    async def test_mint_creates_pending_order_row(self):
+        m, guild = self._cog()
+        res = await m.mint_invite_for_order("HVHN7K3Q", "An", "An@Example.com", 30)
+        self.assertFalse(res["reused"])
+        self.assertEqual(res["invite_url"], "https://discord.gg/code1")
+        self.assertEqual(len(m.bot.db.rows), 1)
+        row = m.bot.db.rows[0]
+        self.assertEqual(row["status"], "pending")
+        self.assertEqual(row["order_code"], "HVHN7K3Q")
+        self.assertEqual(row["name"], "An")
+        self.assertEqual(row["email"], "an@example.com")  # chuẩn hoá lowercase
+        self.assertEqual(row["duration_days"], 30)
+
+    async def test_mint_idempotent_by_order_code(self):
+        m, guild = self._cog()
+        first = await m.mint_invite_for_order("ORD1", "An", "an@example.com", 30)
+        second = await m.mint_invite_for_order("ORD1", "An", "an@example.com", 30)
+        self.assertFalse(first["reused"])
+        self.assertTrue(second["reused"])
+        self.assertEqual(second["invite_url"], first["invite_url"])  # trả lại link cũ
+        self.assertEqual(len(m.bot.db.rows), 1)                       # không tạo dòng mới
+        self.assertEqual(guild.chan.created, 1)                       # không tạo invite mới
+
+    async def test_mint_rejects_invalid_email(self):
+        m, _ = self._cog()
+        with self.assertRaises(ValueError):
+            await m.mint_invite_for_order("ORD2", "An", "not-an-email", 30)
+
+    async def test_mint_rejects_bad_duration(self):
+        m, _ = self._cog()
+        with self.assertRaises(ValueError):
+            await m.mint_invite_for_order("ORD3", "An", "an@example.com", 0)
 
 
 if __name__ == "__main__":

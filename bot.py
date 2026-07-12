@@ -184,9 +184,11 @@ ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT '
 ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS notified_expiry BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS created_by BIGINT;
 ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS order_code TEXT;
 CREATE INDEX IF NOT EXISTS idx_hvhn_members_discord ON hvhn_members (discord_id);
 CREATE INDEX IF NOT EXISTS idx_hvhn_members_status ON hvhn_members (status);
 CREATE INDEX IF NOT EXISTS idx_hvhn_members_invite_code ON hvhn_members (invite_code);
+CREATE INDEX IF NOT EXISTS idx_hvhn_members_order_code ON hvhn_members (order_code);
 """
 
 SCHEMA += PDF_KNOWLEDGE_SCHEMA
@@ -263,9 +265,8 @@ async def main():
     if not database_url:
         raise RuntimeError("Thiếu DATABASE_URL trong file .env")
 
-    keep_alive()
-
     bot = HVHNBot(database_url)
+    keep_alive(bot)
     async with bot:
         await bot.start(token)
 

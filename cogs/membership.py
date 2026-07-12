@@ -83,7 +83,7 @@ def _fmt_ts(dt) -> str:
 
 
 class CustomerActivationModal(discord.ui.Modal, title="Kích hoạt trải nghiệm HVHN"):
-    def __init__(self, membership: "Membership"):
+    def __init__(self, membership: "Membership", default_name: str | None = None, default_email: str | None = None):
         super().__init__(timeout=300)
         self.membership = membership
         self.name = discord.ui.TextInput(
@@ -91,12 +91,14 @@ class CustomerActivationModal(discord.ui.Modal, title="Kích hoạt trải nghi�
             placeholder="Ví dụ: Nguyễn Văn A",
             min_length=2,
             max_length=120,
+            default=(default_name or None),
         )
         self.email = discord.ui.TextInput(
             label="Email nhận tài liệu",
             placeholder="ten@example.com",
             min_length=5,
             max_length=180,
+            default=(default_email or None),
         )
         self.add_item(self.name)
         self.add_item(self.email)
@@ -151,7 +153,8 @@ class CustomerActivationView(discord.ui.View):
         custom_id=ACTIVATE_CUSTOM_ID,
     )
     async def activate_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(CustomerActivationModal(self.membership))
+        name, email = await self.membership._prefill_for(interaction.user.id)
+        await interaction.response.send_modal(CustomerActivationModal(self.membership, name, email))
 
 
 class Membership(commands.Cog):
@@ -202,22 +205,26 @@ class Membership(commands.Cog):
         self.invite_uses[guild.id] = await self._fetch_invite_uses(guild)
         return self.invite_uses[guild.id]
 
-    async def _invite_channel(self, interaction: discord.Interaction):
-        guild = interaction.guild
+    def _pick_invite_channel(self, guild: discord.Guild, prefer=None):
+        """Chọn kênh tạo invite từ guild (không cần interaction — dùng cho cả webhook Phase 3)."""
         if guild is None:
             return None
         if INVITE_CHANNEL_ID:
             channel = guild.get_channel(INVITE_CHANNEL_ID)
             if channel and hasattr(channel, "create_invite"):
                 return channel
-        channel = interaction.channel
-        if channel and hasattr(channel, "create_invite"):
-            return channel
+        if prefer is not None and hasattr(prefer, "create_invite"):
+            return prefer
         for name in ("cổng-xác-nhận", "sảnh-chào-mừng", "hướng-dẫn-dùng-bot"):
             found = discord.utils.get(guild.text_channels, name=name)
             if found:
                 return found
         return guild.system_channel or (guild.text_channels[0] if guild.text_channels else None)
+
+    async def _invite_channel(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            return None
+        return self._pick_invite_channel(interaction.guild, prefer=interaction.channel)
 
     def _activation_channel(self, guild: discord.Guild):
         if ACTIVATE_CHANNEL_ID:
@@ -251,6 +258,65 @@ class Membership(commands.Cog):
             invite_code, days, created_by,
         )
 
+    async def _create_pending_order(self, invite_code: str, days: int, order_code: str,
+                                    name: str | None, email: str | None) -> int:
+        """Phase 3: dòng pending có sẵn tên/email từ form đặt mua (modal Phase 2 chỉ cần xác nhận)."""
+        return await self.bot.db.fetchval(
+            "INSERT INTO hvhn_members(invite_code,duration_days,status,order_code,name,email) "
+            "VALUES($1,$2,'pending',$3,$4,$5) RETURNING id",
+            invite_code, days, order_code, name, email,
+        )
+
+    async def mint_invite_for_order(self, order_code: str, name: str, email: str, days: int) -> dict:
+        """Phase 3 (Cách A): Apps Script gọi sau khi khớp chuyển khoản.
+
+        Tạo invite-1-lần + ghi dòng pending gắn order_code. Idempotent theo order_code để chống
+        double-credit: nếu đơn đã có, trả lại link cũ thay vì tạo mới. Raise ValueError với input sai.
+        """
+        order_code = (order_code or "").strip()
+        name = (name or "").strip()
+        email = (email or "").strip().lower()
+        if not order_code:
+            raise ValueError("Thiếu order_code")
+        if not valid_email(email):
+            raise ValueError("Email không hợp lệ")
+        if days <= 0 or days > 3650:
+            raise ValueError("duration_days phải trong khoảng 1–3650")
+
+        existing = await self.bot.db.fetchrow(
+            "SELECT invite_code, status FROM hvhn_members WHERE order_code=$1 ORDER BY id DESC LIMIT 1",
+            order_code,
+        )
+        if existing is not None:
+            code = existing["invite_code"]
+            return {
+                "order_code": order_code,
+                "invite_url": f"https://discord.gg/{code}" if code else None,
+                "reused": True,
+                "status": existing["status"],
+            }
+
+        guild = self._guild()
+        if guild is None:
+            raise RuntimeError("Bot chưa sẵn sàng: không xác định được guild")
+        channel = self._pick_invite_channel(guild)
+        if channel is None:
+            raise RuntimeError("Không tìm thấy kênh để tạo invite")
+        max_age = max(60, INVITE_HOURS * 3600)
+        invite = await channel.create_invite(
+            max_uses=1, max_age=max_age, unique=True, reason=f"HVHN order {order_code}",
+        )
+        rid = await self._create_pending_order(invite.code, days, order_code, name, email)
+        print(f"[debug] mint_invite_ok order={order_code} member_row={rid} days={days}", flush=True)
+        return {
+            "order_code": order_code,
+            "invite_url": invite.url,
+            "reused": False,
+            "member_id": rid,
+            "invite_hours": INVITE_HOURS,
+            "duration_days": days,
+        }
+
     async def _mark_invite_joined(self, invite_code: str, discord_id: int) -> dict | None:
         return await self.bot.db.fetchrow(
             "UPDATE hvhn_members SET discord_id=$2, status='joined' "
@@ -258,6 +324,17 @@ class Membership(commands.Cog):
             "RETURNING id, duration_days",
             invite_code, discord_id,
         )
+
+    async def _prefill_for(self, discord_id: int) -> tuple[str | None, str | None]:
+        """Lấy tên/email đã có sẵn (từ form đặt mua Phase 3) để điền sẵn modal cho khách xác nhận."""
+        row = await self.bot.db.fetchrow(
+            "SELECT name, email FROM hvhn_members WHERE discord_id=$1 AND status IN ('joined','active') "
+            "ORDER BY id DESC LIMIT 1",
+            discord_id,
+        )
+        if row is None:
+            return None, None
+        return row["name"], row["email"]
 
     async def _member_for_customer(self, discord_id: int) -> discord.Member | None:
         guild = self._guild()
