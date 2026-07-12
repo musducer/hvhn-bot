@@ -109,6 +109,7 @@ function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('HVHN')
     .addItem('🚀 Chạy tất cả NGAY (phân phối + gia hạn + hết hạn + dashboard)', 'hvhnTuDongHoa')
+    .addItem('⚙️ Cài/kiểm tra tự động hoá', 'damBaoTuDongHoa')
     .addItem('📝 Nhập mới thủ công (tab "Nhập mới") + Phân phối', 'themMoiVaPhanPhoi')
     .addItem('🔁 Phân phối lại (quét toàn bộ)', 'phanPhoi')
     .addSeparator()
@@ -125,6 +126,7 @@ function onOpen() {
     .addSubMenu(ui.createMenu('⚙️ Cài đặt ban đầu (chạy 1 lần)')
       .addItem('Tách theo khách', 'tachTheoKhach')
       .addItem('Cài tự động hoá toàn bộ', 'caiDatTuDongHoa')
+      .addItem('Kiểm tra trigger tự động', 'kiemTraTuDongHoa')
       .addItem('Tạo Google Form cho điện thoại', 'caiDatForm'))
     .addSubMenu(ui.createMenu('🧪 Trải nghiệm')
       .addItem('Cập nhật danh sách tài liệu trải nghiệm', 'capNhatTaiLieuTraiNghiem')
@@ -298,14 +300,58 @@ function hvhnTuDongHoa() {
 }
 
 // Chạy 1 lần sau khi dán code: tạo đủ trigger tự động, xoá trigger cũ trùng để tránh chạy lặp.
-function caiDatTuDongHoa() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const keepHandlers = {
+function _triggerHandlers() {
+  return {
     hvhnTuDongHoa: true,
     tuDongXuLyFileMoi: true,
     kiemTraHetHan: true,
     khoaTaiTraiNghiemLienTuc: true,
   };
+}
+
+function _demTriggerTheoHandler() {
+  const counts = {};
+  ScriptApp.getProjectTriggers().forEach(t => {
+    const h = t.getHandlerFunction();
+    counts[h] = (counts[h] || 0) + 1;
+  });
+  return counts;
+}
+
+function _coTrigger(handler) {
+  const counts = _demTriggerTheoHandler();
+  return (counts[handler] || 0) > 0;
+}
+
+function kiemTraTuDongHoa() {
+  const counts = _demTriggerTheoHandler();
+  const ok = (counts.hvhnTuDongHoa || 0) > 0;
+  const msg = [
+    ok ? '✅ Trigger tự động chính đang có.' : '⚠️ CHƯA có trigger tự động chính hvhnTuDongHoa.',
+    '',
+    'Số trigger hiện tại:',
+    '- hvhnTuDongHoa: ' + (counts.hvhnTuDongHoa || 0),
+    '- khoaTaiTraiNghiemLienTuc: ' + (counts.khoaTaiTraiNghiemLienTuc || 0),
+    '- kiemTraHetHan: ' + (counts.kiemTraHetHan || 0),
+    '',
+    ok
+      ? 'Nếu dữ liệu vẫn không tự lên, mở Apps Script > Executions để xem lỗi trigger gần nhất.'
+      : 'Bấm HVHN > ⚙️ Cài/kiểm tra tự động hoá để cài trigger 5 phút.'
+  ].join('\n');
+  SpreadsheetApp.getUi().alert(msg);
+}
+
+function damBaoTuDongHoa() {
+  if (!_coTrigger('hvhnTuDongHoa') || !_coTrigger('khoaTaiTraiNghiemLienTuc') || !_coTrigger('kiemTraHetHan')) {
+    caiDatTuDongHoa();
+    return;
+  }
+  SpreadsheetApp.getActiveSpreadsheet().toast('Trigger tự động đã có: hvhnTuDongHoa mỗi 5 phút + khóa tải mỗi 1 phút.');
+}
+
+function caiDatTuDongHoa() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const keepHandlers = _triggerHandlers();
   ScriptApp.getProjectTriggers().forEach(t => {
     if (keepHandlers[t.getHandlerFunction()]) ScriptApp.deleteTrigger(t);
   });
@@ -1892,6 +1938,9 @@ function caiDatForm() {
   props.setProperty('JOBS_KHACH_ID', jobsFolder.getId());
   props.setProperty('INCOMING_DOCS_ID', incomingFolder.getId());
   props.setProperty('BOT_DOCS_FORM_ID', botDocsFolder.getId());
+  // Cài luôn trigger tự động khi cài Form, tránh tình trạng watcher đã đẩy new_rows*.csv
+  // lên Drive nhưng Sheet chỉ cập nhật sau khi chủ bấm menu thủ công.
+  caiDatTuDongHoa();
 
   const msg = 'ĐÃ TẠO XONG.\n\n'
     + '① Form THÊM KHÁCH (gửi quản lý ngay được):\n' + formKhach.getPublishedUrl() + '\n\n'
