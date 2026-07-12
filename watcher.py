@@ -304,6 +304,16 @@ def _safe_stem(value, fallback="don"):
     return value[:120] or fallback
 
 
+def _parse_client_payload(payload):
+    parts = (payload or "").strip().replace(",", "\t").split("\t")
+    if len(parts) < 2:
+        raise ValueError("Đơn khách thiếu tên/email")
+    name, email = parts[0].strip(), parts[1].strip().lower()
+    if not name or "@" not in email:
+        raise ValueError("Đơn khách có tên/email không hợp lệ")
+    return name, email
+
+
 def _job_name(prefix, label, suffix):
     return f"{prefix}_{_ts()}_{_safe_stem(label)}_{uuid.uuid4().hex[:8]}{suffix}"
 
@@ -497,8 +507,7 @@ def _materialize_discord_job(job):
     job_type = job["job_type"]
     if job_type == "add_client":
         payload = (job["text_payload"] or "").strip()
-        label = payload.split("\t")[-1] if payload else str(job["id"])
-        _write_atomic(os.path.join(JOBS_KHACH, _job_name("discord_khach", label, ".txt")), payload.encode("utf-8"))
+        _process_add_client_payload(payload, source=f"discord_job#{job['id']}")
         return None
     elif job_type == "add_document":
         filename = job["file_name"] or f"discord_tai_lieu_{job['id']}.pdf"
@@ -804,6 +813,25 @@ async def _sync_pdf_knowledge(force=False):
         traceback.print_exc()
 
 
+def _process_add_client_payload(payload, *, source="queue"):
+    name, email = _parse_client_payload(payload)
+    docs = list_docs()
+    print(f"[KHÁCH] {name} - {email} ({source}) docs={len(docs)}", flush=True)
+
+    try:
+        append_client(name, email)
+    except ValueError as ve:
+        if "TRÙNG TÊN" in str(ve):
+            # B1: không render khách trùng tên (tránh ghi vào folder của người khác cùng tên).
+            raise
+        print("  (email đã có trong clients.csv, chỉ render lại)", flush=True)
+
+    rows = render_batch(docs, [{"name": name, "email": email}])
+    write_new_rows_csv(rows, filename=f"new_rows_khach_{_ts()}.csv")
+    print(f"[KHÁCH] xong {name} - {email}: rows={len(rows)}", flush=True)
+    return rows
+
+
 def xu_ly_don_them_khach():
     if not os.path.isdir(JOBS_KHACH):
         return
@@ -814,23 +842,15 @@ def xu_ly_don_them_khach():
             continue
         try:
             with open(path, encoding="utf-8") as f:
-                line = f.read().strip()
-            parts = line.replace(",", "\t").split("\t")
-            name, email = parts[0].strip(), parts[1].strip()
-            print(f"[KHÁCH] {name} - {email}", flush=True)
-
+                payload = f.read().strip()
             try:
-                append_client(name, email)
+                _process_add_client_payload(payload, source=os.path.basename(path))
             except ValueError as ve:
                 if "TRÙNG TÊN" in str(ve):
-                    # B1: không render khách trùng tên (tránh ghi vào folder của người khác cùng tên).
                     print(f"  BỎ QUA đơn khách: {ve}", flush=True)
                     os.remove(path)
                     continue
-                print("  (email đã có trong clients.csv, chỉ render lại)", flush=True)
-
-            rows = render_batch(list_docs(), [{"name": name, "email": email}])
-            write_new_rows_csv(rows, filename=f"new_rows_khach_{_ts()}.csv")
+                raise
             os.remove(path)
         except Exception:
             print("  LỖI xử lý đơn khách:", flush=True)
