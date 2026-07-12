@@ -4,7 +4,7 @@ import unittest
 
 os.environ.setdefault("GROQ_API_KEYS", "x")
 
-from cogs.ai import Planner, QuoteExtractor, _rag_plain
+from cogs.ai import AI, Planner, QuoteExtractor, _rag_plain
 import md_embeddings
 
 
@@ -36,6 +36,33 @@ class AuthorMatchTest(unittest.TestCase):
 
     def test_empty_request_matches_all(self):
         self.assertTrue(self._m("", "bất kỳ ai"))
+
+
+class SubjectMatchDiacriticTest(unittest.TestCase):
+    """Bo dau lam 'Nguyen Binh' dinh voi 'Nguyen Binh Phuong' -> kho lac de bi coi la dung chu de
+    -> bot bia tho. So khop chu de phai GIU DAU THANH."""
+
+    def _subjects(self, q):
+        return AI._query_subjects(q, None)
+
+    def test_name_subject_is_extracted_with_diacritics(self):
+        self.assertIn("nguyễn bính", self._subjects("Phân tích phong cách thơ Nguyễn Bính"))
+
+    def test_similar_name_without_diacritics_does_not_collide(self):
+        subs = self._subjects("Phân tích phong cách thơ Nguyễn Bính")
+        off_topic = "Nguyễn Bình Phương bàn về thời gian; Mai Văn Phấn nói về bản sắc."
+        self.assertFalse(AI._text_mentions_subject(subs, off_topic))
+
+    def test_on_subject_text_still_matches(self):
+        subs = self._subjects("Phân tích phong cách thơ Nguyễn Bính")
+        on_topic = "Nguyễn Bính là nhà thơ chân quê, bài Tương tư nổi tiếng."
+        self.assertTrue(AI._text_mentions_subject(subs, on_topic))
+
+    def test_off_subject_pile_is_flagged(self):
+        q = "Phân tích phong cách thơ Nguyễn Bính"
+        plan = Planner.build(q)
+        pdf_meta = {"chunks": [{"title": "", "first_500": "Nguyễn Bình Phương, Mai Văn Phấn", "excerpt": ""}]}
+        self.assertTrue(AI._context_off_subject(q, plan, pdf_meta))
 
 
 class SignatureTest(unittest.TestCase):

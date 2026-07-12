@@ -1483,36 +1483,37 @@ class AI(commands.Cog):
         """Tac gia + ten tac pham -> chu de bat buoc cua cau hoi. Lay tu (1) author_filter,
         (2) chuoi trong ngoac kep, (3) chuoi ten rieng viet hoa (vd 'phong cach tho Nguyen
         Binh' -> 'Nguyen Binh') de bat ca khi cau hoi khong dung 'cua'/'tac gia'."""
-        subjects: list[str] = []
+        raw: list[str] = []
         if getattr(plan, "author_filter", ""):
-            subjects.append(cls._plain_text(plan.author_filter))
+            raw.append(plan.author_filter)
         for m in re.findall(r"[\"'“”‘’«»]([^\"'“”‘’«»]{2,60})[\"'“”‘’«»]", query or ""):
-            t = cls._plain_text(m).strip()
-            if len(t) >= 3:
-                subjects.append(t)
+            if len(m.strip()) >= 3:
+                raw.append(m)
         for m in cls._NAME_SEQ_RE.findall(query or ""):
-            t = cls._plain_text(m).strip()
-            words = t.split()
+            t_plain = cls._plain_text(m).strip()
+            words = t_plain.split()
             # Bo cum mo dau cau hoi bi viet hoa (vd "Phan Tich", "Phong Cach").
-            if not words or t in cls._SUBJECT_STOPWORDS or " ".join(words[:2]) in cls._SUBJECT_STOPWORDS:
+            if not words or t_plain in cls._SUBJECT_STOPWORDS or " ".join(words[:2]) in cls._SUBJECT_STOPWORDS:
                 continue
-            if len(t) >= 3:
-                subjects.append(t)
-        # Loai trung, giu thu tu.
+            if len(t_plain) >= 3:
+                raw.append(m)
+        # GIU dau thanh (khong _plain_text) de 'Nguyen Binh' khong dinh voi 'Nguyen Binh Phuong'.
         seen: set[str] = set()
         uniq: list[str] = []
-        for s in subjects:
-            if s and s not in seen:
-                seen.add(s)
-                uniq.append(s)
+        for s in raw:
+            f = cls._fold_keep_marks(s)
+            if f and f not in seen:
+                seen.add(f)
+                uniq.append(f)
         return uniq
 
     @classmethod
     def _text_mentions_subject(cls, subjects: list[str], text: str) -> bool:
-        """True neu text co nhac toi it nhat mot chu de (ten tac pham/tac gia hoac ho tac gia)."""
+        """True neu text co nhac toi it nhat mot chu de (ten tac pham/tac gia hoac ho tac gia).
+        So khop GIU DAU THANH: 'nguyễn bính' KHONG khop 'nguyễn bình phương'."""
         if not subjects:
             return True  # khong ro chu de -> khong phan xet
-        haystack = cls._plain_text(text or "")
+        haystack = cls._fold_keep_marks(text or "")
         if not haystack.strip():
             return False
         for subj in subjects:
@@ -1880,6 +1881,12 @@ class AI(commands.Cog):
         value = unicodedata.normalize("NFD", value or "")
         value = "".join(ch for ch in value if unicodedata.category(ch) != "Mn").lower()
         return value.replace("đ", "d")
+
+    @staticmethod
+    def _fold_keep_marks(value: str) -> str:
+        # Lowercase + gom khoang trang, GIU nguyen dau thanh de phan biet ten de-nham-lan-khi-bo-dau
+        # (vd 'Nguyen Binh' vs 'Nguyen Binh Phuong' — co dau: 'nguyễn bính' != 'nguyễn bình phương').
+        return re.sub(r"\s+", " ", (value or "").lower()).strip()
 
     @staticmethod
     def _needs_web(query: str, mode: str, has_local_context: bool) -> bool:
@@ -2456,10 +2463,17 @@ class AI(commands.Cog):
                 "trich dan). Khong don tho, khong lap y."
             ]
         librarian_dump = bool(answer) and self._looks_like_librarian_dump(answer)
-        # Bia trich dan: KHONG co evidence nao ma bai VAN dat cau tho/cau van dai trong ngoac
-        # kep -> chac chan la bia (khong the co trich dan xac minh khi khong co dan lieu).
-        ungrounded = not evidence_for_quote_check.strip()
-        fabricated_quotes = bool(answer) and ungrounded and self._has_unverified_long_quotes(answer, "")
+        # Bia trich dan: KHONG co evidence dung chu de ma bai VAN dat cau tho/cau van dai trong
+        # ngoac kep -> chac chan la bia. "Ungrounded" = khong co evidence, HOAC evidence khong
+        # he nhac toi tac gia/tac pham dang hoi (vd hoi Nguyen Binh nhung kho chi co Nguyen Binh
+        # Phuong) -> moi trich dan dat cho tac gia deu la bia.
+        _subjects = self._query_subjects(prompt, None)
+        _evidence_covers_subject = (
+            self._text_mentions_subject(_subjects, evidence_for_quote_check)
+            if _subjects else bool(evidence_for_quote_check.strip())
+        )
+        ungrounded = (not evidence_for_quote_check.strip()) or (bool(_subjects) and not _evidence_covers_subject)
+        fabricated_quotes = bool(answer) and ungrounded and self._has_unverified_long_quotes(answer, evidence_for_quote_check)
         needs_repair = bool(answer) and (
             librarian_dump
             or fabricated_quotes
