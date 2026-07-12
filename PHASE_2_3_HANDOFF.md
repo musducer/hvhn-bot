@@ -82,16 +82,56 @@ Mục tiêu: bỏ hẳn việc admin gõ tay thông tin khách. Luồng CHỦ Đ
 
 ---
 
-## PHASE 3 — Tự nhận chuyển khoản (tuỳ chọn, làm sau)
+## PHASE 3 — Tự nhận chuyển khoản → tự gửi link (kiến trúc ĐÃ CHỐT: "Cách A")
 
-Vấn đề: chuyển khoản ngân hàng VN không tự biết nếu không qua cổng. Với volume nhỏ, giữ thủ công vẫn ổn.
+Bối cảnh nghiệp vụ (chủ đã chốt):
+- Khách đến từ nơi bán (fanpage/Zalo) → điền **Google Form** (ĐÃ CÓ) thu **Họ tên + Email (+ SĐT)**.
+  Form/Sheet là nơi lưu đơn. **Email là kênh liên lạc lại DUY NHẤT** cho luồng chính (không dùng
+  Zalo/Messenger): ai cũng có email, và email này TRÙNG email nhận tài liệu của watcher → một công đôi việc.
+- Chuyển khoản VCB/MB **không mang theo thông tin liên lạc** — chỉ có số tiền + **nội dung CK (memo)**.
+  Vì vậy phải đối soát bằng **mã đơn duy nhất** sinh lúc đặt hàng, khách ghi vào memo khi CK.
+- "Khách chưa từng có Discord" KHÔNG phải rào cản: gửi họ **link invite** qua email, bấm vào Discord
+  web/app tự mở + tạo tài khoản tại chỗ. Đây là hành vi chuẩn.
 
-- Tích hợp **SePay** hoặc **Casso** (đọc biến động số dư qua webhook/API). Khi có giao dịch khớp nội dung
-  chuyển khoản (vd mã đơn), tự động gọi luồng Phase 2: tạo invite + gửi cho khách (qua email/Zalo/kênh admin).
-- Cần: endpoint webhook (Render là web service? kiểm tra bot có HTTP server chưa — hiện là bot Discord
-  thuần, có thể phải thêm `aiohttp.web` route hoặc dùng dịch vụ trung gian). Xác thực chữ ký webhook.
-- Đối soát nội dung CK ↔ khách (mã đơn duy nhất sinh lúc báo giá). Ghi log giao dịch, chống double-credit.
-- Cân nhắc: bước này nhiều rủi ro tiền bạc — thêm xác nhận admin (bán tự động) trước khi cấp.
+### Kiến trúc "Cách A" — Apps Script là bộ não, bot chỉ cấp invite
+Chủ đã chọn Cách A (thay vì để webhook trỏ thẳng về bot). Phân vai:
+
+1. **Apps Script (Web App URL) = webhook target của SePay** và là nơi gửi email.
+   - Nhận webhook biến động số dư từ **SePay** (đọc VCB/MB; Casso là phương án thay thế).
+   - Đối soát: tách **mã đơn** từ `memo` giao dịch → tra dòng tương ứng trong **Sheet đơn hàng**
+     (đã có Họ tên + Email). Chống double-credit: đánh dấu cột "đã xử lý" trên dòng đó, bỏ qua nếu đã set.
+   - Gọi **endpoint cấp-invite của bot** (xem dưới) để lấy 1 link invite-1-lần.
+   - **Gửi email bằng Gmail của chủ**: `MailApp.sendEmail(email, tiêu_đề, nội_dung_có_link)` —
+     MIỄN PHÍ, không cần SendGrid/Mailgun (quota ~100 mail/ngày là quá đủ cho volume này).
+2. **Bot (Render, luôn online) hở đúng 1 endpoint HTTP** vì Apps Script KHÔNG tạo được invite Discord:
+   - `keep_alive.py` đã có sẵn web server → thêm 1 route, vd `POST /mint-invite`.
+   - Body: `{order_code, name, email, duration_days}` + **secret token** (so khớp env `HVHN_MINT_SECRET`;
+     Apps Script gửi kèm header). Từ chối nếu sai secret.
+   - Xử lý: tạo invite-1-lần (`channel.create_invite(max_uses=1, max_age=…, unique=True)`) + **INSERT
+     `hvhn_members` dòng `status='pending'`** với `invite_code, duration_days, email, name` (tái dùng đúng
+     luồng Phase 2 — chỉ khác là email/name đã biết trước từ form, nên modal Phase 2 chỉ cần XÁC NHẬN/sửa,
+     không bắt nhập mới). Trả JSON `{"invite_url": …}`.
+   - **Bot vẫn là nguồn sự thật** cho `hvhn_members`; Apps Script không đụng DB Postgres.
+
+### Yêu cầu kỹ thuật Phase 3
+- **Idempotency 2 lớp**: (a) Sheet đánh dấu đơn đã xử lý; (b) bot từ chối tạo trùng nếu đã có dòng
+  `pending/joined/active` cho cùng `order_code` (thêm cột `order_code` vào `hvhn_members`, unique-ish).
+- **Bảo mật**: endpoint mint phải kiểm secret; log giao dịch (số tiền, memo, mã đơn, thời điểm) để đối soát.
+  KHÔNG log PII khách ra ngoài. Xác thực chữ ký/API-key webhook SePay nếu SePay hỗ trợ.
+- **Đối soát số tiền**: kiểm tiền nhận ≥ giá gói mới cấp (tránh khách CK thiếu vẫn được link).
+- **Bán tự động (khuyến nghị giai đoạn đầu)**: có thể để bot chỉ tạo invite sau khi admin bấm duyệt 1 nút
+  (giảm rủi ro tiền bạc), rồi mới bật full-auto khi đã tin cậy.
+- **Test được**: tách logic thuần "parse mã đơn từ memo" + "match đơn trong Sheet" và test; endpoint bot
+  test bằng FakeDB như `tests/test_membership.py`. Phần SePay/Gmail thật phải kiểm thủ công.
+
+### Luồng tổng (Cách A)
+```
+Khách điền Form (tên+email) → nhận mã đơn → CK VCB/MB (memo = mã đơn)
+   → SePay webhook → Apps Script: khớp memo↔Sheet, chống trùng
+   → Apps Script POST /mint-invite (bot) → bot tạo invite + INSERT hvhn_members(pending)
+   → Apps Script MailApp.sendEmail(link invite) → khách bấm link → vào Discord
+   → (Phase 2) on_member_join khớp invite_code → modal xác nhận email → active + role + add_client
+```
 
 ---
 
@@ -99,4 +139,4 @@ Vấn đề: chuyển khoản ngân hàng VN không tự biết nếu không qua
 - Thêm test cho phần logic thuần + DB (FakeDB), chạy `pytest` toàn bộ phải xanh trước khi commit.
 - Phần Discord trực tiếp (invite/modal/join/task) KHÔNG test unit được đầy đủ — phải test trên server thật;
   ghi rõ giả định trong code + báo chủ những gì cần kiểm thủ công.
-- Commit theo pha, message tiếng Anh, cuối message thêm dòng Co-Authored-By.
+- Commit theo pha, message tiếng Anh.
