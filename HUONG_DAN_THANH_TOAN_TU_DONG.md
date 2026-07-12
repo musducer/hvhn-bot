@@ -93,7 +93,10 @@ Code "bộ não" (sinh mã đơn, gửi hướng dẫn CK, khớp tiền, gọi 
 SePay là dịch vụ đọc biến động số dư VCB/MB rồi bắn tín hiệu.
 
 1. Đăng ký **sepay.vn**, liên kết tài khoản **VCB** hoặc **MB** theo hướng dẫn của họ.
-2. Trong SePay, phần **Webhook / Tích hợp**, dán **Web app URL** (bước B4) làm địa chỉ nhận thông báo.
+2. Trong SePay, phần **Webhook / Tích hợp**, dán **Web app URL kèm token** làm địa chỉ nhận thông báo:
+   `https://script.google.com/macros/s/.../exec?token=<PMT_WEBHOOK_TOKEN>`.
+   - Xem chuỗi đầy đủ trong Sheet: **HVHN → 💳 Thanh toán tự động → 👀 Xem cài đặt hiện tại**.
+   - Nếu thiếu `?token=...`, Apps Script sẽ từ chối webhook và khách sẽ không nhận mail link Discord.
 3. Lưu lại. Từ giờ mỗi lần có tiền về, SePay gọi Apps Script tự động.
 
 ---

@@ -24,6 +24,24 @@ class AppsScriptAutomationTest(unittest.TestCase):
         idx_call = self.src.index("caiDatTuDongHoa();", idx_form)
         self.assertGreater(idx_call, idx_form)
 
+    def test_payment_menu_has_resend_and_webhook_test_tools(self):
+        self.assertIn("🔁 Gửi lại link Discord cho đơn đang chọn", self.src)
+        self.assertIn("guiLaiLinkDiscordChoDonDangChon", self.src)
+        self.assertIn("🧪 Test webhook bằng mã đơn đang chọn", self.src)
+        self.assertIn("testWebhookThanhToanChoDonDangChon", self.src)
+
+    def test_payment_webhook_logs_and_uses_shared_mint_send_path(self):
+        self.assertIn("function _pmtMintAndSendForRow", self.src)
+        self.assertIn("Webhook thanh toán tới", self.src)
+        self.assertIn("Webhook không khớp mã đơn", self.src)
+        self.assertIn("data.creditAmount", self.src)
+        self.assertIn("_pmtMintAndSendForRow(sheet, i + 2", self.src)
+
+    def test_payment_settings_shows_full_sepay_url_with_token(self):
+        self.assertIn("ScriptApp.getService().getUrl()", self.src)
+        self.assertIn("URL DÁN VÀO SEPAY phải là", self.src)
+        self.assertIn("?token=", self.src)
+
 
 if __name__ == "__main__":
     unittest.main()

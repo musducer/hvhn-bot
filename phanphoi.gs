@@ -132,7 +132,10 @@ function onOpen() {
     .addSubMenu(ui.createMenu('💳 Thanh toán tự động')
       .addItem('⚙️ Cài đặt (bot URL, mật khẩu, ngân hàng, giá, số ngày)', 'caiDatThanhToanTuDong')
       .addItem('👀 Xem cài đặt hiện tại', 'xemCaiDatThanhToan')
-      .addItem('📱 Tạo/lấy lại Form đặt mua (gửi khách)', 'taoLaiFormDatMua'))
+      .addItem('📱 Tạo/lấy lại Form đặt mua (gửi khách)', 'taoLaiFormDatMua')
+      .addSeparator()
+      .addItem('🔁 Gửi lại link Discord cho đơn đang chọn', 'guiLaiLinkDiscordChoDonDangChon')
+      .addItem('🧪 Test webhook bằng mã đơn đang chọn', 'testWebhookThanhToanChoDonDangChon'))
     .addSubMenu(ui.createMenu('🧪 Trải nghiệm')
       .addItem('Cập nhật danh sách tài liệu trải nghiệm', 'capNhatTaiLieuTraiNghiem')
       .addItem('Kiểm tra hết hạn khách trải nghiệm (ngay)', 'kiemTraHetHanTraiNghiem')
@@ -2086,12 +2089,31 @@ function _pmtOrderSheet() {
   let sh = ss.getSheetByName(PMT_ORDER_TAB);
   if (!sh) {
     sh = ss.insertSheet(PMT_ORDER_TAB);
-    sh.getRange(1, 1, 1, 6).setValues([['Thời gian', 'Mã đơn', 'Tên', 'Email', 'Số tiền', 'Trạng thái']]);
-    sh.getRange(1, 1, 1, 6).setBackground('#0b8043').setFontColor('#fff').setFontWeight('bold');
+    sh.getRange(1, 1, 1, 10).setValues([[
+      'Thời gian', 'Mã đơn', 'Tên', 'Email', 'Số tiền', 'Trạng thái',
+      'Invite URL', 'Thanh toán lúc', 'Gửi mail lúc', 'Ghi chú'
+    ]]);
+    sh.getRange(1, 1, 1, 10).setBackground('#0b8043').setFontColor('#fff').setFontWeight('bold');
     sh.setFrozenRows(1);
     sh.setColumnWidth(2, 110); sh.setColumnWidth(3, 160); sh.setColumnWidth(4, 220);
   }
+  _pmtEnsureOrderSheetColumns(sh);
   return sh;
+}
+
+function _pmtEnsureOrderSheetColumns(sh) {
+  const headers = ['Thời gian', 'Mã đơn', 'Tên', 'Email', 'Số tiền', 'Trạng thái',
+    'Invite URL', 'Thanh toán lúc', 'Gửi mail lúc', 'Ghi chú'];
+  if (sh.getMaxColumns() < headers.length) sh.insertColumnsAfter(sh.getMaxColumns(), headers.length - sh.getMaxColumns());
+  const cur = sh.getRange(1, 1, 1, headers.length).getValues()[0];
+  let changed = false;
+  for (let i = 0; i < headers.length; i++) {
+    if (!cur[i]) { cur[i] = headers[i]; changed = true; }
+  }
+  if (changed || cur[6] !== 'Invite URL') {
+    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+    sh.getRange(1, 1, 1, headers.length).setBackground('#0b8043').setFontColor('#fff').setFontWeight('bold');
+  }
 }
 
 // ---- Cài đặt bằng hộp thoại (không sửa code) ----
@@ -2145,14 +2167,18 @@ function caiDatThanhToanTuDong() {
 
 function xemCaiDatThanhToan() {
   const p = PropertiesService.getScriptProperties();
+  let webUrl = '';
+  try { webUrl = ScriptApp.getService().getUrl() || ''; } catch (e) {}
+  const token = p.getProperty('PMT_WEBHOOK_TOKEN') || '';
+  const sepayUrl = webUrl && token ? (webUrl + '?token=' + token) : '(deploy Web app xong mới có URL; token phải gắn dạng ?token=...)';
   SpreadsheetApp.getUi().alert('Cài đặt thanh toán hiện tại:\n\n' +
     '• Bot URL: ' + (p.getProperty('PMT_BOT_URL') || '(chưa đặt)') + '\n' +
     '• Mật khẩu: ' + (p.getProperty('PMT_SECRET') ? '(đã đặt)' : '(chưa đặt)') + '\n' +
     '• Ngân hàng: ' + (p.getProperty('PMT_BANK') || '(chưa đặt)') + '\n' +
     '• Giá gói: ' + (p.getProperty('PMT_PRICE') || '(chưa đặt)') + ' VND\n' +
     '• Số ngày/gói: ' + (p.getProperty('PMT_DAYS') || '30') + '\n' +
-    '• Token webhook: ' + (p.getProperty('PMT_WEBHOOK_TOKEN') || '(chưa đặt)') + '\n' +
-    '  (dán vào cuối URL SePay dạng ...?token=<token>)');
+    '• Token webhook: ' + (token || '(chưa đặt)') + '\n\n' +
+    'URL DÁN VÀO SEPAY phải là:\n' + sepayUrl);
 }
 
 // ---- Form đặt mua (khách tự điền) ----
@@ -2200,6 +2226,101 @@ function xuLyFormDatMua(e) {
   ghiLog('Đơn đặt mua mới', maDon + ' - ' + name + ' - ' + email);
 }
 
+function _pmtParseJsonSafe(text) {
+  try { return JSON.parse(text || '{}'); } catch (e) { return { error: 'bad_json', raw: String(text || '').slice(0, 300) }; }
+}
+
+function _pmtMintInvite(maDon, name, email) {
+  const url = _pmtProp('PMT_BOT_URL', '');
+  const secret = _pmtProp('PMT_SECRET', '');
+  const days = parseInt(_pmtProp('PMT_DAYS', '30'), 10);
+  if (!url || !secret) {
+    ghiLog('Chưa cấu hình bot thanh toán', 'thiếu PMT_BOT_URL/PMT_SECRET');
+    return { error: 'chua_cau_hinh' };
+  }
+  const res = UrlFetchApp.fetch(url + '/mint-invite', {
+    method: 'post', contentType: 'application/json',
+    headers: { 'X-HVHN-Secret': secret },
+    payload: JSON.stringify({ order_code: maDon, name: name, email: email, duration_days: days }),
+    muteHttpExceptions: true,
+  });
+  const code = res.getResponseCode();
+  const out = _pmtParseJsonSafe(res.getContentText());
+  if (!out.invite_url) {
+    ghiLog('Bot tạo link lỗi', maDon + ' HTTP ' + code + ' -> ' + res.getContentText());
+    return { error: 'mint_loi', http: code, detail: res.getContentText() };
+  }
+  out.http = code;
+  return out;
+}
+
+function _pmtSendInviteEmail(email, name, inviteUrl) {
+  MailApp.sendEmail(email, 'Link tham gia Discord HVHN',
+    'Chào ' + name + ',\n\n' +
+    'Thanh toán thành công! Bấm link sau để vào Discord:\n' +
+    inviteUrl + '\n\n' +
+    'Vào xong nhớ bấm nút "Kích hoạt trải nghiệm" để xác nhận email và nhận tài liệu nhé.');
+}
+
+function _pmtMintAndSendForRow(sheet, rowNumber, opts) {
+  opts = opts || {};
+  const row = sheet.getRange(rowNumber, 1, 1, 10).getValues()[0];
+  const maDon = String(row[1] || '').trim();
+  const name = String(row[2] || '').trim();
+  const email = String(row[3] || '').trim().toLowerCase();
+  if (!maDon || !name || !email) throw new Error('Dòng đơn thiếu mã/tên/email');
+  const out = _pmtMintInvite(maDon, name, email);
+  if (!out.invite_url) return out.error || 'mint_loi';
+  _pmtSendInviteEmail(email, name, out.invite_url);
+  const now = new Date();
+  sheet.getRange(rowNumber, 6).setValue('da_xu_ly');
+  sheet.getRange(rowNumber, 7).setValue(out.invite_url);
+  if (opts.paidAt) sheet.getRange(rowNumber, 8).setValue(opts.paidAt);
+  sheet.getRange(rowNumber, 9).setValue(now);
+  sheet.getRange(rowNumber, 10).setValue((opts.note || '') + (out.reused ? ' reused_invite' : ''));
+  ghiLog('Đã cấp link Discord', maDon + ' - ' + email + (opts.note ? ' - ' + opts.note : ''));
+  return 'ok';
+}
+
+function guiLaiLinkDiscordChoDonDangChon() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  if (sheet.getName() !== PMT_ORDER_TAB) {
+    SpreadsheetApp.getUi().alert('Hãy chọn một dòng trong tab ' + PMT_ORDER_TAB + ' trước.');
+    return;
+  }
+  const row = sheet.getActiveRange().getRow();
+  if (row <= 1) {
+    SpreadsheetApp.getUi().alert('Hãy chọn dòng đơn của khách, không chọn header.');
+    return;
+  }
+  const status = _pmtMintAndSendForRow(sheet, row, { note: 'gui_lai_thu_cong' });
+  SpreadsheetApp.getUi().alert(status === 'ok' ? 'Đã gửi lại link Discord cho khách.' : ('Không gửi được: ' + status));
+}
+
+function testWebhookThanhToanChoDonDangChon() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const sheet = ss.getActiveSheet();
+  if (sheet.getName() !== PMT_ORDER_TAB) {
+    SpreadsheetApp.getUi().alert('Hãy chọn một dòng trong tab ' + PMT_ORDER_TAB + ' trước.');
+    return;
+  }
+  const row = sheet.getActiveRange().getRow();
+  if (row <= 1) {
+    SpreadsheetApp.getUi().alert('Hãy chọn dòng đơn của khách, không chọn header.');
+    return;
+  }
+  const vals = sheet.getRange(row, 1, 1, 6).getValues()[0];
+  const maDon = vals[1], gia = vals[4];
+  const token = _pmtProp('PMT_WEBHOOK_TOKEN', '');
+  const fake = {
+    parameter: { token: token },
+    postData: { contents: JSON.stringify({ transferType: 'in', content: maDon, transferAmount: gia || 999999 }) }
+  };
+  const out = doPost(fake).getContent();
+  SpreadsheetApp.getUi().alert('Kết quả test webhook: ' + out + '\nXem thêm tab Nhật ký.');
+}
+
 // ---- SePay webhook: có tiền về -> khớp mã đơn -> xin link từ bot -> gửi khách ----
 function doPost(e) {
   try {
@@ -2218,7 +2339,8 @@ function doPost(e) {
     const loai = String(data.transferType || data.type || 'in').toLowerCase();
     if (loai && loai.indexOf('out') >= 0) return _pmtOut('bo_qua_tien_ra');
     const noiDung = String(data.content || data.description || data.transferContent || data.addInfo || '').toUpperCase();
-    const soTien = Number(data.transferAmount || data.amount || data.amountIn || 0);
+    const soTien = Number(data.transferAmount || data.amount || data.amountIn || data.creditAmount || 0);
+    ghiLog('Webhook thanh toán tới', 'amount=' + soTien + ' memo="' + noiDung.slice(0, 120) + '"');
     const sheet = _pmtOrderSheet();
     const last = sheet.getLastRow();
     if (last < 2) return _pmtOut('khong_khop');
@@ -2233,33 +2355,13 @@ function doPost(e) {
         ghiLog('CK thiếu tiền', maDon + ' nhận ' + soTien + '/' + gia);
         return _pmtOut('thieu_tien');
       }
-      const url = _pmtProp('PMT_BOT_URL', '');
-      const secret = _pmtProp('PMT_SECRET', '');
-      const days = parseInt(_pmtProp('PMT_DAYS', '30'), 10);
-      if (!url || !secret) {
-        ghiLog('Chưa cấu hình bot thanh toán', 'thiếu PMT_BOT_URL/PMT_SECRET');
-        return _pmtOut('chua_cau_hinh');
-      }
-      const res = UrlFetchApp.fetch(url + '/mint-invite', {
-        method: 'post', contentType: 'application/json',
-        headers: { 'X-HVHN-Secret': secret },
-        payload: JSON.stringify({ order_code: maDon, name: name, email: email, duration_days: days }),
-        muteHttpExceptions: true,
+      const status = _pmtMintAndSendForRow(sheet, i + 2, {
+        paidAt: new Date(),
+        note: 'webhook amount=' + soTien
       });
-      const out = JSON.parse(res.getContentText() || '{}');
-      if (!out.invite_url) {
-        ghiLog('Bot tạo link lỗi', maDon + ' -> ' + res.getContentText());
-        return _pmtOut('mint_loi');
-      }
-      MailApp.sendEmail(email, 'Link tham gia Discord HVHN',
-        'Chào ' + name + ',\n\n' +
-        'Thanh toán thành công! Bấm link sau để vào Discord:\n' +
-        out.invite_url + '\n\n' +
-        'Vào xong nhớ bấm nút "Kích hoạt trải nghiệm" để xác nhận email và nhận tài liệu nhé.');
-      sheet.getRange(i + 2, 6).setValue('da_xu_ly'); // đánh dấu, không cấp trùng
-      ghiLog('Đã cấp link Discord', maDon + ' - ' + email);
-      return _pmtOut('ok');
+      return _pmtOut(status);
     }
+    ghiLog('Webhook không khớp mã đơn', 'memo="' + noiDung.slice(0, 180) + '" amount=' + soTien);
     return _pmtOut('khong_khop');
   } catch (err) {
     ghiLog('LỖI doPost thanh toán', (err && err.message) || String(err));
