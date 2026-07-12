@@ -23,6 +23,7 @@ INITIAL_EXTENSIONS = [
     "cogs.fun",
     "cogs.ai",
     "cogs.doc_storage",
+    "cogs.membership",
     "cogs.help",
 ]
 
@@ -158,6 +159,22 @@ CREATE TABLE IF NOT EXISTS server_rules (
     title TEXT NOT NULL,
     body TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS hvhn_members (
+    id SERIAL PRIMARY KEY,
+    discord_id BIGINT,
+    email TEXT,
+    name TEXT,
+    invite_code TEXT,
+    duration_days INTEGER NOT NULL DEFAULT 30,
+    granted_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    status TEXT NOT NULL DEFAULT 'active',
+    notified_expiry BOOLEAN NOT NULL DEFAULT FALSE,
+    created_by BIGINT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_hvhn_members_discord ON hvhn_members (discord_id);
+CREATE INDEX IF NOT EXISTS idx_hvhn_members_status ON hvhn_members (status);
 """
 
 SCHEMA += PDF_KNOWLEDGE_SCHEMA
