@@ -72,7 +72,9 @@ class DiscordSendPagingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(followup.sent[0]["embed"].title, "Then - Hỏi Văn (1/2)")
         self.assertEqual(followup.sent[1]["embed"].title, "Then - Hỏi Văn (2/2)")
 
-    async def test_send_answer_embeds_falls_back_when_later_embed_fails(self):
+    async def test_failed_page_is_retried_as_smaller_embeds_not_plain_text(self):
+        # Nguoi dung muon TAT CA tren embed: khi embed lon that bai, phai thu lai bang
+        # embed nho hon, KHONG ha xuong tin nhan tho.
         ai = AI.__new__(AI)
         ai.bot = object()
         answer = "\n\n".join(["Một " + "a" * 3000, "Hai " + "b" * 3000])
@@ -86,11 +88,29 @@ class DiscordSendPagingTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(followup.sent[0]["embed"].title, "Then - Hỏi Văn (1/2)")
-        self.assertTrue(any((item["content"] or "").startswith("**Then - Hỏi Văn (2/2)**")
-                            or (item["content"] or "").startswith("**Then - Hỏi Văn (2/2) [")
-                            for item in followup.sent))
-        self.assertFalse(any((item["content"] or "").strip() == "**Then - Hỏi Văn (2/2)**"
-                             for item in followup.sent))
+        # Trang 2 duoc gui lai duoi dang cac embed nho, khong co tin nhan tho nao.
+        self.assertTrue(all(item["content"] is None for item in followup.sent))
+        retry_titles = [item["embed"].title for item in followup.sent if item["embed"].title.startswith("Then - Hỏi Văn (2/2)")]
+        self.assertTrue(all("[" in t for t in retry_titles))
+        self.assertGreaterEqual(len(retry_titles), 2)
+
+    async def test_plain_text_only_when_small_embed_also_fails(self):
+        # Neu ca embed nho cung fail -> moi ha xuong tin nhan tho.
+        ai = AI.__new__(AI)
+        ai.bot = object()
+        answer = "Một " + "a" * 3000
+        # Fail embed lon lan ca hai embed nho.
+        followup = FakeFollowup(fail_embed_titles={
+            "Then - Hỏi Văn", "Then - Hỏi Văn [1/2]", "Then - Hỏi Văn [2/2]",
+        })
+
+        await ai._send_answer_embeds(
+            FakeInteraction(followup),
+            title="Then - Hỏi Văn",
+            answer=answer,
+            full_prompt="prompt",
+        )
+        self.assertTrue(any((item["content"] or "").startswith("**Then - Hỏi Văn") for item in followup.sent))
 
 
 if __name__ == "__main__":

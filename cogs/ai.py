@@ -1399,17 +1399,37 @@ class AI(commands.Cog):
                     f"chars={len(page)} err={type(exc).__name__}: {exc}",
                     flush=True,
                 )
+                # Nguoi dung muon TAT CA hien tren embed: thu lai bang cac embed NHO hon truoc,
+                # chi ha xuong tin nhan tho khi ca embed nho cung that bai.
                 fallback_parts = self._split_answer_pages(page, 1800)
                 for part_index, part in enumerate(fallback_parts, start=1):
-                    fallback = part
-                    if total > 1:
-                        suffix = f" [{part_index}/{len(fallback_parts)}]" if len(fallback_parts) > 1 else ""
-                        fallback = f"**{shown_title}{suffix}**\n\n{part}"
+                    sub_title = shown_title
+                    if len(fallback_parts) > 1:
+                        sub_title = f"{shown_title} [{part_index}/{len(fallback_parts)}]"
+                    sub_view = view if part_index == 1 else None
+                    sub_embed = discord.Embed(title=sub_title, description=part, color=discord.Color.green())
+                    sub_embed.set_footer(text=footer)
                     try:
-                        await interaction.followup.send(content=fallback)
+                        await interaction.followup.send(embed=sub_embed, view=sub_view)
                         print(
                             f"[debug] discord_answer_page_sent page={index}/{total} "
-                            f"fallback_part={part_index} chars={len(fallback)} embed=False",
+                            f"retry_part={part_index}/{len(fallback_parts)} chars={len(part)} embed=True",
+                            flush=True,
+                        )
+                        continue
+                    except Exception as retry_exc:
+                        print(
+                            f"[debug] discord_answer_page_embed_retry_failed page={index}/{total} "
+                            f"part={part_index} err={type(retry_exc).__name__}: {retry_exc}",
+                            flush=True,
+                        )
+                    # Chot cuoi: tin nhan tho (chi khi ca embed nho cung fail).
+                    plain = part if not (total > 1 or len(fallback_parts) > 1) else f"**{sub_title}**\n\n{part}"
+                    try:
+                        await interaction.followup.send(content=plain)
+                        print(
+                            f"[debug] discord_answer_page_sent page={index}/{total} "
+                            f"fallback_part={part_index} chars={len(plain)} embed=False",
                             flush=True,
                         )
                     except Exception as fallback_exc:
