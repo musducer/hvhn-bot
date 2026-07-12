@@ -7,17 +7,29 @@ class FakeUser:
     display_name = "Tester"
 
 
+_MISSING = object()  # sentinel: phan biet "khong truyen view" voi "truyen view=None"
+
+
 class FakeFollowup:
     def __init__(self, fail_embed_titles=()):
         self.fail_embed_titles = set(fail_embed_titles)
         self.sent = []
 
-    async def send(self, content=None, *, embed=None, view=None, ephemeral=False):
+    async def send(self, content=None, *, embed=None, view=_MISSING, ephemeral=False):
+        # discord.py 2.6+ nem TypeError khi truyen view=None tuong minh — fake phai
+        # nghiem ngat y het de bat regression (bug that tren prod 2026-07-12).
+        if view is None:
+            raise TypeError("expected view parameter to be of type View or LayoutView, not NoneType")
         title = embed.title if embed else ""
         if embed and title in self.fail_embed_titles:
             self.fail_embed_titles.remove(title)
             raise RuntimeError("simulated discord embed failure")
-        self.sent.append({"content": content, "embed": embed, "view": view, "ephemeral": ephemeral})
+        self.sent.append({
+            "content": content,
+            "embed": embed,
+            "view": None if view is _MISSING else view,
+            "ephemeral": ephemeral,
+        })
 
 
 class FakeInteraction:

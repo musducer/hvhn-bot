@@ -1391,7 +1391,12 @@ class AI(commands.Cog):
             if index > 1:
                 await asyncio.sleep(0.35)
             try:
-                await interaction.followup.send(embed=embed, view=view)
+                # discord.py 2.6+ CAM view=None tuong minh (TypeError "expected view parameter
+                # to be of type View or LayoutView, not NoneType") -> chi truyen khi co that.
+                if view is not None:
+                    await interaction.followup.send(embed=embed, view=view)
+                else:
+                    await interaction.followup.send(embed=embed)
                 print(f"[debug] discord_answer_page_sent page={index}/{total} chars={len(page)} embed=True", flush=True)
             except Exception as exc:
                 print(
@@ -1410,7 +1415,10 @@ class AI(commands.Cog):
                     sub_embed = discord.Embed(title=sub_title, description=part, color=discord.Color.green())
                     sub_embed.set_footer(text=footer)
                     try:
-                        await interaction.followup.send(embed=sub_embed, view=sub_view)
+                        if sub_view is not None:
+                            await interaction.followup.send(embed=sub_embed, view=sub_view)
+                        else:
+                            await interaction.followup.send(embed=sub_embed)
                         print(
                             f"[debug] discord_answer_page_sent page={index}/{total} "
                             f"retry_part={part_index}/{len(fallback_parts)} chars={len(part)} embed=True",
