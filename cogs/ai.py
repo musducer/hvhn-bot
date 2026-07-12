@@ -2,6 +2,7 @@ import os
 import re
 import asyncio
 import unicodedata
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass
 from pathlib import Path
 from html import unescape
@@ -68,6 +69,12 @@ EXTRA_OPENAI_PROVIDERS = [
     if (keys := [k.strip() for k in os.getenv(keys_env, "").split(",") if k.strip()])
 ]
 MAX_DISCORD_LEN = 3800
+# Gioi han luot dung cac lenh AI cho 'Dan lang Hua Tat' (admin/mod duoc mien). Cua so CO DINH
+# tinh tu luot dung dau tien trong moi chu ky. Cau hinh luu DB (ai_usage_limits), env chi la mac dinh.
+AI_LIMIT_DAILY_MAX = int(os.getenv("HVHN_AI_LIMIT_DAILY", "7"))
+AI_LIMIT_DAILY_HOURS = int(os.getenv("HVHN_AI_LIMIT_DAILY_HOURS", "24"))
+AI_LIMIT_WEEKLY_MAX = int(os.getenv("HVHN_AI_LIMIT_WEEKLY", "30"))
+AI_LIMIT_WEEKLY_HOURS = int(os.getenv("HVHN_AI_LIMIT_WEEKLY_HOURS", str(24 * 7)))
 WEB_RESULT_LIMIT = 3
 WEB_CONTEXT_LIMIT = 3
 GROQ_MAX_PROMPT_CHARS = int(os.getenv("GROQ_MAX_PROMPT_CHARS", "24000"))
@@ -3011,9 +3018,98 @@ class AI(commands.Cog):
     _strip_visible_sources = _strip_internal_markers
 
 
+    @staticmethod
+    def _is_staff(user) -> bool:
+        """Admin/mod (Manage Server hoac Administrator) -> mien gioi han luot AI."""
+        perms = getattr(user, "guild_permissions", None)
+        return bool(perms and (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)))
+
+    async def _ai_limit_config(self) -> list[tuple[str, str, int, int]]:
+        """Tra ve [(scope, nhan, so_luot_toi_da, so_gio_cua_so)] — doc DB, fallback mac dinh."""
+        cfg: dict[str, int] = {}
+        db = getattr(self.bot, "db", None)
+        if db is not None:
+            try:
+                for row in await db.fetch("SELECT key, value FROM ai_usage_limits"):
+                    cfg[row["key"]] = int(row["value"])
+            except Exception as exc:
+                print(f"[debug] ai_limit_config_read_failed err={type(exc).__name__}: {exc}", flush=True)
+        return [
+            ("daily", "24 giờ", cfg.get("daily_max", AI_LIMIT_DAILY_MAX), cfg.get("daily_hours", AI_LIMIT_DAILY_HOURS)),
+            ("weekly", "7 ngày", cfg.get("weekly_max", AI_LIMIT_WEEKLY_MAX), cfg.get("weekly_hours", AI_LIMIT_WEEKLY_HOURS)),
+        ]
+
+    async def _check_and_consume_ai_quota(self, interaction: discord.Interaction) -> tuple[bool, list[dict]]:
+        """Kiem tra CA HAI cua so (ngay + tuan) roi tru luot. Cho phep chi khi ca hai con luot;
+        moi cua so co cua so CO DINH rieng tinh tu luot dau tien. Tra (allowed, danh_sach_scope_chan).
+        Admin/mod duoc mien; DB loi -> fail-open (khong chan)."""
+        if self._is_staff(interaction.user):
+            return True, []
+        db = getattr(self.bot, "db", None)
+        if db is None:
+            return True, []
+        uid = interaction.user.id
+        scopes = await self._ai_limit_config()
+        now = datetime.now(timezone.utc)
+        try:
+            async with db.acquire() as conn:
+                async with conn.transaction():
+                    rows = {
+                        r["scope"]: r
+                        for r in await conn.fetch(
+                            "SELECT scope, window_start, count FROM ai_usage_counters WHERE user_id=$1 FOR UPDATE",
+                            uid,
+                        )
+                    }
+                    blocking: list[dict] = []
+                    to_apply: list[tuple[str, str]] = []
+                    for scope, label, max_n, hours in scopes:
+                        if max_n <= 0:
+                            continue  # 0 = tat gioi han cho tang nay
+                        r = rows.get(scope)
+                        if r is None or (now - r["window_start"]) >= timedelta(hours=hours):
+                            to_apply.append((scope, "reset"))
+                        elif r["count"] >= max_n:
+                            blocking.append({
+                                "label": label, "used": r["count"], "max": max_n,
+                                "reset_at": r["window_start"] + timedelta(hours=hours),
+                            })
+                        else:
+                            to_apply.append((scope, "incr"))
+                    if blocking:
+                        return False, blocking
+                    for scope, action in to_apply:
+                        if action == "reset":
+                            await conn.execute(
+                                "INSERT INTO ai_usage_counters(user_id, scope, window_start, count) VALUES($1,$2,$3,1) "
+                                "ON CONFLICT (user_id, scope) DO UPDATE SET window_start=EXCLUDED.window_start, count=1",
+                                uid, scope, now,
+                            )
+                        else:
+                            await conn.execute(
+                                "UPDATE ai_usage_counters SET count=count+1 WHERE user_id=$1 AND scope=$2",
+                                uid, scope,
+                            )
+            return True, []
+        except Exception as exc:
+            print(f"[debug] ai_quota_check_failed err={type(exc).__name__}: {exc}", flush=True)
+            return True, []  # fail-open: khong khoa nguoi dung khi DB truc trac
+
     async def _then_answer(self, interaction: discord.Interaction, title: str, user_prompt: str, prompt: str, mode: str):
         if not self._has_ai():
             await interaction.response.send_message("Tinh nang AI chua cau hinh API key.", ephemeral=True)
+            return
+
+        allowed, blocking = await self._check_and_consume_ai_quota(interaction)
+        if not allowed:
+            unblock = max(b["reset_at"] for b in blocking)
+            hit = " và ".join(f"{b['used']}/{b['max']} lượt trong {b['label']}" for b in blocking)
+            ts = int(unblock.timestamp())
+            await interaction.response.send_message(
+                f"⏳ Bạn đã dùng hết lượt hỏi Then ({hit}). Có thể hỏi lại sau <t:{ts}:R> (lúc <t:{ts}:f>).\n"
+                "Trong lúc chờ, bạn có thể xem lại các câu Then đã trả lời hoặc tự ôn nhé.",
+                ephemeral=True,
+            )
             return
 
         await interaction.response.defer(thinking=True)
@@ -3417,6 +3513,85 @@ class AI(commands.Cog):
             await interaction.response.send_message(f"Đã duyệt góp ý #{muc} ({n}).", ephemeral=True)
             return
         await interaction.response.send_message("Cú pháp: `/ai_feedback_duyet xem` | `all` | `<số id>`.", ephemeral=True)
+
+    async def _set_limit_key(self, key: str, value: int) -> None:
+        await self.bot.db.execute(
+            "INSERT INTO ai_usage_limits(key, value) VALUES($1,$2) "
+            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            key, int(value),
+        )
+
+    @app_commands.command(name="ai_gioihan_dat",
+                          description="(Admin) Đặt giới hạn lượt dùng Then: số lượt/ngày và/hoặc số lượt/tuần")
+    @app_commands.describe(
+        so_luot_ngay="Số lượt tối đa trong 24 giờ (bỏ trống nếu không đổi; 0 = bỏ giới hạn ngày)",
+        so_luot_tuan="Số lượt tối đa trong 7 ngày (bỏ trống nếu không đổi; 0 = bỏ giới hạn tuần)")
+    async def ai_gioihan_dat(self, interaction: discord.Interaction,
+                             so_luot_ngay: int | None = None, so_luot_tuan: int | None = None):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Bạn cần role HVHN Admin hoặc quyền Manage Server.", ephemeral=True)
+            return
+        if so_luot_ngay is None and so_luot_tuan is None:
+            await interaction.response.send_message(
+                "Cần nhập ít nhất một trong `so_luot_ngay` hoặc `so_luot_tuan`.", ephemeral=True)
+            return
+        for val in (so_luot_ngay, so_luot_tuan):
+            if val is not None and not (0 <= val <= 100000):
+                await interaction.response.send_message("Số lượt phải trong khoảng 0–100000.", ephemeral=True)
+                return
+        changes = []
+        if so_luot_ngay is not None:
+            await self._set_limit_key("daily_max", so_luot_ngay)
+            changes.append(f"ngày: **{so_luot_ngay}** lượt/24 giờ" + (" (đã tắt giới hạn ngày)" if so_luot_ngay == 0 else ""))
+        if so_luot_tuan is not None:
+            await self._set_limit_key("weekly_max", so_luot_tuan)
+            changes.append(f"tuần: **{so_luot_tuan}** lượt/7 ngày" + (" (đã tắt giới hạn tuần)" if so_luot_tuan == 0 else ""))
+        await interaction.response.send_message(
+            "✅ Đã cập nhật giới hạn dùng Then — " + "; ".join(changes) +
+            ".\nÁp dụng ngay cho lượt mới; cửa sổ đang mở của thành viên giữ nguyên tới khi reset.",
+            ephemeral=True)
+
+    @app_commands.command(name="ai_gioihan_xem",
+                          description="(Admin) Xem cấu hình giới hạn và mức dùng Then của một thành viên")
+    @app_commands.describe(thanh_vien="Thành viên cần xem (bỏ trống = chỉ xem cấu hình chung)")
+    async def ai_gioihan_xem(self, interaction: discord.Interaction, thanh_vien: discord.Member | None = None):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Bạn cần role HVHN Admin hoặc quyền Manage Server.", ephemeral=True)
+            return
+        scopes = await self._ai_limit_config()
+        cfg_line = "; ".join((f"{label}: {max_n} lượt" + (" (tắt)" if max_n <= 0 else "")) for _, label, max_n, _ in scopes)
+        if thanh_vien is None:
+            await interaction.response.send_message(f"⚙️ Giới hạn hiện tại — {cfg_line}.", ephemeral=True)
+            return
+        now = datetime.now(timezone.utc)
+        rows = {r["scope"]: r for r in await self.bot.db.fetch(
+            "SELECT scope, window_start, count FROM ai_usage_counters WHERE user_id=$1", thanh_vien.id)}
+        lines = [f"⚙️ Giới hạn — {cfg_line}.", f"👤 {thanh_vien.mention}:"]
+        if self._is_staff(thanh_vien):
+            lines.append("- Được **miễn giới hạn** (admin/mod).")
+        for scope, label, max_n, hours in scopes:
+            if max_n <= 0:
+                lines.append(f"- {label}: không giới hạn.")
+                continue
+            r = rows.get(scope)
+            if r is None or (now - r["window_start"]) >= timedelta(hours=hours):
+                lines.append(f"- {label}: 0/{max_n} (chưa mở cửa sổ / đã reset).")
+            else:
+                ts = int((r["window_start"] + timedelta(hours=hours)).timestamp())
+                lines.append(f"- {label}: {r['count']}/{max_n} — reset <t:{ts}:R> (<t:{ts}:f>).")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    @app_commands.command(name="ai_gioihan_reset",
+                          description="(Admin) Reset lượt dùng Then của một thành viên (mở lại cửa sổ)")
+    @app_commands.describe(thanh_vien="Thành viên cần reset lượt")
+    async def ai_gioihan_reset(self, interaction: discord.Interaction, thanh_vien: discord.Member):
+        if not self._is_admin(interaction):
+            await interaction.response.send_message("Bạn cần role HVHN Admin hoặc quyền Manage Server.", ephemeral=True)
+            return
+        await self.bot.db.execute("DELETE FROM ai_usage_counters WHERE user_id=$1", thanh_vien.id)
+        await interaction.response.send_message(
+            f"♻️ Đã reset toàn bộ lượt dùng Then của {thanh_vien.mention}. Lượt kế tiếp sẽ mở cửa sổ mới.",
+            ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

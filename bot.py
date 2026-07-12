@@ -141,6 +141,18 @@ CREATE TABLE IF NOT EXISTS ai_feedback (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE ai_feedback ADD COLUMN IF NOT EXISTS approved BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS ai_usage_limits (
+    key TEXT PRIMARY KEY,
+    value BIGINT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ai_usage_counters (
+    user_id BIGINT NOT NULL,
+    scope TEXT NOT NULL,
+    window_start TIMESTAMPTZ NOT NULL,
+    count INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (user_id, scope)
+);
 """
 
 SCHEMA += PDF_KNOWLEDGE_SCHEMA
