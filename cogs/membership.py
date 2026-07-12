@@ -10,6 +10,7 @@ Pha 2 (onboarding invite-1-lần + modal) và Pha 3 (tự nhận chuyển khoả
 """
 import os
 import re
+import asyncio
 from datetime import datetime, timezone, timedelta
 
 import discord
@@ -161,6 +162,9 @@ class Membership(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.invite_uses: dict[int, dict[str, int]] = {}
+        # Webhook có thể bị PayOS gửi lại đồng thời. Khoá này bảo đảm cùng một bot chỉ
+        # tạo tối đa một invite cho một đơn, kể cả trước khi DB kịp thấy dòng pending.
+        self._mint_lock = asyncio.Lock()
         self.expiry_loop.start()
 
     def cog_unload(self):
@@ -273,6 +277,15 @@ class Membership(commands.Cog):
         Tạo invite-1-lần + ghi dòng pending gắn order_code. Idempotent theo order_code để chống
         double-credit: nếu đơn đã có, trả lại link cũ thay vì tạo mới. Raise ValueError với input sai.
         """
+        # Một process bot chỉ cần serial hoá đoạn check-then-create. Nếu webhook retry
+        # sau đó, truy vấn existing bên trong sẽ trả chính invite đã tạo.
+        lock = getattr(self, "_mint_lock", None)
+        if lock is None:  # hỗ trợ object khởi tạo tối giản trong test/maintenance tools
+            lock = self._mint_lock = asyncio.Lock()
+        async with lock:
+            return await self._mint_invite_for_order_locked(order_code, name, email, days)
+
+    async def _mint_invite_for_order_locked(self, order_code: str, name: str, email: str, days: int) -> dict:
         order_code = (order_code or "").strip()
         name = (name or "").strip()
         email = (email or "").strip().lower()

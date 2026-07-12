@@ -1,7 +1,13 @@
 import pikepdf
 import sys
+import secrets
 
-def encrypt_pdf(input_path, output_path, user_password="", owner_password="ChuyenDoiMatKhauManh123!@#"):
+def encrypt_pdf(input_path, output_path, user_password="", owner_password=None):
+    """Mã hóa PDF bằng owner password ngẫu nhiên nếu không được truyền rõ ràng.
+
+    Không dùng mật khẩu mặc định cố định: ai biết mã nguồn có thể gỡ giới hạn PDF.
+    """
+    owner_password = owner_password or secrets.token_urlsafe(24)
     pdf = pikepdf.open(input_path)
     
     permissions = pikepdf.Permissions(
@@ -27,6 +33,6 @@ def encrypt_pdf(input_path, output_path, user_password="", owner_password="Chuye
     print(f"Đã mã hóa: {output_path}")
 
 if __name__ == "__main__":
-    input_file = r"D:\Download 2\HVHN ĐỘC QUYỀN\[ĐỀ HSG] - ĐỀ THAM KHẢO HSG9 TPHCM 1.pdf"
-    output_file = r"D:\Download 2\HVHN ĐỘC QUYỀN\[ĐỀ HSG] - ĐỀ THAM KHẢO HSG9 TPHCM 1_encrypted.pdf"
-    encrypt_pdf(input_file, output_file)
+    if len(sys.argv) != 3:
+        raise SystemExit("Dùng: python encrypt_pdf.py <input.pdf> <output.pdf>")
+    encrypt_pdf(sys.argv[1], sys.argv[2])

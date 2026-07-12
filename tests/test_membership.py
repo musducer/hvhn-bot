@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import os
+import asyncio
 import unittest
 from datetime import datetime, timezone, timedelta
 
@@ -289,6 +290,8 @@ class FakeInviteChannel:
         self.created = 0
 
     async def create_invite(self, **kwargs):
+        # Nhường event loop để mô phỏng hai webhook đến sát nhau.
+        await asyncio.sleep(0)
         self.created += 1
         return FakeInvite(f"code{self.created}")
 
@@ -338,6 +341,17 @@ class MintInviteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["invite_url"], first["invite_url"])  # trả lại link cũ
         self.assertEqual(len(m.bot.db.rows), 1)                       # không tạo dòng mới
         self.assertEqual(guild.chan.created, 1)                       # không tạo invite mới
+
+    async def test_mint_is_safe_when_duplicate_webhooks_arrive_concurrently(self):
+        m, guild = self._cog()
+        first, second = await asyncio.gather(
+            m.mint_invite_for_order("RACE1", "An", "an@example.com", 30),
+            m.mint_invite_for_order("RACE1", "An", "an@example.com", 30),
+        )
+        self.assertEqual(len(m.bot.db.rows), 1)
+        self.assertEqual(guild.chan.created, 1)
+        self.assertEqual({first["reused"], second["reused"]}, {False, True})
+        self.assertEqual(first["invite_url"], second["invite_url"])
 
     async def test_mint_rejects_invalid_email(self):
         m, _ = self._cog()
