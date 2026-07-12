@@ -3039,15 +3039,50 @@ class AI(commands.Cog):
             ("weekly", "7 ngày", cfg.get("weekly_max", AI_LIMIT_WEEKLY_MAX), cfg.get("weekly_hours", AI_LIMIT_WEEKLY_HOURS)),
         ]
 
-    async def _check_and_consume_ai_quota(self, interaction: discord.Interaction) -> tuple[bool, list[dict]]:
-        """Kiem tra CA HAI cua so (ngay + tuan) roi tru luot. Cho phep chi khi ca hai con luot;
-        moi cua so co cua so CO DINH rieng tinh tu luot dau tien. Tra (allowed, danh_sach_scope_chan).
-        Admin/mod duoc mien; DB loi -> fail-open (khong chan)."""
+    async def _check_ai_quota(self, interaction: discord.Interaction) -> tuple[bool, list[dict]]:
+        """CHI kiem tra (khong tru luot). Cho phep chi khi CA HAI cua so (ngay + tuan) con luot;
+        moi cua so co cua so CO DINH tinh tu luot dau tien. Luot chi bi tru khi Then TRA LOI THANH
+        CONG (xem _consume_ai_quota). Tra (allowed, danh_sach_scope_chan). Admin/mod mien; DB loi -> fail-open."""
         if self._is_staff(interaction.user):
             return True, []
         db = getattr(self.bot, "db", None)
         if db is None:
             return True, []
+        uid = interaction.user.id
+        scopes = await self._ai_limit_config()
+        now = datetime.now(timezone.utc)
+        try:
+            rows = {
+                r["scope"]: r
+                for r in await db.fetch(
+                    "SELECT scope, window_start, count FROM ai_usage_counters WHERE user_id=$1", uid
+                )
+            }
+            blocking: list[dict] = []
+            for scope, label, max_n, hours in scopes:
+                if max_n <= 0:
+                    continue  # 0 = tat gioi han cho tang nay
+                r = rows.get(scope)
+                if r is None or (now - r["window_start"]) >= timedelta(hours=hours):
+                    continue  # cua so moi/da het han -> con luot
+                if r["count"] >= max_n:
+                    blocking.append({
+                        "label": label, "used": r["count"], "max": max_n,
+                        "reset_at": r["window_start"] + timedelta(hours=hours),
+                    })
+            return (not blocking), blocking
+        except Exception as exc:
+            print(f"[debug] ai_quota_check_failed err={type(exc).__name__}: {exc}", flush=True)
+            return True, []  # fail-open: khong khoa nguoi dung khi DB truc trac
+
+    async def _consume_ai_quota(self, interaction: discord.Interaction) -> None:
+        """Tru MOT luot o ca hai cua so — chi goi khi Then da TRA LOI THANH CONG. Moi cua so tu
+        mo moi neu het han, nguoc lai +1. Atomic (FOR UPDATE). Admin/mod mien; DB loi -> bo qua."""
+        if self._is_staff(interaction.user):
+            return
+        db = getattr(self.bot, "db", None)
+        if db is None:
+            return
         uid = interaction.user.id
         scopes = await self._ai_limit_config()
         now = datetime.now(timezone.utc)
@@ -3061,25 +3096,11 @@ class AI(commands.Cog):
                             uid,
                         )
                     }
-                    blocking: list[dict] = []
-                    to_apply: list[tuple[str, str]] = []
                     for scope, label, max_n, hours in scopes:
                         if max_n <= 0:
-                            continue  # 0 = tat gioi han cho tang nay
+                            continue
                         r = rows.get(scope)
                         if r is None or (now - r["window_start"]) >= timedelta(hours=hours):
-                            to_apply.append((scope, "reset"))
-                        elif r["count"] >= max_n:
-                            blocking.append({
-                                "label": label, "used": r["count"], "max": max_n,
-                                "reset_at": r["window_start"] + timedelta(hours=hours),
-                            })
-                        else:
-                            to_apply.append((scope, "incr"))
-                    if blocking:
-                        return False, blocking
-                    for scope, action in to_apply:
-                        if action == "reset":
                             await conn.execute(
                                 "INSERT INTO ai_usage_counters(user_id, scope, window_start, count) VALUES($1,$2,$3,1) "
                                 "ON CONFLICT (user_id, scope) DO UPDATE SET window_start=EXCLUDED.window_start, count=1",
@@ -3090,17 +3111,15 @@ class AI(commands.Cog):
                                 "UPDATE ai_usage_counters SET count=count+1 WHERE user_id=$1 AND scope=$2",
                                 uid, scope,
                             )
-            return True, []
         except Exception as exc:
-            print(f"[debug] ai_quota_check_failed err={type(exc).__name__}: {exc}", flush=True)
-            return True, []  # fail-open: khong khoa nguoi dung khi DB truc trac
+            print(f"[debug] ai_quota_consume_failed err={type(exc).__name__}: {exc}", flush=True)
 
     async def _then_answer(self, interaction: discord.Interaction, title: str, user_prompt: str, prompt: str, mode: str):
         if not self._has_ai():
             await interaction.response.send_message("Tinh nang AI chua cau hinh API key.", ephemeral=True)
             return
 
-        allowed, blocking = await self._check_and_consume_ai_quota(interaction)
+        allowed, blocking = await self._check_ai_quota(interaction)
         if not allowed:
             unblock = max(b["reset_at"] for b in blocking)
             hit = " và ".join(f"{b['used']}/{b['max']} lượt trong {b['label']}" for b in blocking)
@@ -3222,6 +3241,7 @@ class AI(commands.Cog):
                 flush=True,
             )
             await self._send_answer_embeds(interaction, title=title, answer=answer, full_prompt=full_prompt)
+            await self._consume_ai_quota(interaction)  # tra loi thanh cong -> moi tru luot
             print(f"[debug] final_answer_sent deterministic=True chars={len(answer)}", flush=True)
             return
         # Luon nhet cac trich dan/nhan dinh DA XAC MINH vao ngu canh khi co — ke ca intent CHAT
@@ -3239,12 +3259,14 @@ class AI(commands.Cog):
             )
         guidance = Scaffold.for_plan(plan)
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode, guidance)
+        timed_out = False
         try:
             answer, full_prompt = await asyncio.wait_for(
                 self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit, guidance=guidance),
                 timeout=AI_ANSWER_TIMEOUT_SECONDS,
             )
         except asyncio.TimeoutError:
+            timed_out = True
             print(
                 f"[debug] ai_answer_timeout mode={mode} seconds={AI_ANSWER_TIMEOUT_SECONDS} "
                 f"query={user_prompt[:180]!r}",
@@ -3292,9 +3314,14 @@ class AI(commands.Cog):
                 answer = answer.rstrip() + f"\n\n`REASON_CODE: {reason}`"
 
         await self._send_answer_embeds(interaction, title=title, answer=answer, full_prompt=full_prompt)
+        # Chi tru luot khi Then TRA LOI THANH CONG: khong tinh khi timeout hoac cau tra loi
+        # van la tu choi/khong du du lieu (insufficient).
+        charged = not timed_out and not self._insufficient_answer(answer)
+        if charged:
+            await self._consume_ai_quota(interaction)
         print(
             f"[debug] final_answer_sent insufficient={self._insufficient_answer(answer)} "
-            f"chars={len(answer)} reason_code={'REASON_CODE:' in answer}",
+            f"chars={len(answer)} reason_code={'REASON_CODE:' in answer} charged={charged}",
             flush=True,
         )
 

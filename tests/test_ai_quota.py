@@ -103,13 +103,20 @@ class AiQuotaTest(unittest.IsolatedAsyncioTestCase):
         ai.bot = FakeBot(FakeDB(limits) if db else None)
         return ai
 
+    async def _use(self, ai, it):
+        """Mot luot THANH CONG: check roi consume neu duoc phep (mo phong _then_answer)."""
+        allowed, blocking = await ai._check_ai_quota(it)
+        if allowed:
+            await ai._consume_ai_quota(it)
+        return allowed, blocking
+
     async def test_daily_cap_blocks_eighth_use(self):
         ai = self._ai()
         it = FakeInteraction(FakeUser(1))
         for i in range(7):
-            allowed, _ = await ai._check_and_consume_ai_quota(it)
+            allowed, _ = await self._use(ai, it)
             self.assertTrue(allowed, f"use {i + 1} should pass")
-        allowed, blocking = await ai._check_and_consume_ai_quota(it)
+        allowed, blocking = await self._use(ai, it)
         self.assertFalse(allowed)
         self.assertTrue(any(b["label"] == "24 giờ" for b in blocking))
 
@@ -117,9 +124,9 @@ class AiQuotaTest(unittest.IsolatedAsyncioTestCase):
         ai = self._ai(limits={"daily_max": 0})  # tat gioi han ngay -> chi con tuan
         it = FakeInteraction(FakeUser(2))
         for i in range(30):
-            allowed, _ = await ai._check_and_consume_ai_quota(it)
+            allowed, _ = await self._use(ai, it)
             self.assertTrue(allowed, f"use {i + 1} should pass")
-        allowed, blocking = await ai._check_and_consume_ai_quota(it)
+        allowed, blocking = await self._use(ai, it)
         self.assertFalse(allowed)
         self.assertTrue(any(b["label"] == "7 ngày" for b in blocking))
 
@@ -127,11 +134,11 @@ class AiQuotaTest(unittest.IsolatedAsyncioTestCase):
         ai = self._ai(limits={"weekly_max": 1000})  # tuan khong chan de xet rieng ngay
         it = FakeInteraction(FakeUser(3))
         for _ in range(7):
-            self.assertTrue((await ai._check_and_consume_ai_quota(it))[0])
-        self.assertFalse((await ai._check_and_consume_ai_quota(it))[0])  # 8th blocked
+            self.assertTrue((await self._use(ai, it))[0])
+        self.assertFalse((await self._use(ai, it))[0])  # 8th blocked
         # Gia lap cua so NGAY het han (day window_start ve qua khu > 24h)
         ai.bot.db.counters[(3, "daily")]["window_start"] = datetime.now(timezone.utc) - timedelta(hours=25)
-        allowed, _ = await ai._check_and_consume_ai_quota(it)
+        allowed, _ = await self._use(ai, it)
         self.assertTrue(allowed)  # ngay reset -> cho phep lai
         self.assertEqual(ai.bot.db.counters[(3, "daily")]["count"], 1)  # cua so ngay moi
         self.assertEqual(ai.bot.db.counters[(3, "weekly")]["count"], 8)  # tuan van tich luy
@@ -141,8 +148,8 @@ class AiQuotaTest(unittest.IsolatedAsyncioTestCase):
         ai = self._ai(limits={"daily_max": 100, "weekly_max": 5})
         it = FakeInteraction(FakeUser(4))
         for _ in range(5):
-            self.assertTrue((await ai._check_and_consume_ai_quota(it))[0])
-        allowed, blocking = await ai._check_and_consume_ai_quota(it)
+            self.assertTrue((await self._use(ai, it))[0])
+        allowed, blocking = await self._use(ai, it)
         self.assertFalse(allowed)
         self.assertTrue(any(b["label"] == "7 ngày" for b in blocking))
 
@@ -150,35 +157,55 @@ class AiQuotaTest(unittest.IsolatedAsyncioTestCase):
         ai = self._ai()
         it = FakeInteraction(FakeUser(5, manage_guild=True))
         for _ in range(50):
-            allowed, _ = await ai._check_and_consume_ai_quota(it)
+            allowed, _ = await self._use(ai, it)
             self.assertTrue(allowed)
         self.assertEqual(ai.bot.db.counters, {})  # khong ghi counter cho staff
 
     async def test_fail_open_when_db_missing(self):
         ai = self._ai(db=False)
         it = FakeInteraction(FakeUser(6))
-        allowed, blocking = await ai._check_and_consume_ai_quota(it)
+        allowed, blocking = await ai._check_ai_quota(it)
         self.assertTrue(allowed)
         self.assertEqual(blocking, [])
+        await ai._consume_ai_quota(it)  # khong duoc no khi db None
+
+    async def test_check_alone_never_consumes(self):
+        # Diem moi: check KHONG tru luot; chi consume moi tru. Goi check nhieu lan -> khong ghi counter.
+        ai = self._ai()
+        it = FakeInteraction(FakeUser(9))
+        for _ in range(20):
+            allowed, _ = await ai._check_ai_quota(it)
+            self.assertTrue(allowed)
+        self.assertEqual(ai.bot.db.counters, {})  # chua consume lan nao -> chua tru
+
+    async def test_failed_answers_do_not_count_only_successes(self):
+        # 3 lan "that bai" (chi check, khong consume) + 7 lan thanh cong -> lan thu 8 thanh cong moi bi chan.
+        ai = self._ai()
+        it = FakeInteraction(FakeUser(10))
+        for _ in range(3):
+            await ai._check_ai_quota(it)  # that bai: khong consume
+        for i in range(7):
+            self.assertTrue((await self._use(ai, it))[0], f"success {i + 1}")
+        self.assertFalse((await self._use(ai, it))[0])  # het 7 luot thanh cong
 
     async def test_denied_request_does_not_consume(self):
         ai = self._ai()
         it = FakeInteraction(FakeUser(7))
         for _ in range(7):
-            await ai._check_and_consume_ai_quota(it)
+            await self._use(ai, it)
         before = ai.bot.db.counters[(7, "daily")]["count"]
-        await ai._check_and_consume_ai_quota(it)  # blocked
+        await self._use(ai, it)  # blocked -> khong consume
         after = ai.bot.db.counters[(7, "daily")]["count"]
-        self.assertEqual(before, after)  # khong tang khi bi tu choi
+        self.assertEqual(before, after)
 
     async def test_admin_raising_limit_unblocks_same_window(self):
         ai = self._ai()
         it = FakeInteraction(FakeUser(8))
         for _ in range(7):
-            await ai._check_and_consume_ai_quota(it)
-        self.assertFalse((await ai._check_and_consume_ai_quota(it))[0])
+            await self._use(ai, it)
+        self.assertFalse((await self._use(ai, it))[0])
         await ai._set_limit_key("daily_max", 10)  # admin nang gioi han
-        allowed, _ = await ai._check_and_consume_ai_quota(it)
+        allowed, _ = await self._use(ai, it)
         self.assertTrue(allowed)  # cung cua so, gio duoc dung tiep
 
 
