@@ -153,6 +153,11 @@ CREATE TABLE IF NOT EXISTS ai_usage_counters (
     count INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (user_id, scope)
 );
+CREATE TABLE IF NOT EXISTS server_rules (
+    idx INTEGER PRIMARY KEY,
+    title TEXT NOT NULL,
+    body TEXT NOT NULL
+);
 """
 
 SCHEMA += PDF_KNOWLEDGE_SCHEMA
