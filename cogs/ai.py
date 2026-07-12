@@ -1457,9 +1457,27 @@ class AI(commands.Cog):
         ))
         return {"quote": quote, "aggregate": aggregate, "document_only": document_only}
 
+    # Cum tu mo dau cau hoi hay bi viet hoa -> KHONG phai ten tac gia/tac pham.
+    _SUBJECT_STOPWORDS = {
+        "phan tich", "suy nghi", "cam nhan", "cam nghi", "binh giang", "binh luan",
+        "chung minh", "lam sang to", "lam ro", "phong cach", "gia tri", "y nghia",
+        "nghi luan", "van hoc", "cau hoi", "yeu cau", "nhan xet", "danh gia",
+        "so sanh", "lien he", "ban ve", "the nao", "vi sao", "tai sao",
+        "hinh tuong", "nhan vat", "chi tiet", "tinh huong", "doan tho", "bai tho",
+        "kho tho", "doan trich", "truyen ngan", "tac pham", "tac gia", "nha tho",
+        "nha van", "quan niem", "viet nam", "ha noi", "sai gon", "cach mang",
+    }
+    # Chuoi 2-4 am tiet cung viet hoa kieu Viet ("Nguyen Binh", "Nguyen Huy Thiep",
+    # "Vo Nhat") -> ung vien ten rieng.
+    _NAME_SEQ_RE = re.compile(
+        r"[A-ZÀ-ỸĐ][a-zà-ỹđ]+(?:\s+[A-ZÀ-ỸĐ][a-zà-ỹđ]+){1,3}"
+    )
+
     @classmethod
     def _query_subjects(cls, query: str, plan) -> list[str]:
-        """Tac gia + ten tac pham dat trong ngoac kep -> chu de bat buoc cua cau hoi."""
+        """Tac gia + ten tac pham -> chu de bat buoc cua cau hoi. Lay tu (1) author_filter,
+        (2) chuoi trong ngoac kep, (3) chuoi ten rieng viet hoa (vd 'phong cach tho Nguyen
+        Binh' -> 'Nguyen Binh') de bat ca khi cau hoi khong dung 'cua'/'tac gia'."""
         subjects: list[str] = []
         if getattr(plan, "author_filter", ""):
             subjects.append(cls._plain_text(plan.author_filter))
@@ -1467,7 +1485,22 @@ class AI(commands.Cog):
             t = cls._plain_text(m).strip()
             if len(t) >= 3:
                 subjects.append(t)
-        return [s for s in subjects if s]
+        for m in cls._NAME_SEQ_RE.findall(query or ""):
+            t = cls._plain_text(m).strip()
+            words = t.split()
+            # Bo cum mo dau cau hoi bi viet hoa (vd "Phan Tich", "Phong Cach").
+            if not words or t in cls._SUBJECT_STOPWORDS or " ".join(words[:2]) in cls._SUBJECT_STOPWORDS:
+                continue
+            if len(t) >= 3:
+                subjects.append(t)
+        # Loai trung, giu thu tu.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for s in subjects:
+            if s and s not in seen:
+                seen.add(s)
+                uniq.append(s)
+        return uniq
 
     @classmethod
     def _text_mentions_subject(cls, subjects: list[str], text: str) -> bool:
@@ -2186,17 +2219,7 @@ class AI(commands.Cog):
                 "Bo han cau do; ket bai bang mot nhan dinh cua chinh minh, khong nhac ten bao/trang/tai lieu."
             )
         # ==== CHE DO 'THU THU': liet ke/xep hang/tom tat corpus thay vi TRA LOI cau hoi ====
-        librarian = (
-            "tu kho pdf", "kho pdf/hvhn", "noi dung uu tien tu kho", "cac doan lien quan",
-            "nen duoc uu tien su dung", "chua nhung cau trich nguyen van quan trong",
-            "uu tien su dung khi can dan chung", "cac doan p1", "cac doan p3",
-            # bien the: tom tat/xep hang/danh gia do day du cua kho tai lieu
-            "tom tat ngan gon cac tai lieu", "tai lieu / thu", "tai lieu uu tien nhat",
-            "la tai lieu uu tien", "danh gia muc do day du", "muc do day du du lieu",
-            "du du lieu de tom tat", "cac trich dan tren la tai lieu", "cac trich dan tren deu",
-            "y chinh (trich nguyen van)", "cac tai lieu / ", "cac tai lieu lien quan nhat",
-        )
-        lib_hits = [p for p in librarian if p in plain]
+        lib_hits = [p for p in AI._LIBRARIAN_PHRASES if p in plain]
         bracketless_p = bool(re.search(r"(?<![a-z])p\d+\s*,\s*p\d+", plain) or re.search(r"(?<![a-z])p\d+\s+va\s+p\d+", plain))
         if lib_hits or bracketless_p:
             defects.append(
@@ -2390,8 +2413,10 @@ class AI(commands.Cog):
                 "du 4 tang (thu phap -> trich nguyen van 1-3 cau -> phan tich co che -> khai quat phong cach), "
                 "dung evidence trong context; khong don tho, khong lap y."
             ]
+        librarian_dump = bool(answer) and self._looks_like_librarian_dump(answer)
         needs_repair = bool(answer) and (
-            self._looks_like_source_dump(answer)
+            librarian_dump
+            or self._looks_like_source_dump(answer)
             or self._looks_like_generic_literary_answer(answer)
             or self._looks_like_weak_style_analysis(answer)
             or self._looks_like_dry_literary_style(answer)
@@ -2400,42 +2425,66 @@ class AI(commands.Cog):
             or bool(style_defects)
         )
         if answer and needs_repair:
-            repetition_note = ""
-            if style_defects:
-                repetition_note += "LOI VAN PHONG PHAT HIEN DUOC:\n" + "\n".join(f"  - {d}" for d in style_defects) + "\n"
-            if repeated_defects:
-                listed = "\n".join(f"  - \"{d}\"" for d in repeated_defects)
-                repetition_note += (
-                    "LOI LAP PHAT HIEN DUOC (nghiem trong): cac cau/y sau xuat hien GAN NGUYEN VAN "
-                    "nhieu lan trong bai. Moi lan chi duoc noi mot y MOT LAN; sau moi dan chung phai "
-                    "rut ra mot phat hien RIENG cho dan chung do, khong dan lai cung ket luan; ket bai "
-                    "phai nang len tam khai quat moi chu khong chep lai mo bai:\n" + listed + "\n"
+            if librarian_dump:
+                # Che do 'thu thu' bam chat vao dong tai lieu lac de: cang giu kho trong
+                # prompt thi model cang liet ke. Sua bang cach BO kho di, ep viet bang
+                # kien thuc van hoc rieng.
+                repair_knowledge, repair_web = "", ""
+                repair_prompt = (
+                    "Cau tra loi truoc bi loi NGHIEM TRONG: no liet ke/tom tat/xep hang cac doan tai lieu "
+                    "(lap bang trich dan, 'tom tat cac tai lieu lien quan nhat', 'danh gia muc do day du du lieu', "
+                    "'tai lieu uu tien nhat', 'thieu sot / du lieu chua du') thay vi TRA LOI cau hoi. Nhung tai "
+                    "lieu do LAC de — vut bo hoan toan, dung nhac lai. Hay TU VIET mot bai nghi luan van hoc hoan "
+                    "chinh, tra loi DUNG va TRUC TIEP cau hoi ben duoi bang kien thuc van hoc cua chinh minh: co "
+                    "luan de, phan tich tu ngu/hinh anh/nhip dieu/cai toi tru tinh (neu la tho) hoac chi tiet/tinh "
+                    "huong/nhan vat (neu la van xuoi), co dan chung va loi binh rieng. TUYET DOI khong nhac 'tai "
+                    "lieu'/'trich dan'/'P1'/'P2'/'kho', khong lap bang, khong xep hang, khong danh gia 'du lieu day "
+                    "du hay khong'.\n\n"
+                    f"CAU HOI CAN TRA LOI:\n{prompt}"
                 )
-            repair_prompt = (
-                repetition_note +
-                "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon, "
-                "khong van mau rong. Moi luan diem van hoc phai co chi tiet/hinh tuong/tinh huong/bieu tuong cu the "
-                "va loi binh rieng. Voi cau hoi phong cach tac gia qua mot bai tho, phai co luan de phong cach, "
-                "phan tich tu ngu/hinh anh/nhip dieu/cai toi tru tinh; khong dung nhan xet rong nhu 'lang man, tinh te, sau sac'. "
-                "Viet lai co chat van hon: mo bang mot truc tu tuong/hinh anh trung tam, dung dong tu co luc, "
-                "cau ngan-dai dan xen, co du am; nhung khong them hinh anh nao khong bam vao context. "
-                "Neu neu bien phap tu tu, phai goi dung phep dua tren dau hieu ngon ngu trong dan chung. "
-                "Moi cau tho/cau van trong ngoac kep phai co nguyen van trong context va dung tac gia/tac pham; "
-                "neu khong, xoa quote do va khong phan tich no nhu dan chung. "
-                "Voi cau hoi so sanh, moi truc phai co A -> B -> diem gap/lech. "
-                "Khong them thong tin moi ngoai context. Neu du lieu khong du, noi ro chua du du lieu de khang dinh.\n\n"
-                f"CAU TRA LOI CAN SUA:\n{answer}"
-            )
+            else:
+                repair_knowledge, repair_web = knowledge, web_context
+                repetition_note = ""
+                if style_defects:
+                    repetition_note += "LOI VAN PHONG PHAT HIEN DUOC:\n" + "\n".join(f"  - {d}" for d in style_defects) + "\n"
+                if repeated_defects:
+                    listed = "\n".join(f"  - \"{d}\"" for d in repeated_defects)
+                    repetition_note += (
+                        "LOI LAP PHAT HIEN DUOC (nghiem trong): cac cau/y sau xuat hien GAN NGUYEN VAN "
+                        "nhieu lan trong bai. Moi lan chi duoc noi mot y MOT LAN; sau moi dan chung phai "
+                        "rut ra mot phat hien RIENG cho dan chung do, khong dan lai cung ket luan; ket bai "
+                        "phai nang len tam khai quat moi chu khong chep lai mo bai:\n" + listed + "\n"
+                    )
+                repair_prompt = (
+                    repetition_note +
+                    "Sua cau tra loi sau de tra loi thang vao cau hoi, khong bia, khong chi liet ke nguon, "
+                    "khong van mau rong. Moi luan diem van hoc phai co chi tiet/hinh tuong/tinh huong/bieu tuong cu the "
+                    "va loi binh rieng. Voi cau hoi phong cach tac gia qua mot bai tho, phai co luan de phong cach, "
+                    "phan tich tu ngu/hinh anh/nhip dieu/cai toi tru tinh; khong dung nhan xet rong nhu 'lang man, tinh te, sau sac'. "
+                    "Viet lai co chat van hon: mo bang mot truc tu tuong/hinh anh trung tam, dung dong tu co luc, "
+                    "cau ngan-dai dan xen, co du am; nhung khong them hinh anh nao khong bam vao context. "
+                    "Neu neu bien phap tu tu, phai goi dung phep dua tren dau hieu ngon ngu trong dan chung. "
+                    "Moi cau tho/cau van trong ngoac kep phai co nguyen van trong context va dung tac gia/tac pham; "
+                    "neu khong, xoa quote do va khong phan tich no nhu dan chung. "
+                    "Voi cau hoi so sanh, moi truc phai co A -> B -> diem gap/lech. "
+                    "Khong them thong tin moi ngoai context. Neu du lieu khong du, noi ro chua du du lieu de khang dinh.\n\n"
+                    f"CAU TRA LOI CAN SUA:\n{answer}"
+                )
             repaired = await self.generate(
-                self._guarded_prompt(repair_prompt, knowledge, web_context, "repair"),
+                self._guarded_prompt(repair_prompt, repair_knowledge, repair_web, "repair"),
                 THEN_SYSTEM_PROMPT,
                 temperature=LIT_TEMPERATURE,
                 top_p=LIT_TOP_P,
                 max_tokens=LIT_MAX_TOKENS,
                 prefer_rich_style=True,
             )
-            if repaired:
+            if repaired and not (librarian_dump and self._looks_like_librarian_dump(repaired)):
                 answer = repaired
+            elif librarian_dump:
+                # Repair van con che do thu thu (hoac khong chay duoc): lot cac dong meta,
+                # con hon gui nguyen ban liet ke tai lieu.
+                answer = self._strip_internal_markers(repaired or answer)
+                print("[debug] repair_still_librarian=stripped", flush=True)
             elif repeated_defects:
                 # Repair LLM khong chay duoc (het quota/429): it nhat cat co hoc cau lap.
                 answer = self._strip_repeated_sentences(answer)
@@ -2634,6 +2683,33 @@ class AI(commands.Cog):
             if keep:
                 kept.append(" ".join(keep).strip())
         return "\n\n".join(b for b in kept if b).strip()
+
+    # Cac cum tu dac trung che do 'thu thu' (liet ke/tom tat/xep hang corpus thay vi tra loi).
+    # Dung chung cho detector (_ai_flavored_style_defects) va _looks_like_librarian_dump.
+    _LIBRARIAN_PHRASES = (
+        "tu kho pdf", "kho pdf/hvhn", "noi dung uu tien tu kho", "cac doan lien quan",
+        "nen duoc uu tien su dung", "chua nhung cau trich nguyen van quan trong",
+        "uu tien su dung khi can dan chung", "cac doan p1", "cac doan p3",
+        # bien the: tom tat/xep hang/danh gia do day du cua kho tai lieu
+        "tom tat ngan gon cac tai lieu", "tai lieu / thu", "tai lieu uu tien nhat",
+        "la tai lieu uu tien", "danh gia muc do day du", "muc do day du du lieu",
+        "du du lieu de tom tat", "cac trich dan tren la tai lieu", "cac trich dan tren deu",
+        "y chinh (trich nguyen van)", "cac tai lieu / ", "cac tai lieu lien quan nhat",
+        # bien the moi: "Tom tat ... cac tai lieu/doan trich uu tien nhat", section header
+        "cac tai lieu/doan trich uu tien", "doan trich uu tien nhat", "thieu sot / du lieu chua du",
+    )
+
+    @classmethod
+    def _looks_like_librarian_dump(cls, answer: str) -> bool:
+        """True khi cau tra loi dang liet ke/tom tat/xep hang cac doan tai lieu thay vi
+        tra loi cau hoi (P1,P2 tran hoac cac cum meta ve 'tai lieu uu tien/day du')."""
+        plain = cls._plain_text(answer or "")
+        if any(p in plain for p in cls._LIBRARIAN_PHRASES):
+            return True
+        return bool(
+            re.search(r"(?<![a-z])p\d+\s*,\s*p\d+", plain)
+            or re.search(r"(?<![a-z])p\d+\s+va\s+p\d+", plain)
+        )
 
     # Dong meta lo may moc RAG: "Tom tat ... tu kho PDF/HVHN", "Cac doan lien quan khac",
     # "noi dung uu tien tu kho", "cac doan P1/P2 ... nen duoc uu tien su dung khi can dan chung".
