@@ -173,8 +173,20 @@ CREATE TABLE IF NOT EXISTS hvhn_members (
     created_by BIGINT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS discord_id BIGINT;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS email TEXT;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS name TEXT;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS invite_code TEXT;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS duration_days INTEGER NOT NULL DEFAULT 30;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS granted_at TIMESTAMPTZ;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS expires_at TIMESTAMPTZ;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS notified_expiry BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS created_by BIGINT;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 CREATE INDEX IF NOT EXISTS idx_hvhn_members_discord ON hvhn_members (discord_id);
 CREATE INDEX IF NOT EXISTS idx_hvhn_members_status ON hvhn_members (status);
+CREATE INDEX IF NOT EXISTS idx_hvhn_members_invite_code ON hvhn_members (invite_code);
 """
 
 SCHEMA += PDF_KNOWLEDGE_SCHEMA
@@ -219,6 +231,7 @@ class HVHNBot(commands.Bot):
     def __init__(self, database_url: str):
         intents = discord.Intents.default()
         intents.members = True
+        intents.invites = True
         intents.message_content = True
         intents.voice_states = True
         super().__init__(command_prefix="!", intents=intents, tree_cls=GatedCommandTree)
