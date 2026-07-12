@@ -173,6 +173,9 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         async def _noop_grant(member):
             return None
         m._grant_roles = _noop_grant
+        async def _fake_member_for_customer(discord_id):
+            return FakeMember(discord_id)
+        m._member_for_customer = _fake_member_for_customer
         return m
 
     async def test_register_new_customer(self):
@@ -203,7 +206,7 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         rid = await m._create_pending_invite("abc", 7, 999)
         joined = await m._mark_invite_joined("abc", 111)
         self.assertEqual(joined["id"], rid)
-        expires, note, corrected = await m._activate_customer(FakeMember(111), "An", "an@example.com", 111)
+        expires, note, corrected = await m._activate_customer(111, "An", "an@example.com", 111)
         row = m.bot.db.rows[0]
         self.assertFalse(corrected)
         self.assertEqual(row["status"], "active")
@@ -218,13 +221,23 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         m = self._cog()
         await m._create_pending_invite("abc", 7, 999)
         await m._mark_invite_joined("abc", 111)
-        await m._activate_customer(FakeMember(111), "An", "wrong@example.com", 111)
-        expires, note, corrected = await m._activate_customer(FakeMember(111), "An", "right@example.com", 111)
+        await m._activate_customer(111, "An", "wrong@example.com", 111)
+        expires, note, corrected = await m._activate_customer(111, "An", "right@example.com", 111)
         self.assertTrue(corrected)
         self.assertEqual(m.bot.db.rows[0]["email"], "right@example.com")
         self.assertEqual([j["job_type"] for j in m.bot.db.jobs], ["add_client", "remove_client", "add_client"])
         self.assertEqual(m.bot.db.jobs[1]["text_payload"], "wrong@example.com")
         self.assertEqual(m.bot.db.jobs[2]["text_payload"], "An\tright@example.com")
+
+    async def test_activation_requires_member_still_in_guild(self):
+        m = self._cog()
+        async def _missing_member(discord_id):
+            return None
+        m._member_for_customer = _missing_member
+        await m._create_pending_invite("abc", 7, 999)
+        await m._mark_invite_joined("abc", 111)
+        with self.assertRaises(RuntimeError):
+            await m._activate_customer(111, "An", "an@example.com", 111)
 
 
 if __name__ == "__main__":

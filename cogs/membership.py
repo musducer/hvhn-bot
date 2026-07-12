@@ -112,11 +112,21 @@ class CustomerActivationModal(discord.ui.Modal, title="Kích hoạt trải nghi�
             return
         try:
             expires, job_note, corrected = await self.membership._activate_customer(
-                interaction.user, name, email, interaction.user.id
+                interaction.user.id, name, email, interaction.user.id
             )
         except LookupError:
             await interaction.response.send_message(
                 "Mình chưa tìm thấy lượt mời đang chờ kích hoạt của bạn. Nhờ bạn báo quản trị viên kiểm tra lại invite.",
+                ephemeral=True,
+            )
+            return
+        except RuntimeError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+        except Exception as exc:
+            print(f"[debug] khach_activation_submit_failed user={interaction.user.id} err={type(exc).__name__}: {exc}", flush=True)
+            await interaction.response.send_message(
+                "Mình gặp lỗi khi kích hoạt. Thông tin bạn nhập không sai; nhờ bạn báo quản trị viên thử lại sau khi bot được cập nhật.",
                 ephemeral=True,
             )
             return
@@ -241,16 +251,35 @@ class Membership(commands.Cog):
             invite_code, discord_id,
         )
 
-    async def _activate_customer(self, member: discord.Member, name: str, email: str, requested_by: int | None = None):
+    async def _member_for_customer(self, discord_id: int) -> discord.Member | None:
+        guild = self._guild()
+        if guild is None:
+            return None
+        member = guild.get_member(discord_id)
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(discord_id)
+        except discord.HTTPException:
+            return None
+
+    async def _activate_customer(self, member_or_id, name: str, email: str, requested_by: int | None = None):
         """joined -> active. Nếu đã active, cho bấm nút lại để sửa tên/email và đồng bộ job bù."""
+        discord_id = member_or_id if isinstance(member_or_id, int) else member_or_id.id
         now = datetime.now(timezone.utc)
         row = await self.bot.db.fetchrow(
             "SELECT id, email, duration_days, expires_at, status FROM hvhn_members "
             "WHERE discord_id=$1 AND status IN ('joined','active') ORDER BY id DESC LIMIT 1",
-            member.id,
+            discord_id,
         )
         if row is None:
             raise LookupError("no joined/active customer")
+        member = member_or_id if isinstance(member_or_id, discord.Member) else await self._member_for_customer(discord_id)
+        if member is None:
+            raise RuntimeError(
+                "Mình đã nhận được thông tin, nhưng chưa thấy bạn còn ở trong server HVHN để cấp quyền. "
+                "Bạn vào lại server bằng invite rồi bấm kích hoạt lại nhé."
+            )
 
         corrected = row["status"] == "active"
         old_email = (row["email"] or "").strip().lower()
