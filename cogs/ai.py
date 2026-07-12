@@ -11,7 +11,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
-from md_knowledge import retrieve_md_knowledge, backfill_embeddings, count_missing_embeddings
+from md_knowledge import build_md_context, retrieve_md_knowledge, backfill_embeddings, count_missing_embeddings
 import md_embeddings
 
 GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
@@ -1570,6 +1570,37 @@ class AI(commands.Cog):
         return not cls._text_mentions_subject(subjects, haystack)
 
     @classmethod
+    def _filter_pdf_meta_to_subject(cls, query: str, plan, pdf_meta: dict) -> dict:
+        """Loc lac-de o CAP TUNG DOAN.
+
+        _context_off_subject chi chan khi TOAN BO evidence khong nhac chu the. Neu retrieval
+        tra ve 1 doan dung + vai doan lac ten gan nhau (Nguyen Binh / Nguyen Binh Khiem),
+        fallback va prompt van bi nhiem rac. Ham nay giu lai cac chunk co nhac dung chu the.
+        """
+        subjects = cls._query_subjects(query, plan)
+        chunks = list(pdf_meta.get("chunks") or [])
+        if not subjects or not chunks:
+            return pdf_meta
+        kept = [
+            c for c in chunks
+            if cls._text_mentions_subject(
+                subjects,
+                " ".join(
+                    str(c.get(k) or "")
+                    for k in ("title", "doc_title", "author", "first_500", "excerpt", "content")
+                ),
+            )
+        ]
+        # Neu khong giu duoc gi thi de _context_off_subject/low relevance xu ly; khong tu cat rong o day.
+        if not kept or len(kept) == len(chunks):
+            return pdf_meta
+        filtered = dict(pdf_meta)
+        filtered["chunks"] = kept
+        filtered["selected_count"] = len(kept)
+        filtered["context"] = build_md_context(kept)
+        return filtered
+
+    @classmethod
     def _retrieval_hit(cls, query: str, pdf_meta: dict) -> bool:
         terms = cls._query_terms(query)
         if not terms:
@@ -2644,18 +2675,121 @@ class AI(commands.Cog):
         return None
 
     @staticmethod
-    def _timeout_fallback_answer(pdf_meta: dict, manual_knowledge: str, web_context: str, elapsed_seconds: int) -> str:
+    def _timeout_fallback_answer(
+        pdf_meta: dict,
+        manual_knowledge: str,
+        web_context: str,
+        elapsed_seconds: int,
+        query: str = "",
+        mode: str = "",
+    ) -> str:
         base = (
             f"Then bị quá thời gian phản hồi sau khoảng {elapsed_seconds} giây nên không để bạn chờ trong trạng thái “thinking” nữa.\n\n"
             "Mình gửi trước phần căn cứ đã truy xuất được; bạn có thể hỏi lại ngắn hơn hoặc chạy `/hvhn_debug_retrieval` để xem evidence."
         )
-        evidence = AI._evidence_fallback_answer(pdf_meta, manual_knowledge, web_context)
+        evidence = AI._evidence_fallback_answer(pdf_meta, manual_knowledge, web_context, query=query, mode=mode)
         return base + "\n\n---\n\n" + evidence
 
-    @staticmethod
-    def _evidence_fallback_answer(pdf_meta: dict, manual_knowledge: str, web_context: str) -> str:
+    @classmethod
+    def _is_literary_answer_request(cls, query: str, mode: str = "") -> bool:
+        plain = cls._plain_text(f"{mode} {query}")
+        return any(marker in plain for marker in (
+            "literature", "van_hoi", "phan tich", "cam nhan", "binh giang", "binh luan",
+            "phong cach", "tho", "truyen", "tac pham", "tac gia", "hinh tuong",
+        ))
+
+    @classmethod
+    def _fallback_subject_label(cls, query: str) -> str:
+        subjects = cls._query_subjects(query, None)
+        if subjects:
+            return subjects[0].title()
+        return "tác giả/tác phẩm được hỏi"
+
+    @classmethod
+    def _literary_evidence_fallback_answer(cls, query: str, chunks: list[dict], manual_knowledge: str, web_context: str) -> str:
+        """Fallback van hoc co dien dat, khong lo khung RAG/noi bo ra nguoi dung."""
+        subject = cls._fallback_subject_label(query)
+        q_plain = cls._plain_text(query)
+        joined = "\n".join(
+            str(c.get("content") or c.get("excerpt") or c.get("first_500") or "")
+            for c in chunks[:5]
+        )
+        evidence_units: list[str] = []
+        seen: set[str] = set()
+        for chunk in chunks[:5]:
+            for unit in cls._extract_units_from_chunk(query, chunk, quote_mode=False, max_units=3):
+                key = cls._plain_text(unit)[:180]
+                if key and key not in seen:
+                    seen.add(key)
+                    evidence_units.append(unit.strip())
+                if len(evidence_units) >= 5:
+                    break
+            if len(evidence_units) >= 5:
+                break
+
+        hay = cls._plain_text(joined)
+        lines: list[str] = []
+        if "phong cach" in q_plain or "tho" in q_plain:
+            lines.append(
+                f"Có thể nhìn phong cách thơ {subject} như một mạch thơ đi tìm phần hồn sâu kín của đời sống: "
+                "không ồn ào phô diễn kỹ thuật, mà lặng lẽ neo vào giọng điệu, không gian văn hóa và những rung động rất người."
+            )
+        else:
+            lines.append(
+                f"Từ các cứ liệu đã truy xuất, có thể trả lời theo hướng sau: {subject} hiện lên không phải bằng vài ý rời, "
+                "mà bằng một chỉnh thể giọng điệu, hình tượng và cảm xúc."
+            )
+
+        if any(term in hay for term in ("hon que", "chan que", "lang que", "co huong", "ca dao", "dan ca")):
+            lines.append(
+                "Trục nổi bật trước hết là chất quê. Cái quê ở đây không chỉ là phông cảnh thôn xóm, bến nước, hàng cau, "
+                "mà là một miền tâm thức: nơi tình yêu, nỗi nhớ, sự lỡ làng và khát vọng bình yên đều mang hơi thở dân gian."
+            )
+        if any(term in hay for term in ("than tho", "dua gheo", "giao duyen", "than than", "giong dieu")):
+            lines.append(
+                "Giọng thơ cũng có một duyên riêng: vừa than thở vừa đùa ghẹo. Nỗi buồn không hóa thành tiếng kêu bi lụy, "
+                "mà ngân như câu hát giao duyên; cái dí dỏm không làm nhẹ đi đau khổ, chỉ khiến vết buồn trở nên mềm, thấm và có nhạc."
+            )
+        if any(term in hay for term in ("cot", "tu su", "cau chuyen", "su kien", "duyen", "lo lang", "lia dan")):
+            lines.append(
+                "Thơ vì thế thường có dáng dấp của một câu chuyện. Sau mỗi lời tỏ tình hay than trách là một số phận nhỏ: "
+                "một người chờ, một người lỡ hẹn, một kẻ lìa đàn, một tâm hồn cứ đi mãi mà vẫn ngoái về cố quận."
+            )
+        if evidence_units:
+            # Dẫn lại ít nhưng mềm: dùng như điểm tựa, không biến câu trả lời thành bảng evidence.
+            compact = " ".join(evidence_units[:2])
+            compact = re.sub(r"\s+", " ", compact).strip()
+            if compact:
+                lines.append(
+                    "Cứ liệu truy xuất cũng gợi đúng hướng ấy: "
+                    + _clip_text(compact, 700)
+                )
+        if len(lines) <= 2 and (manual_knowledge or web_context):
+            source = manual_knowledge or web_context
+            lines.append(cls._strip_internal_markers(_clip_text(source, 900)))
+
+        lines.append(
+            f"Vì vậy, khi phân tích {subject}, nên tránh nói chung chung kiểu “lãng mạn, giàu hình ảnh”. "
+            "Cần chỉ ra cái lõi riêng: một tiếng thơ lấy chất dân gian làm men, lấy nỗi thương yêu làm nhịp, "
+            "và biến những cảnh đời bình dị thành dư vị bâng khuâng rất khó lẫn."
+        )
+        return "\n\n".join(line.strip() for line in lines if line.strip())
+
+    @classmethod
+    def _evidence_fallback_answer(
+        cls,
+        pdf_meta: dict,
+        manual_knowledge: str,
+        web_context: str,
+        query: str = "",
+        mode: str = "",
+    ) -> str:
         chunks = pdf_meta.get("chunks") or []
         if chunks:
+            filtered_meta = cls._filter_pdf_meta_to_subject(query, None, pdf_meta) if query else pdf_meta
+            chunks = filtered_meta.get("chunks") or chunks
+            if cls._is_literary_answer_request(query, mode):
+                return cls._literary_evidence_fallback_answer(query, chunks, manual_knowledge, web_context)
             lines = ["Dựa trên các đoạn tài liệu đã truy xuất, có thể trả lời bằng chứng sau:"]
             for chunk in chunks[:3]:
                 excerpt = re.sub(r"\s+", " ", chunk.get("excerpt", "")).strip()
@@ -2663,9 +2797,9 @@ class AI(commands.Cog):
             lines.append("Phần trên là trích ý trực tiếp từ evidence; cần đối chiếu thêm tài liệu gốc nếu muốn diễn giải sâu hơn.")
             return "\n".join(lines)
         if manual_knowledge:
-            return "Dựa trên tri thức HVHN đã truy xuất:\n" + AI._strip_internal_markers(_clip_text(manual_knowledge, 1800))
+            return "Dựa trên tri thức HVHN đã truy xuất:\n" + cls._strip_internal_markers(_clip_text(manual_knowledge, 1800))
         if web_context:
-            return "Dựa trên nguồn web đã truy xuất:\n" + AI._strip_internal_markers(_clip_text(web_context, 1800))
+            return "Dựa trên nguồn web đã truy xuất:\n" + cls._strip_internal_markers(_clip_text(web_context, 1800))
         return "Chưa có evidence đủ rõ để trả lời."
 
 
@@ -2898,8 +3032,21 @@ class AI(commands.Cog):
             # Bo han: thà đe model tra loi bang kien thuc rieng con hon nhoi noi dung sai tac pham.
             print(f"[debug] md_suppressed reason=off_subject author={plan.author_filter!r} top_score={pdf_meta.get('top_score')}", flush=True)
             pdf_meta = dict(_empty_meta)
-        elif (float(pdf_meta.get("top_score") or 0) < MD_MIN_RELEVANCE
-              and not (profile["quote"] or profile["aggregate"]) and not plan.author_filter):
+        else:
+            filtered_pdf_meta = self._filter_pdf_meta_to_subject(user_prompt, plan, pdf_meta)
+            if len(filtered_pdf_meta.get("chunks") or []) != len(pdf_meta.get("chunks") or []):
+                print(
+                    f"[debug] md_filtered reason=subject_chunk_filter before={len(pdf_meta.get('chunks') or [])} "
+                    f"after={len(filtered_pdf_meta.get('chunks') or [])}",
+                    flush=True,
+                )
+            pdf_meta = filtered_pdf_meta
+        if pdf_meta.get("chunks") and (
+            float(pdf_meta.get("top_score") or 0) < MD_MIN_RELEVANCE
+            and not (profile["quote"] or profile["aggregate"])
+            and not plan.author_filter
+            and not self._query_subjects(user_prompt, plan)
+        ):
             # Truy xuat yeu/lac de -> bo, tranh lap noi dung tai lieu khong lien quan vao bai.
             print(f"[debug] md_suppressed reason=low_relevance top_score={pdf_meta.get('top_score')}", flush=True)
             pdf_meta = dict(_empty_meta)
@@ -3008,7 +3155,7 @@ class AI(commands.Cog):
                 flush=True,
             )
             answer = self._timeout_fallback_answer(
-                pdf_meta, manual_knowledge, web_context, AI_ANSWER_TIMEOUT_SECONDS
+                pdf_meta, manual_knowledge, web_context, AI_ANSWER_TIMEOUT_SECONDS, user_prompt, mode
             )
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
@@ -3042,7 +3189,7 @@ class AI(commands.Cog):
                     reason = ""
                 else:
                     reason = "VERIFIER_REJECTED" if self._last_verifier_rejected else "LLM_REFUSED"
-                    answer = self._evidence_fallback_answer(pdf_meta, manual_knowledge, web_context)
+                    answer = self._evidence_fallback_answer(pdf_meta, manual_knowledge, web_context, user_prompt, mode)
                     print(f"[debug] refusal_replaced_by=evidence_fallback original_reason={reason}", flush=True)
                     reason = ""
             if reason and "REASON_CODE:" not in answer:
@@ -3274,4 +3421,3 @@ class AI(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(AI(bot))
-
