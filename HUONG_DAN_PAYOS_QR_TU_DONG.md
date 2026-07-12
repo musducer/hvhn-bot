@@ -26,7 +26,7 @@ Các bước này cần đăng nhập tài khoản của bạn nên Codex không
 
 ### A. Đẩy code mới lên Google Apps Script
 
-1. Mở file [phanphoi.gs](../D:/Bothvhn/phanphoi.gs) trên máy hoặc trong VS Code.
+1. Mở file `D:\Bothvhn\phanphoi.gs` trên máy hoặc trong VS Code.
 2. Mở Google Sheet **Phân phối - HVHN** → **Tiện ích mở rộng** → **Apps Script**.
 3. Trong file code Apps Script hiện có, chọn toàn bộ nội dung rồi dán đè bằng toàn bộ nội dung `phanphoi.gs` mới.
 4. Bấm **Save**.
