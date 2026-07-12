@@ -1,5 +1,12 @@
 # Phase 3 — Nhật ký & trạng thái bàn giao (tự nhận chuyển khoản → tự gửi link Discord)
 
+> **Cập nhật 2026-07-13 — phương án SePay bên dưới đã được thay thế.**
+>
+> Luồng hiện hành là **PayOS QR riêng từng đơn → webhook HMAC → bot `/mint-invite` → email Discord**.
+> Giá được khóa cứng **60.000đ**. Không đối chiếu nội dung chuyển khoản, nên không bị lỗi khi ngân hàng/ví
+> chèn mã hệ thống vào memo. Hướng dẫn triển khai và vận hành duy nhất: `HUONG_DAN_PAYOS_QR_TU_DONG.md`.
+> Phần lịch sử SePay được giữ lại ở đây chỉ để biết vì sao kiến trúc cũ đã bị loại.
+
 Tài liệu này ghi lại MỌI thứ đã làm cho Phase 3 tính đến 2026-07-12, để AI/người kế tiếp tiếp quản
 không phải dò lại. Đọc kèm: `PHASE_2_3_HANDOFF.md` (bối cảnh kiến trúc tổng) và
 `HUONG_DAN_THANH_TOAN_TU_DONG.md` (hướng dẫn chủ tự cấu hình, ngôn ngữ thường).

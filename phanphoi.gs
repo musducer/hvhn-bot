@@ -130,9 +130,10 @@ function onOpen() {
       .addItem('Kiểm tra trigger tự động', 'kiemTraTuDongHoa')
       .addItem('Tạo Google Form cho điện thoại', 'caiDatForm'))
     .addSubMenu(ui.createMenu('💳 Thanh toán tự động')
-      .addItem('⚙️ Cài đặt (bot URL, mật khẩu, ngân hàng, giá, số ngày)', 'caiDatThanhToanTuDong')
+      .addItem('⚙️ Cài đặt PayOS QR (bot + khóa PayOS)', 'caiDatThanhToanTuDong')
       .addItem('👀 Xem cài đặt hiện tại', 'xemCaiDatThanhToan')
       .addItem('📱 Tạo/lấy lại Form đặt mua (gửi khách)', 'taoLaiFormDatMua')
+      .addItem('🔗 Kết nối/kiểm tra webhook PayOS', 'ketNoiWebhookPayOS')
       .addSeparator()
       .addItem('🔁 Gửi lại link Discord cho đơn đang chọn', 'guiLaiLinkDiscordChoDonDangChon')
       .addItem('🧪 Test webhook bằng mã đơn đang chọn', 'testWebhookThanhToanChoDonDangChon'))
@@ -2063,17 +2064,16 @@ function xuLyFormMd(e) {
 }
 
 // ============================================================================
-// ============ PHASE 3: TỰ NHẬN CHUYỂN KHOẢN -> TỰ GỬI LINK DISCORD ===========
+// ============== PHASE 3: PAYOS QR RIÊNG -> TỰ GỬI LINK DISCORD =============
 // ============================================================================
-// KHÔNG cần sửa code. Vào Sheet > menu HVHN > 💳 Thanh toán tự động > "Cài đặt..."
-// để nhập: địa chỉ bot, mật khẩu, thông tin ngân hàng, giá gói, số ngày.
-// Các giá trị lưu trong Script Properties (không nằm trong file, không lộ lên GitHub).
-//
-// LUỒNG: Khách điền Form đặt mua -> nhận email hướng dẫn CK (kèm mã đơn) ->
-//        chuyển khoản ghi mã đơn -> SePay báo về doPost -> khớp mã + đủ tiền ->
-//        gọi bot tạo link mời -> tự gửi email link Discord cho khách.
+// PayOS tạo một payment link/QR RIÊNG cho từng đơn. Khi có webhook hợp lệ (HMAC),
+// hệ thống đối chiếu orderCode và số tiền, không phụ thuộc nội dung CK bị ngân hàng chèn.
+// Bí mật chỉ lưu trong Script Properties, tuyệt đối không ghi vào file/GitHub.
 
-const PMT_ORDER_TAB = '_don_dat_mua'; // tab lưu đơn đặt mua (hệ thống tự tạo)
+const PMT_ORDER_TAB = '_don_dat_mua';
+const PMT_FIXED_AMOUNT = 60000;
+const PMT_LINK_MINUTES = 30;
+const PMT_PAYOS_API = 'https://api-merchant.payos.vn';
 
 function _pmtProp(key, def) {
   const v = PropertiesService.getScriptProperties().getProperty(key);
@@ -2082,113 +2082,163 @@ function _pmtProp(key, def) {
 
 function _pmtOut(s) { return ContentService.createTextOutput(s); }
 
-function _pmtRandCode() { return Math.random().toString(36).substring(2, 8).toUpperCase(); }
+function _pmtEsc(value) {
+  return String(value == null ? '' : value).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _pmtHex(bytes) {
+  return bytes.map(b => ((b + 256) % 256).toString(16).padStart(2, '0')).join('');
+}
+
+function _pmtHmac(value, key) {
+  return _pmtHex(Utilities.computeHmacSha256Signature(String(value), String(key)));
+}
+
+// Quy tắc PayOS: sort key alphabet, null/undefined thành chuỗi rỗng.
+function _pmtPayosDataString(data) {
+  return Object.keys(data || {}).sort().map(key => {
+    let value = data[key];
+    if (value === null || value === undefined || value === 'null' || value === 'undefined') value = '';
+    else if (Array.isArray(value)) value = JSON.stringify(value.map(v => v && typeof v === 'object' ? _pmtSortObject(v) : v));
+    else if (typeof value === 'object') value = JSON.stringify(_pmtSortObject(value));
+    return key + '=' + String(value);
+  }).join('&');
+}
+
+function _pmtSortObject(obj) {
+  const out = {};
+  Object.keys(obj || {}).sort().forEach(key => { out[key] = obj[key]; });
+  return out;
+}
 
 function _pmtOrderSheet() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let sh = ss.getSheetByName(PMT_ORDER_TAB);
-  if (!sh) {
-    sh = ss.insertSheet(PMT_ORDER_TAB);
-    sh.getRange(1, 1, 1, 10).setValues([[
-      'Thời gian', 'Mã đơn', 'Tên', 'Email', 'Số tiền', 'Trạng thái',
-      'Invite URL', 'Thanh toán lúc', 'Gửi mail lúc', 'Ghi chú'
-    ]]);
-    sh.getRange(1, 1, 1, 10).setBackground('#0b8043').setFontColor('#fff').setFontWeight('bold');
-    sh.setFrozenRows(1);
-    sh.setColumnWidth(2, 110); sh.setColumnWidth(3, 160); sh.setColumnWidth(4, 220);
-  }
+  if (!sh) sh = ss.insertSheet(PMT_ORDER_TAB);
   _pmtEnsureOrderSheetColumns(sh);
   return sh;
 }
 
 function _pmtEnsureOrderSheetColumns(sh) {
-  const headers = ['Thời gian', 'Mã đơn', 'Tên', 'Email', 'Số tiền', 'Trạng thái',
-    'Invite URL', 'Thanh toán lúc', 'Gửi mail lúc', 'Ghi chú'];
+  const headers = [
+    'Thời gian', 'Mã đơn', 'Tên', 'Email', 'Số tiền', 'Trạng thái', 'Invite URL',
+    'Thanh toán lúc', 'Gửi mail lúc', 'Ghi chú', 'PayOS orderCode', 'Payment link ID',
+    'Link thanh toán', 'Dữ liệu QR', 'Hết hạn lúc'
+  ];
   if (sh.getMaxColumns() < headers.length) sh.insertColumnsAfter(sh.getMaxColumns(), headers.length - sh.getMaxColumns());
-  const cur = sh.getRange(1, 1, 1, headers.length).getValues()[0];
-  let changed = false;
-  for (let i = 0; i < headers.length; i++) {
-    if (!cur[i]) { cur[i] = headers[i]; changed = true; }
-  }
-  if (changed || cur[6] !== 'Invite URL') {
-    sh.getRange(1, 1, 1, headers.length).setValues([headers]);
-    sh.getRange(1, 1, 1, headers.length).setBackground('#0b8043').setFontColor('#fff').setFontWeight('bold');
-  }
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sh.getRange(1, 1, 1, headers.length).setBackground('#0b8043').setFontColor('#fff').setFontWeight('bold');
+  sh.setFrozenRows(1);
+  sh.setColumnWidth(2, 110); sh.setColumnWidth(3, 160); sh.setColumnWidth(4, 220);
+  sh.setColumnWidth(7, 320); sh.setColumnWidth(13, 320); sh.setColumnWidth(14, 320);
+  sh.getRange(2, 1, Math.max(1, sh.getMaxRows() - 1), 1).setNumberFormat('dd/mm/yyyy HH:mm:ss');
+  sh.getRange(2, 8, Math.max(1, sh.getMaxRows() - 1), 2).setNumberFormat('dd/mm/yyyy HH:mm:ss');
+  sh.getRange(2, 15, Math.max(1, sh.getMaxRows() - 1), 1).setNumberFormat('dd/mm/yyyy HH:mm:ss');
 }
 
-// ---- Cài đặt bằng hộp thoại (không sửa code) ----
+function _pmtAppUrl() {
+  const configured = _pmtProp('PMT_APP_URL', '');
+  if (configured) return configured.replace(/\/+$/, '');
+  try { return (ScriptApp.getService().getUrl() || '').replace(/\/+$/, ''); } catch (e) { return ''; }
+}
+
+function _pmtShortOrderCode(sheet) {
+  const existing = sheet.getLastRow() < 2 ? [] : sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getValues().flat();
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const code = 'HV' + Math.floor(1000000 + Math.random() * 9000000);
+    if (existing.indexOf(code) < 0) return code;
+  }
+  throw new Error('Không tạo được mã đơn duy nhất; hãy thử lại.');
+}
+
+function _pmtNumericOrderCode(sheet) {
+  const existing = sheet.getLastRow() < 2 ? [] : sheet.getRange(2, 11, sheet.getLastRow() - 1, 1).getValues().flat().map(String);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    // PayOS cần integer; 13 chữ số vẫn an toàn trong JavaScript và không đụng đơn cũ.
+    const code = Date.now() * 10 + Math.floor(Math.random() * 10);
+    if (existing.indexOf(String(code)) < 0) return code;
+    Utilities.sleep(2);
+  }
+  throw new Error('Không tạo được PayOS orderCode duy nhất; hãy thử lại.');
+}
+
+// ---- Cài đặt một lần: giá gói được khóa cứng 60.000đ trong mã nguồn. ----
 function caiDatThanhToanTuDong() {
   const ui = SpreadsheetApp.getUi();
   const props = PropertiesService.getScriptProperties();
-  function ask(msg, cur) {
-    const hint = cur ? ('\n\n(hiện tại: ' + cur + ' — để TRỐNG rồi OK nếu giữ nguyên)') : '';
-    const r = ui.prompt('Cài đặt thanh toán tự động', msg + hint, ui.ButtonSet.OK_CANCEL);
+  function ask(step, message, current, secret) {
+    const hint = current ? ('\n\n(đã có: ' + (secret ? '••••••••' : current) + ' — để trống rồi OK để giữ nguyên)') : '';
+    const r = ui.prompt('Cài đặt PayOS QR — ' + step, message + hint, ui.ButtonSet.OK_CANCEL);
     if (r.getSelectedButton() !== ui.Button.OK) return null;
     return r.getResponseText().trim();
   }
   let v;
-  v = ask('1/5. Địa chỉ bot trên Render (vd https://ten-cua-ban.onrender.com). KHÔNG kèm /mint-invite.',
-          props.getProperty('PMT_BOT_URL'));
+  v = ask('1/7', 'Địa chỉ bot Render, ví dụ https://ten-bot.onrender.com (không kèm /mint-invite).', props.getProperty('PMT_BOT_URL'));
   if (v === null) return; if (v) props.setProperty('PMT_BOT_URL', v.replace(/\/+$/, ''));
-
-  v = ask('2/5. Mật khẩu bot (đúng HVHN_MINT_SECRET đã đặt trên Render).',
-          props.getProperty('PMT_SECRET') ? '(đã đặt)' : '');
+  v = ask('2/7', 'Mật khẩu bot: đúng giá trị HVHN_MINT_SECRET trên Render.', props.getProperty('PMT_SECRET'), true);
   if (v === null) return; if (v) props.setProperty('PMT_SECRET', v);
+  v = ask('3/7', 'PayOS Client ID (Kênh thanh toán > Thông tin tích hợp).', props.getProperty('PAYOS_CLIENT_ID'), true);
+  if (v === null) return; if (v) props.setProperty('PAYOS_CLIENT_ID', v);
+  v = ask('4/7', 'PayOS API Key (Kênh thanh toán > Thông tin tích hợp).', props.getProperty('PAYOS_API_KEY'), true);
+  if (v === null) return; if (v) props.setProperty('PAYOS_API_KEY', v);
+  v = ask('5/7', 'PayOS Checksum Key (Kênh thanh toán > Thông tin tích hợp).', props.getProperty('PAYOS_CHECKSUM_KEY'), true);
+  if (v === null) return; if (v) props.setProperty('PAYOS_CHECKSUM_KEY', v);
+  v = ask('6/7', 'Số ngày truy cập sau thanh toán (ví dụ 30).', props.getProperty('PMT_DAYS') || '30');
+  if (v === null) return; if (v) props.setProperty('PMT_DAYS', String(Math.max(1, parseInt(v.replace(/\D/g, ''), 10) || 30)));
+  const appUrl = _pmtAppUrl();
+  v = ask('7/7', 'Web app URL Apps Script đã Deploy (dạng https://script.google.com/macros/s/.../exec). Dùng để PayOS gọi webhook và để khách quay lại sau thanh toán.', props.getProperty('PMT_APP_URL') || appUrl);
+  if (v === null) return; if (v) props.setProperty('PMT_APP_URL', v.replace(/\/+$/, ''));
+  ui.alert('✅ Đã lưu cài đặt PayOS.\n\nGiá gói được khóa cứng: 60.000đ.\n\nTiếp theo: bấm “🔗 Kết nối/kiểm tra webhook PayOS”, sau đó tạo Form đặt mua.');
+}
 
-  v = ask('3/5. Thông tin chuyển khoản gửi khách (vd: VCB - 0123456789 - NGUYEN VAN A).',
-          props.getProperty('PMT_BANK'));
-  if (v === null) return; if (v) props.setProperty('PMT_BANK', v);
-
-  v = ask('4/5. Giá 1 gói (VND, chỉ nhập số, vd 99000).', props.getProperty('PMT_PRICE'));
-  if (v === null) return; if (v) props.setProperty('PMT_PRICE', String(parseInt(v.replace(/\D/g, ''), 10) || 0));
-
-  v = ask('5/6. Số ngày mỗi gói (vd 30).', props.getProperty('PMT_DAYS'));
-  if (v === null) return; if (v) props.setProperty('PMT_DAYS', String(parseInt(v.replace(/\D/g, ''), 10) || 30));
-
-  // Token khoá webhook: tự sinh nếu chưa có (bạn không cần nghĩ ra).
-  let token = props.getProperty('PMT_WEBHOOK_TOKEN') || '';
-  v = ask('6/6. Mật khẩu khoá webhook (dán vào cuối URL SePay). Để TRỐNG rồi OK để hệ thống tự tạo giúp.',
-          token || '(sẽ tự tạo)');
-  if (v === null) return;
-  if (v) token = v.replace(/[^A-Za-z0-9_-]/g, '');
-  if (!token) token = 'tk_' + _pmtRandCode() + _pmtRandCode();
-  props.setProperty('PMT_WEBHOOK_TOKEN', token);
-
-  ui.alert('✅ Đã lưu cài đặt thanh toán.\n\n' +
-    'MẬT KHẨU KHOÁ WEBHOOK của bạn: ' + token + '\n' +
-    '(lát nữa dán vào cuối URL SePay, xem bước dưới)\n\n' +
-    'Tiếp theo:\n' +
-    '1) HVHN > 💳 Thanh toán tự động > "Tạo/lấy lại Form đặt mua" rồi đăng link cho khách.\n' +
-    '2) Deploy (góc phải) > New deployment > loại Web app > Who has access: Anyone > Deploy.\n' +
-    '3) Lấy "Web app URL" rồi THÊM ?token=' + token + ' vào cuối, dán chuỗi ĐÓ vào ô webhook SePay.\n' +
-    '   Ví dụ: https://script.google.com/macros/s/XXXX/exec?token=' + token + '\n\n' +
-    'Lưu ý: mỗi lần sửa code phải Deploy > Manage deployments > Edit > version: New.');
+function _pmtConfigured() {
+  const missing = ['PMT_BOT_URL', 'PMT_SECRET', 'PAYOS_CLIENT_ID', 'PAYOS_API_KEY', 'PAYOS_CHECKSUM_KEY', 'PMT_APP_URL']
+    .filter(key => !_pmtProp(key, ''));
+  if (missing.length) throw new Error('Thiếu cấu hình: ' + missing.join(', ') + '. Vào HVHN > Thanh toán tự động > Cài đặt PayOS QR.');
 }
 
 function xemCaiDatThanhToan() {
   const p = PropertiesService.getScriptProperties();
-  let webUrl = '';
-  try { webUrl = ScriptApp.getService().getUrl() || ''; } catch (e) {}
-  const token = p.getProperty('PMT_WEBHOOK_TOKEN') || '';
-  const sepayUrl = webUrl && token ? (webUrl + '?token=' + token) : '(deploy Web app xong mới có URL; token phải gắn dạng ?token=...)';
-  SpreadsheetApp.getUi().alert('Cài đặt thanh toán hiện tại:\n\n' +
+  SpreadsheetApp.getUi().alert('Cài đặt PayOS hiện tại:\n\n' +
     '• Bot URL: ' + (p.getProperty('PMT_BOT_URL') || '(chưa đặt)') + '\n' +
-    '• Mật khẩu: ' + (p.getProperty('PMT_SECRET') ? '(đã đặt)' : '(chưa đặt)') + '\n' +
-    '• Ngân hàng: ' + (p.getProperty('PMT_BANK') || '(chưa đặt)') + '\n' +
-    '• Giá gói: ' + (p.getProperty('PMT_PRICE') || '(chưa đặt)') + ' VND\n' +
-    '• Số ngày/gói: ' + (p.getProperty('PMT_DAYS') || '30') + '\n' +
-    '• Token webhook: ' + (token || '(chưa đặt)') + '\n\n' +
-    'URL DÁN VÀO SEPAY phải là:\n' + sepayUrl);
+    '• Mật khẩu bot: ' + (p.getProperty('PMT_SECRET') ? '(đã đặt)' : '(chưa đặt)') + '\n' +
+    '• PayOS Client ID: ' + (p.getProperty('PAYOS_CLIENT_ID') ? '(đã đặt)' : '(chưa đặt)') + '\n' +
+    '• PayOS API Key: ' + (p.getProperty('PAYOS_API_KEY') ? '(đã đặt)' : '(chưa đặt)') + '\n' +
+    '• PayOS Checksum Key: ' + (p.getProperty('PAYOS_CHECKSUM_KEY') ? '(đã đặt)' : '(chưa đặt)') + '\n' +
+    '• Web app URL: ' + (p.getProperty('PMT_APP_URL') || '(chưa đặt)') + '\n' +
+    '• Giá khóa cứng: 60.000đ\n' +
+    '• Số ngày/gói: ' + (p.getProperty('PMT_DAYS') || '30') + '\n\n' +
+    'Webhook PayOS không dùng token URL: hệ thống xác thực bằng HMAC Checksum Key.');
 }
 
-// ---- Form đặt mua (khách tự điền) ----
+function ketNoiWebhookPayOS() {
+  try {
+    _pmtConfigured();
+    const res = UrlFetchApp.fetch(PMT_PAYOS_API + '/confirm-webhook', {
+      method: 'post', contentType: 'application/json',
+      headers: { 'x-client-id': _pmtProp('PAYOS_CLIENT_ID', ''), 'x-api-key': _pmtProp('PAYOS_API_KEY', '') },
+      payload: JSON.stringify({ webhookUrl: _pmtAppUrl() }), muteHttpExceptions: true,
+    });
+    const out = _pmtParseJsonSafe(res.getContentText());
+    if (res.getResponseCode() < 200 || res.getResponseCode() >= 300 || out.code !== '00') {
+      throw new Error('PayOS HTTP ' + res.getResponseCode() + ': ' + res.getContentText());
+    }
+    ghiLog('Đã kết nối webhook PayOS', _pmtAppUrl());
+    SpreadsheetApp.getUi().alert('✅ PayOS đã xác thực webhook thành công. Bạn có thể tạo Form đặt mua và chạy thử 1 đơn.');
+  } catch (e) {
+    ghiLog('LỖI kết nối webhook PayOS', e.message || String(e));
+    SpreadsheetApp.getUi().alert('Không kết nối được webhook PayOS:\n' + (e.message || String(e)) + '\n\nXem hướng dẫn PayOS QR để kiểm tra Deploy và 3 khóa PayOS.');
+  }
+}
+
+// ---- Form đặt mua ----
 function _taoFormDatMua(props) {
-  const form = FormApp.create('HVHN — Đăng ký & thanh toán');
-  form.setDescription('Điền họ tên + email. Sau khi gửi, bạn nhận email hướng dẫn chuyển khoản. '
-    + 'Chuyển xong, hệ thống tự gửi link vào Discord qua email này.');
+  const form = FormApp.create('HVHN — Đăng ký học liệu');
+  form.setDescription('Điền họ tên và email. Hệ thống gửi một mã QR thanh toán riêng, đúng 60.000đ; sau khi thanh toán thành công, link Discord sẽ tự gửi về email này.');
   form.addTextItem().setTitle('Họ và tên').setRequired(true);
-  form.addTextItem().setTitle('Email (Gmail)').setRequired(true);
-  form.setConfirmationMessage('Đã nhận! Vui lòng kiểm email (cả mục Spam) để lấy hướng dẫn chuyển khoản.');
+  form.addTextItem().setTitle('Email nhận link Discord').setRequired(true);
+  form.setConfirmationMessage('HVHN đã tiếp nhận. Vui lòng kiểm tra email (cả Spam) để mở mã QR thanh toán riêng của bạn.');
   form.setAcceptingResponses(true);
   ScriptApp.newTrigger('xuLyFormDatMua').forForm(form).onFormSubmit().create();
   props.setProperty('FORM_DATMUA_ID', form.getId());
@@ -2197,12 +2247,61 @@ function _taoFormDatMua(props) {
 
 function taoLaiFormDatMua() {
   const form = _taoFormDatMua(PropertiesService.getScriptProperties());
-  const msg = 'Đã tạo Form ĐẶT MUA. Đăng/gửi link này cho khách:\n\n' + form.getPublishedUrl();
-  Logger.log(msg);
-  SpreadsheetApp.getUi().alert(msg);
+  const msg = 'Đã tạo Form ĐĂNG KÝ HỌC LIỆU. Đăng/gửi link này cho khách:\n\n' + form.getPublishedUrl();
+  Logger.log(msg); SpreadsheetApp.getUi().alert(msg);
 }
 
-// onFormSubmit (installable trigger): sinh mã đơn + gửi email hướng dẫn chuyển khoản.
+function _pmtParseJsonSafe(text) {
+  try { return JSON.parse(text || '{}'); } catch (e) { return { error: 'bad_json', raw: String(text || '').slice(0, 300) }; }
+}
+
+function _pmtCreatePayosLink(orderCode, shortCode, name, email, amount, expiry) {
+  _pmtConfigured();
+  const appUrl = _pmtAppUrl();
+  const payload = {
+    orderCode: orderCode, amount: amount, description: shortCode,
+    cancelUrl: appUrl + '?pmt=cancelled', returnUrl: appUrl + '?pmt=completed',
+    buyerName: name, buyerEmail: email,
+    items: [{ name: 'Gói học liệu HVHN', quantity: 1, price: amount }],
+    expiredAt: Math.floor(expiry.getTime() / 1000),
+  };
+  payload.signature = _pmtHmac('amount=' + payload.amount + '&cancelUrl=' + payload.cancelUrl + '&description=' + payload.description + '&orderCode=' + payload.orderCode + '&returnUrl=' + payload.returnUrl, _pmtProp('PAYOS_CHECKSUM_KEY', ''));
+  const res = UrlFetchApp.fetch(PMT_PAYOS_API + '/v2/payment-requests', {
+    method: 'post', contentType: 'application/json',
+    headers: { 'x-client-id': _pmtProp('PAYOS_CLIENT_ID', ''), 'x-api-key': _pmtProp('PAYOS_API_KEY', '') },
+    payload: JSON.stringify(payload), muteHttpExceptions: true,
+  });
+  const out = _pmtParseJsonSafe(res.getContentText());
+  if (res.getResponseCode() < 200 || res.getResponseCode() >= 300 || out.code !== '00' || !out.data || !out.data.checkoutUrl) {
+    throw new Error('PayOS HTTP ' + res.getResponseCode() + ': ' + res.getContentText());
+  }
+  return out.data;
+}
+
+function _pmtQrImageUrl(qrData) {
+  // Ảnh QR chỉ là tiện ích hiển thị trong email; nút checkoutUrl vẫn là đường thanh toán chính thức.
+  return 'https://quickchart.io/qr?size=300&margin=1&text=' + encodeURIComponent(qrData || '');
+}
+
+function _pmtSendPaymentEmail(email, name, shortCode, amount, checkoutUrl, qrData, expiry) {
+  const formatted = Utilities.formatDate(expiry, Session.getScriptTimeZone(), 'HH:mm, dd/MM/yyyy');
+  const qrUrl = _pmtQrImageUrl(qrData);
+  const body = 'Chào ' + name + ',\n\nHVHN đã tạo mã QR thanh toán riêng cho bạn. Vui lòng thanh toán đúng ' + amount.toLocaleString('vi-VN') + 'đ trước ' + formatted + '. Sau khi giao dịch được PayOS xác nhận, link Discord sẽ tự gửi về email này.\n\nMã tham chiếu: ' + shortCode + '\nThanh toán: ' + checkoutUrl;
+  const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
+    '<h2 style="margin:0 0 8px;color:#0b8043">HVHN · Mã QR thanh toán của bạn</h2>' +
+    '<p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
+    '<p>HVHN đã tạo <strong>một mã QR thanh toán riêng</strong> cho đơn đăng ký của bạn. Vui lòng hoàn tất giao dịch trước <strong>' + _pmtEsc(formatted) + '</strong>.</p>' +
+    '<div style="background:#f1f8f4;border-left:4px solid #0b8043;padding:14px 16px;border-radius:4px">' +
+    '<div><strong>Số tiền:</strong> ' + amount.toLocaleString('vi-VN') + 'đ</div><div><strong>Mã tham chiếu:</strong> ' + _pmtEsc(shortCode) + '</div></div>' +
+    '<p style="text-align:center;margin:22px 0 10px"><img src="' + _pmtEsc(qrUrl) + '" width="260" height="260" alt="Mã QR thanh toán HVHN" style="max-width:260px;border:1px solid #e0e0e0;padding:8px;border-radius:8px"></p>' +
+    '<p style="text-align:center"><a href="' + _pmtEsc(checkoutUrl) + '" style="display:inline-block;padding:12px 20px;background:#0b8043;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Mở trang thanh toán an toàn</a></p>' +
+    '<p>Sau khi PayOS xác nhận thanh toán, hệ thống sẽ tự gửi <strong>link tham gia Discord</strong> đến đúng email này. Bạn không cần gửi ảnh giao dịch.</p>' +
+    '<p style="font-size:13px;color:#5f6368">Nếu QR không hiển thị, hãy bấm nút “Mở trang thanh toán an toàn”. Nếu quá thời hạn hoặc cần hỗ trợ, hãy tạo lại đơn bằng Form HVHN.</p>' +
+    '<p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
+  MailApp.sendEmail({ to: email, subject: '[HVHN] Mã QR thanh toán 60.000đ', body: body, htmlBody: html, name: 'HVHN' });
+}
+
+// onFormSubmit: tạo QR/link PayOS riêng, lưu đầy đủ thông tin trước rồi mới gửi email.
 function xuLyFormDatMua(e) {
   let name = '', email = '';
   e.response.getItemResponses().forEach(it => {
@@ -2211,160 +2310,138 @@ function xuLyFormDatMua(e) {
     else if (t.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
   });
   if (!name || !email) return;
-  const props = PropertiesService.getScriptProperties();
-  const bank = props.getProperty('PMT_BANK') || '(chưa cấu hình ngân hàng — vào menu HVHN cài đặt)';
-  const gia = parseInt(props.getProperty('PMT_PRICE') || '0', 10);
-  const maDon = 'HVHN' + _pmtRandCode();
-  _pmtOrderSheet().appendRow([new Date(), maDon, name, email, gia, 'cho_thanh_toan']);
-  MailApp.sendEmail(email, 'Hướng dẫn thanh toán HVHN',
-    'Chào ' + name + ',\n\n' +
-    'Vui lòng chuyển khoản:\n' +
-    '  ' + bank + '\n' +
-    '  Số tiền: ' + gia + ' VND\n' +
-    '  NỘI DUNG CHUYỂN KHOẢN (ghi ĐÚNG): ' + maDon + '\n\n' +
-    'Sau khi chuyển xong, bạn sẽ nhận link vào Discord qua chính email này (kiểm tra cả mục Spam).');
-  ghiLog('Đơn đặt mua mới', maDon + ' - ' + name + ' - ' + email);
-}
-
-function _pmtParseJsonSafe(text) {
-  try { return JSON.parse(text || '{}'); } catch (e) { return { error: 'bad_json', raw: String(text || '').slice(0, 300) }; }
+  const sheet = _pmtOrderSheet();
+  const amount = PMT_FIXED_AMOUNT;
+  const shortCode = _pmtShortOrderCode(sheet);
+  const orderCode = _pmtNumericOrderCode(sheet);
+  const expiry = new Date(Date.now() + PMT_LINK_MINUTES * 60 * 1000);
+  const row = sheet.getLastRow() + 1;
+  sheet.getRange(row, 1, 1, 15).setValues([[new Date(), shortCode, name, email, amount, 'dang_tao_qr', '', '', '', '', orderCode, '', '', '', expiry]]);
+  try {
+    const payment = _pmtCreatePayosLink(orderCode, shortCode, name, email, amount, expiry);
+    sheet.getRange(row, 6).setValue('cho_thanh_toan');
+    sheet.getRange(row, 12, 1, 3).setValues([[payment.paymentLinkId || '', payment.checkoutUrl || '', payment.qrCode || '']]);
+    _pmtSendPaymentEmail(email, name, shortCode, amount, payment.checkoutUrl, payment.qrCode, expiry);
+    sheet.getRange(row, 9).setValue(new Date());
+    ghiLog('Đơn PayOS QR mới', shortCode + ' / ' + orderCode + ' - ' + name + ' - ' + email);
+  } catch (err) {
+    sheet.getRange(row, 6).setValue('loi_tao_qr');
+    sheet.getRange(row, 10).setValue((err && err.message) || String(err));
+    ghiLog('LỖI tạo QR PayOS', shortCode + ' - ' + ((err && err.message) || String(err)));
+    throw err;
+  }
 }
 
 function _pmtMintInvite(maDon, name, email) {
   const url = _pmtProp('PMT_BOT_URL', '');
   const secret = _pmtProp('PMT_SECRET', '');
   const days = parseInt(_pmtProp('PMT_DAYS', '30'), 10);
-  if (!url || !secret) {
-    ghiLog('Chưa cấu hình bot thanh toán', 'thiếu PMT_BOT_URL/PMT_SECRET');
-    return { error: 'chua_cau_hinh' };
-  }
+  if (!url || !secret) return { error: 'chua_cau_hinh' };
   const res = UrlFetchApp.fetch(url + '/mint-invite', {
-    method: 'post', contentType: 'application/json',
-    headers: { 'X-HVHN-Secret': secret },
-    payload: JSON.stringify({ order_code: maDon, name: name, email: email, duration_days: days }),
-    muteHttpExceptions: true,
+    method: 'post', contentType: 'application/json', headers: { 'X-HVHN-Secret': secret },
+    payload: JSON.stringify({ order_code: maDon, name: name, email: email, duration_days: days }), muteHttpExceptions: true,
   });
-  const code = res.getResponseCode();
   const out = _pmtParseJsonSafe(res.getContentText());
   if (!out.invite_url) {
-    ghiLog('Bot tạo link lỗi', maDon + ' HTTP ' + code + ' -> ' + res.getContentText());
-    return { error: 'mint_loi', http: code, detail: res.getContentText() };
+    ghiLog('Bot tạo link lỗi', maDon + ' HTTP ' + res.getResponseCode() + ' -> ' + res.getContentText());
+    return { error: 'mint_loi' };
   }
-  out.http = code;
   return out;
 }
 
 function _pmtSendInviteEmail(email, name, inviteUrl) {
-  MailApp.sendEmail(email, 'Link tham gia Discord HVHN',
-    'Chào ' + name + ',\n\n' +
-    'Thanh toán thành công! Bấm link sau để vào Discord:\n' +
-    inviteUrl + '\n\n' +
-    'Vào xong nhớ bấm nút "Kích hoạt trải nghiệm" để xác nhận email và nhận tài liệu nhé.');
+  const body = 'Chào ' + name + ',\n\nThanh toán của bạn đã được xác nhận. Link tham gia Discord HVHN: ' + inviteUrl + '\n\nSau khi vào Discord, hãy bấm “Kích hoạt trải nghiệm” để xác nhận email và nhận quyền truy cập học liệu.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
+  const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
+    '<h2 style="margin:0 0 8px;color:#0b8043">HVHN · Thanh toán đã được xác nhận</h2><p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
+    '<p>Hệ thống đã xác nhận thanh toán của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
+    '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
+    '<p>Sau khi vào Discord, hãy bấm <strong>“Kích hoạt trải nghiệm”</strong> để xác nhận email và nhận quyền truy cập học liệu.</p>' +
+    '<p style="font-size:13px;color:#5f6368">Link mời có giới hạn sử dụng. Nếu link hết hiệu lực, hãy phản hồi email này để được hỗ trợ.</p><p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
+  MailApp.sendEmail({ to: email, subject: '[HVHN] Thanh toán thành công – link Discord của bạn', body: body, htmlBody: html, name: 'HVHN' });
 }
 
 function _pmtMintAndSendForRow(sheet, rowNumber, opts) {
   opts = opts || {};
-  const row = sheet.getRange(rowNumber, 1, 1, 10).getValues()[0];
-  const maDon = String(row[1] || '').trim();
-  const name = String(row[2] || '').trim();
-  const email = String(row[3] || '').trim().toLowerCase();
+  const row = sheet.getRange(rowNumber, 1, 1, 15).getValues()[0];
+  const maDon = String(row[1] || '').trim(), name = String(row[2] || '').trim(), email = String(row[3] || '').trim().toLowerCase();
   if (!maDon || !name || !email) throw new Error('Dòng đơn thiếu mã/tên/email');
   const out = _pmtMintInvite(maDon, name, email);
   if (!out.invite_url) return out.error || 'mint_loi';
   _pmtSendInviteEmail(email, name, out.invite_url);
-  const now = new Date();
   sheet.getRange(rowNumber, 6).setValue('da_xu_ly');
   sheet.getRange(rowNumber, 7).setValue(out.invite_url);
   if (opts.paidAt) sheet.getRange(rowNumber, 8).setValue(opts.paidAt);
-  sheet.getRange(rowNumber, 9).setValue(now);
+  sheet.getRange(rowNumber, 9).setValue(new Date());
   sheet.getRange(rowNumber, 10).setValue((opts.note || '') + (out.reused ? ' reused_invite' : ''));
   ghiLog('Đã cấp link Discord', maDon + ' - ' + email + (opts.note ? ' - ' + opts.note : ''));
   return 'ok';
 }
 
 function guiLaiLinkDiscordChoDonDangChon() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getActiveSheet();
-  if (sheet.getName() !== PMT_ORDER_TAB) {
-    SpreadsheetApp.getUi().alert('Hãy chọn một dòng trong tab ' + PMT_ORDER_TAB + ' trước.');
-    return;
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  if (sheet.getName() !== PMT_ORDER_TAB || sheet.getActiveRange().getRow() <= 1) {
+    SpreadsheetApp.getUi().alert('Hãy chọn một dòng đơn (không phải header) trong tab ' + PMT_ORDER_TAB + '.'); return;
   }
-  const row = sheet.getActiveRange().getRow();
-  if (row <= 1) {
-    SpreadsheetApp.getUi().alert('Hãy chọn dòng đơn của khách, không chọn header.');
-    return;
-  }
-  const status = _pmtMintAndSendForRow(sheet, row, { note: 'gui_lai_thu_cong' });
+  const status = _pmtMintAndSendForRow(sheet, sheet.getActiveRange().getRow(), { note: 'gui_lai_thu_cong' });
   SpreadsheetApp.getUi().alert(status === 'ok' ? 'Đã gửi lại link Discord cho khách.' : ('Không gửi được: ' + status));
 }
 
-function testWebhookThanhToanChoDonDangChon() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const sheet = ss.getActiveSheet();
-  if (sheet.getName() !== PMT_ORDER_TAB) {
-    SpreadsheetApp.getUi().alert('Hãy chọn một dòng trong tab ' + PMT_ORDER_TAB + ' trước.');
-    return;
-  }
-  const row = sheet.getActiveRange().getRow();
-  if (row <= 1) {
-    SpreadsheetApp.getUi().alert('Hãy chọn dòng đơn của khách, không chọn header.');
-    return;
-  }
-  const vals = sheet.getRange(row, 1, 1, 6).getValues()[0];
-  const maDon = vals[1], gia = vals[4];
-  const token = _pmtProp('PMT_WEBHOOK_TOKEN', '');
-  const fake = {
-    parameter: { token: token },
-    postData: { contents: JSON.stringify({ transferType: 'in', content: maDon, transferAmount: gia || 999999 }) }
-  };
-  const out = doPost(fake).getContent();
-  SpreadsheetApp.getUi().alert('Kết quả test webhook: ' + out + '\nXem thêm tab Nhật ký.');
+function _pmtVerifyWebhook(data, signature) {
+  const key = _pmtProp('PAYOS_CHECKSUM_KEY', '');
+  return !!key && String(signature || '').toLowerCase() === _pmtHmac(_pmtPayosDataString(data), key).toLowerCase();
 }
 
-// ---- SePay webhook: có tiền về -> khớp mã đơn -> xin link từ bot -> gửi khách ----
+function testWebhookThanhToanChoDonDangChon() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  if (sheet.getName() !== PMT_ORDER_TAB || sheet.getActiveRange().getRow() <= 1) {
+    SpreadsheetApp.getUi().alert('Hãy chọn một dòng đơn (không phải header) trong tab ' + PMT_ORDER_TAB + '.'); return;
+  }
+  const row = sheet.getActiveRange().getRow();
+  const vals = sheet.getRange(row, 1, 1, 15).getValues()[0];
+  const data = { orderCode: Number(vals[10]), amount: Number(vals[4]), description: String(vals[1]), paymentLinkId: String(vals[11] || 'test'), code: '00', desc: 'Thành công' };
+  const fake = { postData: { contents: JSON.stringify({ code: '00', success: true, data: data, signature: _pmtHmac(_pmtPayosDataString(data), _pmtProp('PAYOS_CHECKSUM_KEY', '')) }) } };
+  const out = doPost(fake).getContent();
+  SpreadsheetApp.getUi().alert('Kết quả test webhook: ' + out + '\nLưu ý: test này cấp invite và gửi mail thật. Xem tab Nhật ký.');
+}
+
+// PayOS webhook: xác thực HMAC trước, sau đó khớp orderCode + số tiền cố định.
 function doPost(e) {
   try {
-    // Lớp khoá bằng token trong URL (Apps Script không đọc được header nên dùng query ?token=).
-    // Nếu đã đặt PMT_WEBHOOK_TOKEN mà URL gọi tới không kèm đúng token -> từ chối.
-    const need = _pmtProp('PMT_WEBHOOK_TOKEN', '');
-    if (need) {
-      const got = (e && e.parameter && e.parameter.token) || '';
-      if (got !== need) {
-        ghiLog('doPost bị từ chối (sai token)', 'nhận token="' + got + '"');
-        return _pmtOut('unauthorized');
-      }
+    const payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    const data = payload.data || {};
+    if (!payload.success || payload.code !== '00' || data.code !== '00') return _pmtOut('bo_qua');
+    if (!_pmtVerifyWebhook(data, payload.signature)) {
+      ghiLog('Webhook PayOS bị từ chối (sai chữ ký)', 'orderCode=' + String(data.orderCode || ''));
+      return _pmtOut('unauthorized');
     }
-    const data = JSON.parse((e && e.postData && e.postData.contents) || '{}');
-    // Chỉ xử lý tiền VÀO (bỏ qua giao dịch chuyển đi nếu SePay có gửi).
-    const loai = String(data.transferType || data.type || 'in').toLowerCase();
-    if (loai && loai.indexOf('out') >= 0) return _pmtOut('bo_qua_tien_ra');
-    const noiDung = String(data.content || data.description || data.transferContent || data.addInfo || '').toUpperCase();
-    const soTien = Number(data.transferAmount || data.amount || data.amountIn || data.creditAmount || 0);
-    ghiLog('Webhook thanh toán tới', 'amount=' + soTien + ' memo="' + noiDung.slice(0, 120) + '"');
-    const sheet = _pmtOrderSheet();
-    const last = sheet.getLastRow();
+    const sheet = _pmtOrderSheet(), last = sheet.getLastRow();
     if (last < 2) return _pmtOut('khong_khop');
-    const rows = sheet.getRange(2, 1, last - 1, 6).getValues();
+    const rows = sheet.getRange(2, 1, last - 1, 15).getValues();
+    const expectedOrderCode = String(data.orderCode || '');
     for (let i = 0; i < rows.length; i++) {
-      const maDon = String(rows[i][1] || '');
-      if (!maDon) continue;
-      if (noiDung.indexOf(maDon.toUpperCase()) === -1) continue; // memo không chứa mã này
-      const name = rows[i][2], email = rows[i][3], gia = Number(rows[i][4] || 0), trangThai = rows[i][5];
-      if (trangThai === 'da_xu_ly') return _pmtOut('da_xu_ly'); // chống trùng
-      if (gia > 0 && soTien > 0 && soTien < gia) {
-        ghiLog('CK thiếu tiền', maDon + ' nhận ' + soTien + '/' + gia);
-        return _pmtOut('thieu_tien');
+      if (String(rows[i][10] || '') !== expectedOrderCode) continue;
+      const maDon = String(rows[i][1] || ''), gia = Number(rows[i][4] || 0), status = String(rows[i][5] || '');
+      if (status === 'da_xu_ly') return _pmtOut('da_xu_ly');
+      if (gia !== PMT_FIXED_AMOUNT || Number(data.amount || 0) !== gia) {
+        ghiLog('Webhook PayOS sai số tiền', maDon + ' nhận ' + data.amount + '/' + gia);
+        return _pmtOut('sai_so_tien');
       }
-      const status = _pmtMintAndSendForRow(sheet, i + 2, {
-        paidAt: new Date(),
-        note: 'webhook amount=' + soTien
-      });
-      return _pmtOut(status);
+      const result = _pmtMintAndSendForRow(sheet, i + 2, { paidAt: data.transactionDateTime || new Date(), note: 'payos orderCode=' + expectedOrderCode + ' ref=' + String(data.reference || '') });
+      return _pmtOut(result);
     }
-    ghiLog('Webhook không khớp mã đơn', 'memo="' + noiDung.slice(0, 180) + '" amount=' + soTien);
+    ghiLog('Webhook PayOS không khớp orderCode', expectedOrderCode);
     return _pmtOut('khong_khop');
   } catch (err) {
-    ghiLog('LỖI doPost thanh toán', (err && err.message) || String(err));
+    ghiLog('LỖI doPost PayOS', (err && err.message) || String(err));
     return _pmtOut('loi');
   }
+}
+
+// Trang khách thấy sau khi PayOS quay về. Không dùng trang này làm căn cứ cấp quyền.
+function doGet(e) {
+  const state = e && e.parameter && e.parameter.pmt;
+  const done = state === 'completed';
+  const text = done ? 'Thanh toán đang được xác nhận' : 'Đơn thanh toán đã được hủy';
+  const detail = done ? 'Nếu giao dịch thành công, link Discord sẽ tự gửi vào email bạn đã đăng ký trong ít phút.' : 'Bạn có thể quay lại Form HVHN để tạo mã QR mới khi cần.';
+  return HtmlService.createHtmlOutput('<!doctype html><html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:Arial,sans-serif;max-width:620px;margin:56px auto;padding:0 20px;color:#202124"><h2 style="color:#0b8043">HVHN</h2><h3>' + _pmtEsc(text) + '</h3><p>' + _pmtEsc(detail) + '</p></body></html>').setTitle('HVHN');
 }

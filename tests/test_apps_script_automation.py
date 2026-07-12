@@ -32,15 +32,26 @@ class AppsScriptAutomationTest(unittest.TestCase):
 
     def test_payment_webhook_logs_and_uses_shared_mint_send_path(self):
         self.assertIn("function _pmtMintAndSendForRow", self.src)
-        self.assertIn("Webhook thanh toán tới", self.src)
-        self.assertIn("Webhook không khớp mã đơn", self.src)
-        self.assertIn("data.creditAmount", self.src)
+        self.assertIn("Webhook PayOS bị từ chối", self.src)
+        self.assertIn("Webhook PayOS không khớp orderCode", self.src)
+        self.assertIn("data.orderCode", self.src)
         self.assertIn("_pmtMintAndSendForRow(sheet, i + 2", self.src)
 
-    def test_payment_settings_shows_full_sepay_url_with_token(self):
-        self.assertIn("ScriptApp.getService().getUrl()", self.src)
-        self.assertIn("URL DÁN VÀO SEPAY phải là", self.src)
-        self.assertIn("?token=", self.src)
+    def test_payment_uses_payos_qr_with_fixed_amount_and_signed_webhook(self):
+        self.assertIn("const PMT_FIXED_AMOUNT = 60000", self.src)
+        self.assertIn("function _pmtCreatePayosLink", self.src)
+        self.assertIn("/v2/payment-requests", self.src)
+        self.assertIn("function _pmtVerifyWebhook", self.src)
+        self.assertIn("Utilities.computeHmacSha256Signature", self.src)
+        self.assertIn("String(rows[i][10] || '') !== expectedOrderCode", self.src)
+        self.assertIn("Number(data.amount || 0) !== gia", self.src)
+
+    def test_payment_email_has_qr_and_safe_checkout_fallback(self):
+        self.assertIn("function _pmtSendPaymentEmail", self.src)
+        self.assertIn("Mã QR thanh toán của bạn", self.src)
+        self.assertIn("Mở trang thanh toán an toàn", self.src)
+        self.assertIn("function ketNoiWebhookPayOS", self.src)
+        self.assertIn("/confirm-webhook", self.src)
 
 
 if __name__ == "__main__":
