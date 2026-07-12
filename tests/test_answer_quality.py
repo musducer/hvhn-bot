@@ -76,6 +76,43 @@ class AnswerQualityTest(unittest.TestCase):
         )
         self.assertFalse(AI._looks_like_dry_literary_style(answer))
 
+    # === Bia trich dan + khung van mau (a)/(b)/(c)/(d): loi Nguyen Binh 2026-07-12 ===
+    ABCD_SCAFFOLD_ANSWER = (
+        "Toi luon cam thay tho Nguyen Binh nhu mot tieng gio nhe.\n\n"
+        "Ngon ngu dan gian\n"
+        "(a) Nhan tu: ngon ngu binh dan. (b) Trich dan: \"Me con ngoi ben bep lua, nang chieu roi tren mai tranh\" "
+        "(tu bai Me con). (c) Phan tich: cau tho dung tu quen thuoc. (d) Khai quat: tho Nguyen Binh thanh cau noi.\n\n"
+        "Cau truc song song\n"
+        "(a) Nhan tu: diep tu. (b) Trich dan: \"Mua xuan den, xuan den, rung xanh lai khe hat\" (tu bai Mua xuan). "
+        "(c) Phan tich: lap lai tao nhip. (d) Khai quat: diep tu la cay cau nhip dieu.\n\n"
+        "Ket luan: tho Nguyen Binh la mot ban hoa ca dan gian."
+    )
+
+    def test_abcd_scaffold_is_flagged_as_template(self):
+        defects = AI._ai_flavored_style_defects(self.ABCD_SCAFFOLD_ANSWER)
+        self.assertTrue(any("KHUNG VAN MAU" in d for d in defects))
+
+    def test_abcd_scaffold_is_not_mistaken_for_librarian(self):
+        self.assertFalse(AI._looks_like_librarian_dump(self.ABCD_SCAFFOLD_ANSWER))
+
+    def test_ungrounded_long_quotes_are_flagged_as_fabricated(self):
+        # Khong co evidence nao ma van dat cau tho dai trong ngoac kep -> bia.
+        self.assertTrue(AI._has_unverified_long_quotes(self.ABCD_SCAFFOLD_ANSWER, ""))
+
+    def test_drop_sentences_removes_fabricated_quotes(self):
+        stripped = AI._drop_sentences_with_unverified_quotes(self.ABCD_SCAFFOLD_ANSWER, "")
+        # Cac cau tho + ten tac pham bia phai bi cat, khong con quote khong xac minh.
+        self.assertNotIn("bai Me con", stripped)
+        self.assertNotIn("bai Mua xuan", stripped)
+        self.assertNotIn("bep lua, nang chieu", stripped)
+        self.assertFalse(AI._has_unverified_long_quotes(stripped, ""))
+        # Van giu duoc phan van xuoi (khong xoa sach bai).
+        self.assertIn("Nguyen Binh", stripped)
+
+    def test_short_quoted_title_is_not_treated_as_fabricated(self):
+        answer = 'Phong cach Nguyen Binh gan voi "chan que", mot khai niem quen thuoc trong tho ong.'
+        self.assertFalse(AI._has_unverified_long_quotes(answer, ""))
+
 
 if __name__ == "__main__":
     unittest.main()

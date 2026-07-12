@@ -245,12 +245,17 @@ THEN_SYSTEM_PROMPT = (
     "câu, GIỮ NGUYÊN các điệp từ/điệp ngữ ('và… và… và', 'này đây… này đây', 'cho… cho…'). "
     "TUYỆT ĐỐI không rút gọn, không gộp câu, không diễn xuôi thơ rồi bỏ trong ngoặc kép. Nếu "
     "không nhớ/không có chính xác nguyên văn thì mô tả bằng lời thường, KHÔNG đặt trong ngoặc "
-    "kép. Chính điệp từ, nhịp, cú pháp là bằng chứng phong cách — làm mất chúng là làm hỏng bài.\n"
-    "12. CẤM phân tích 3 tầng cụt 'khẳng định → dẫn thơ → lặp lại khẳng định'. Mỗi luận điểm "
-    "BẮT BUỘC đủ 4 tầng: (a) gọi tên thủ pháp/nhãn tự cụ thể → (b) trích đúng nguyên văn dẫn "
-    "chứng → (c) phân tích VÌ SAO thủ pháp đó tạo ra hiệu quả ấy (đi vào cơ chế, không nói "
-    "chung 'thể hiện sự phong phú') → (d) khái quát lên tư tưởng/phong cách. Không kết bài bằng "
-    "cách tóm lại y hệt thân bài. Không lặp lại cùng một cụm khái quát quá một lần trong bài.\n"
+    "kép. Chính điệp từ, nhịp, cú pháp là bằng chứng phong cách — làm mất chúng là làm hỏng bài. "
+    "BỊA một câu thơ/câu văn (hoặc một tên tác phẩm) rồi gán cho tác giả — dù nghe 'có vẻ đúng' — "
+    "là lỗi NẶNG NHẤT, sai cả kiến thức lẫn đạo đức nghề; thà không có dẫn chứng nguyên văn còn hơn.\n"
+    "12. CẤM phân tích 3 tầng cụt 'khẳng định → dẫn thơ → lặp lại khẳng định'. Mỗi luận điểm phải "
+    "khai triển thành MỘT ĐOẠN VĂN LIỀN MẠCH có chiều sâu: gọi tên thủ pháp/nhãn tự cụ thể, phân "
+    "tích VÌ SAO nó tạo ra hiệu quả ấy (đi vào cơ chế ngôn ngữ, không nói chung 'thể hiện sự phong "
+    "phú'), rồi khái quát lên tư tưởng/phong cách. Dẫn chứng nguyên văn CHỈ khi có sẵn trong ngữ "
+    "cảnh hoặc bạn chắc chắn 100% đúng nguyên văn và đúng tác giả (xem LUẬT 11); thiếu thì phân tích "
+    "bằng đặc điểm phong cách/giọng điệu/thể thơ, KHÔNG bịa. TUYỆT ĐỐI KHÔNG đánh nhãn '(a)/(b)/(c)/"
+    "(d)', không đặt tiêu đề tiểu mục, không lập bảng — để mạch văn tự chảy như lời một người thầy "
+    "giảng. Không kết bài bằng cách tóm lại y hệt thân bài. Không lặp lại cùng một cụm khái quát quá một lần.\n"
     "13. Ngữ cảnh kèm theo (Nguồn:, tên báo, tên trang, tên tài liệu) CHỈ để bạn tự đối chiếu, "
     "TUYỆT ĐỐI KHÔNG nêu tên nguồn nội bộ đó trong bài (không viết 'theo báo X', 'trên trang báo Y', "
     "'trong tài liệu Z'). CẤM kết bài bằng lời khuyên đi kiểm chứng/tra cứu/đọc toàn văn bài viết ở "
@@ -1954,7 +1959,8 @@ class AI(commands.Cog):
             "- Van phong phan tich van hoc phai co chat van: mo bang mot truc tu tuong/hinh anh trung tam; dung dong tu co luc nhu 'bung len', 'ro ri', 'ket tinh', 'va cham', 'keo cang', 'chuyen hoa'; cau van co nhip ngan-dai dan xen. Tuyet doi khong viet nhu bao cao muc 'Ve noi dung/ve nghe thuat/tong ket'.\n"
             "- Hinh anh hoa lap luan nhung khong bay khoi evidence: moi an du/so sanh trong loi binh phai neo vao chi tiet van ban dang phan tich.\n"
             "- Truoc khi chot, tu kiem: co dan chung cu the cho tung tac pham chua, co suy doan ngoai context khong, co cau nao co the gan cho moi tac pham khong.\n"
-            "- DO SAU & DO DAI (voi cau hoi phan tich/cam nhan/phong cach): trien khai IT NHAT 3-4 luan diem, moi luan diem la mot doan day du theo 4 tang: (a) goi ten thu phap/nhan tu cu the -> (b) trich NGUYEN VAN dan chung, GIU nguyen diep tu/diep ngu ('va... va... va', 'nay day... nay day', 'cho... cho...'), khong rut gon/dien xuoi tho -> (c) phan tich VI SAO thu phap ay tao ra hieu qua ay (co che ngon ngu, khong noi chung 'the hien su phong phu') -> (d) khai quat len tu tuong/phong cach. Bai phai du day dan, co chieu sau, KHONG duoc chi 3-4 doan ngan hoi hot.\n"
+            "- DO SAU & DO DAI (voi cau hoi phan tich/cam nhan/phong cach): trien khai IT NHAT 3-4 luan diem, moi luan diem la mot doan van LIEN MACH nhu loi giang cua mot nguoi thay - TUYET DOI khong dat nhan '(a)/(b)/(c)/(d)', khong tieu de tieu muc, khong lap bang, khong gach dau dong may moc. Trong moi doan: goi ten thu phap/nhan tu cu the, phan tich VI SAO no tao ra hieu qua (co che ngon ngu, khong noi chung 'the hien su phong phu'), roi nang len tu tuong/phong cach.\n"
+            "- DAN CHUNG CHI KHI CHAC THAT: chi trich NGUYEN VAN mot cau tho/cau van khi cau do (i) co san trong context/evidence, HOAC (ii) ban CHAC CHAN 100% dung nguyen van va dung tac gia/tac pham. Khi trich thi GIU nguyen diep tu/diep ngu ('va... va... va', 'nay day... nay day'), khong rut gon/dien xuoi tho. TUYET DOI KHONG BIA cau tho, cau van hay ten tac pham de lam dan chung: bia trich dan roi gan cho tac gia la loi NGHIEM TRONG NHAT, sai ca kien thuc lan dao duc. Neu khong co dan chung nguyen van dang tin, ban VAN phan tich duoc phong cach qua the tho/giong dieu/de tai/hinh anh dac trung/cai toi tru tinh va nhung tac pham co that ma ban biet chac - dien dat y thay vi dong ngoac kep. Bai phai day dan, co chieu sau, KHONG chi 3-4 doan ngan hoi hot.\n"
             "- CHONG DON THO: khong dan khoi trich qua 3 dong lien; trich 1-3 cau roi phan tich NGAY nhan tu cua doan do (chu nao dat nhat, vi sao), phan tich phai DAI hon phan trich; sau do moi trich tiep. Trich 10 cau roi binh 1 cau chung chung la bai hong.\n"
             "- CHONG VAN AI: han che toi da danh hoa 'su ...', 'viec ...' ('the hien su mong muon' -> 'cho thay ong khat khao'); dung dong tu manh, hinh anh cu the thay cho danh tu truu tuong.\n"
             "- CHONG LAP & CHONG CUT: khong lap lai cung mot cum khai quat (vd 'quan niem ve thoi gian va tuoi tre') qua mot lan; ket bai khong duoc tom lai y het than bai bang tu khac; moi doan phai them thong tin moi.\n\n"
@@ -2062,6 +2068,30 @@ class AI(commands.Cog):
             if quote_plain not in evidence_plain:
                 return True
         return False
+
+    @staticmethod
+    def _drop_sentences_with_unverified_quotes(answer: str, evidence: str) -> str:
+        """Chot chan cuoi khi ca repair lan regen deu that bai: cat han cac 'cau' co chua
+        trich dan dai KHONG xac minh duoc (bia). Tha mat vai cau con hon gui trich dan bia
+        gan cho tac gia."""
+        evidence_plain = AI._plain_text(evidence or "")
+        bad_spans: list[tuple[int, int]] = []
+        for span in QuoteExtractor.quote_spans(answer or ""):
+            q = AI._plain_text(answer[span.start:span.end])
+            if len(q) >= 24 and q not in evidence_plain:
+                bad_spans.append((span.start, span.end))
+        if not bad_spans:
+            return answer
+        kept: list[str] = []
+        pos = 0
+        for part in re.split(r"(?<=[.!?\n])", answer):
+            start, end = pos, pos + len(part)
+            pos = end
+            if any(not (end <= bs or start >= be) for bs, be in bad_spans):
+                continue  # bo 'cau' chua quote bia
+            kept.append(part)
+        cleaned = re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
+        return cleaned if len(cleaned) >= 120 else answer
 
     @staticmethod
     def _looks_like_dry_literary_style(answer: str) -> bool:
@@ -2177,6 +2207,17 @@ class AI(commands.Cog):
                 f"Lam dung danh hoa kieu AI ('su ...', 'viec ...') {su_count} lan. Viet lai bang dong tu/tinh tu truc tiep: "
                 "'su khan truong' -> 'khan truong', 'the hien su mong muon' -> 'cho thay ong khat khao', "
                 "'su tuong phan giua su vinh cuu va su ngan ngui' -> 'troi dat thi con mai, doi nguoi thi huu han'."
+            )
+        # KHUNG (a)/(b)/(c)/(d) hoac nhan 'Nhan tu:/Trich dan:/Phan tich:/Khai quat:' — van mau
+        # may moc, KHONG phai Chu Van Son. Model dang parrot 4 tang cua prompt thanh nhan muc.
+        scaffold_labels = len(re.findall(r"\(\s*[a-d]\s*\)", plain))
+        label_words = len(re.findall(r"(?:^|\n)\s*(?:nhan tu|trich dan|phan tich|khai quat)\s*[:\-]", plain))
+        if scaffold_labels >= 3 or label_words >= 3:
+            defects.append(
+                "KHUNG VAN MAU may moc: dang danh nhan '(a)/(b)/(c)/(d)' hoac 'Nhan tu:/Trich dan:/Phan tich:/"
+                "Khai quat:' cho tung y. Chu Van Son KHONG chia bai kieu do. Viet lai thanh cac doan van LIEN "
+                "MACH nhu loi giang: moi doan tu no goi ten thu phap, phan tich, roi nang len — khong dat nhan, "
+                "khong tieu de tieu muc, khong gach dau dong."
             )
         # Don tho thay phan tich: trich khoi dai roi phan mot cau chung chung.
         spans = QuoteExtractor.quote_spans(answer)
@@ -2409,13 +2450,19 @@ class AI(commands.Cog):
         # Cau phan tich van hoc ma tra ve vai doan cut la chua dat do sau yeu cau.
         if answer and mode.startswith("literature") and len(answer) < 1500:
             style_defects = style_defects + [
-                "Bai qua ngan so voi yeu cau phan tich (duoi 1500 ky tu). Trien khai it nhat 3-4 luan diem "
-                "du 4 tang (thu phap -> trich nguyen van 1-3 cau -> phan tich co che -> khai quat phong cach), "
-                "dung evidence trong context; khong don tho, khong lap y."
+                "Bai qua ngan so voi yeu cau phan tich (duoi 1500 ky tu). Trien khai it nhat 3-4 luan diem, moi "
+                "luan diem la mot doan lien mach: goi ten thu phap -> phan tich co che ngon ngu -> khai quat "
+                "phong cach; CHI trich nguyen van khi cau do co trong evidence hoac ban chac chan dung (khong bia "
+                "trich dan). Khong don tho, khong lap y."
             ]
         librarian_dump = bool(answer) and self._looks_like_librarian_dump(answer)
+        # Bia trich dan: KHONG co evidence nao ma bai VAN dat cau tho/cau van dai trong ngoac
+        # kep -> chac chan la bia (khong the co trich dan xac minh khi khong co dan lieu).
+        ungrounded = not evidence_for_quote_check.strip()
+        fabricated_quotes = bool(answer) and ungrounded and self._has_unverified_long_quotes(answer, "")
         needs_repair = bool(answer) and (
             librarian_dump
+            or fabricated_quotes
             or self._looks_like_source_dump(answer)
             or self._looks_like_generic_literary_answer(answer)
             or self._looks_like_weak_style_analysis(answer)
@@ -2439,8 +2486,23 @@ class AI(commands.Cog):
                     "luan de, phan tich tu ngu/hinh anh/nhip dieu/cai toi tru tinh (neu la tho) hoac chi tiet/tinh "
                     "huong/nhan vat (neu la van xuoi), co dan chung va loi binh rieng. TUYET DOI khong nhac 'tai "
                     "lieu'/'trich dan'/'P1'/'P2'/'kho', khong lap bang, khong xep hang, khong danh gia 'du lieu day "
-                    "du hay khong'.\n\n"
+                    "du hay khong'. VA TUYET DOI khong BIA cau tho/cau van/ten tac pham de lam dan chung — khong "
+                    "chac nguyen van thi phan tich bang dac diem phong cach, dung dong ngoac kep.\n\n"
                     f"CAU HOI CAN TRA LOI:\n{prompt}"
+                )
+            elif fabricated_quotes:
+                # Khong co dan lieu ma van dat trich dan dai -> bia. Ep bo het quote, phan
+                # tich bang dac diem phong cach; giu kho (rong) de model khong quote lai tu dau.
+                repair_knowledge, repair_web = knowledge, web_context
+                repair_prompt = (
+                    "Cau tra loi truoc chua nhung cau dat trong ngoac kep KHONG co trong bat ky dan lieu nao — day "
+                    "gan nhu chac chan la BIA (gan cau tho/cau van + ten tac pham khong co that cho tac gia dang "
+                    "hoi). Day la loi NGHIEM TRONG NHAT. Hay XOA HET moi cau tho/cau van dat trong ngoac kep va "
+                    "KHONG bia cau khac thay the, KHONG bia ten tac pham. Phan tich phong cach/noi dung bang dac "
+                    "diem the tho, giong dieu, de tai, hinh anh dac trung, cai toi tru tinh va cac tac pham co that "
+                    "ma ban chac chan — dien dat y thay vi dong ngoac kep. Bai lien mach nhu loi giang, KHONG dat "
+                    "nhan (a)/(b)/(c)/(d), khong tieu de tieu muc, khong lap bang.\n\n"
+                    f"CAU HOI:\n{prompt}\n\nCAU TRA LOI CAN SUA (bo het quote bia trong day):\n{answer}"
                 )
             else:
                 repair_knowledge, repair_web = knowledge, web_context
@@ -2478,8 +2540,33 @@ class AI(commands.Cog):
                 max_tokens=LIT_MAX_TOKENS,
                 prefer_rich_style=True,
             )
-            if repaired and not (librarian_dump and self._looks_like_librarian_dump(repaired)):
+            still_librarian = librarian_dump and self._looks_like_librarian_dump(repaired or "")
+            still_fabricated = (librarian_dump or fabricated_quotes) and self._has_unverified_long_quotes(repaired or "", "")
+            if repaired and not still_librarian and not still_fabricated:
                 answer = repaired
+            elif fabricated_quotes or still_fabricated:
+                # Repair van con quote bia (hoac repair drop-kho lai bia): sinh lai mot ban
+                # KHONG dan chung nguyen van; con lai thi cat han cau chua quote bia.
+                regen = await self.generate(
+                    self._guarded_prompt(
+                        "Tra loi cau hoi sau bang mot bai phan tich van hoc LIEN MACH nhu loi giang, TUYET DOI "
+                        "khong trich dan bat ky cau tho/cau van nao trong ngoac kep (vi khong co dan lieu xac minh), "
+                        "KHONG bia ten tac pham. Phan tich phong cach qua the tho, giong dieu, de tai, hinh anh dac "
+                        "trung, cai toi tru tinh. Khong dat nhan (a)/(b)/(c)/(d), khong tieu de tieu muc.\n\n" + prompt,
+                        "", "", "literature_no_quote",
+                    ),
+                    THEN_SYSTEM_PROMPT,
+                    temperature=LIT_TEMPERATURE,
+                    top_p=LIT_TOP_P,
+                    max_tokens=LIT_MAX_TOKENS,
+                    prefer_rich_style=True,
+                )
+                if regen and not self._has_unverified_long_quotes(regen, ""):
+                    answer = regen
+                    print("[debug] fabricated_quotes=regenerated_quote_free", flush=True)
+                else:
+                    answer = self._drop_sentences_with_unverified_quotes(regen or repaired or answer, "")
+                    print("[debug] fabricated_quotes=stripped_sentences", flush=True)
             elif librarian_dump:
                 # Repair van con che do thu thu (hoac khong chay duoc): lot cac dong meta,
                 # con hon gui nguyen ban liet ke tai lieu.
