@@ -89,7 +89,8 @@ VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LIT_TEMPERATURE = float(os.getenv("HVHN_LIT_TEMPERATURE", "0.7"))
 LIT_TOP_P = float(os.getenv("HVHN_LIT_TOP_P", "0.95"))
 LIT_MAX_TOKENS = int(os.getenv("HVHN_LIT_MAX_TOKENS", "3000"))
-AI_ANSWER_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_ANSWER_TIMEOUT_SECONDS", "105"))
+AI_ANSWER_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_ANSWER_TIMEOUT_SECONDS", "75"))
+AI_SIMPLE_ANSWER_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_SIMPLE_ANSWER_TIMEOUT_SECONDS", "45"))
 AI_FORCE_FALLBACK_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_FORCE_FALLBACK_TIMEOUT_SECONDS", "35"))
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 # Duoi nguong nay coi nhu truy xuat .md lac de -> khong nhoi vao context (tranh chep tai lieu khong lien quan).
@@ -1506,11 +1507,16 @@ class AI(commands.Cog):
         "hinh tuong", "nhan vat", "chi tiet", "tinh huong", "doan tho", "bai tho",
         "kho tho", "doan trich", "truyen ngan", "tac pham", "tac gia", "nha tho",
         "nha van", "quan niem", "viet nam", "ha noi", "sai gon", "cach mang",
+        "trinh bay", "nhung cach", "cac cach", "bao ton", "phat huy", "nghe thuat",
+        "hat ru", "doi song", "hien dai", "luan diem", "luan cu", "luan chung",
+        "li luan", "ly luan", "van hoc", "binh luan", "phan binh",
     }
     # Chuoi 2-4 am tiet cung viet hoa kieu Viet ("Nguyen Binh", "Nguyen Huy Thiep",
     # "Vo Nhat") -> ung vien ten rieng.
+    _VN_UPPER = "A-ZÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ"
+    _VN_LOWER = "a-zàáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđ"
     _NAME_SEQ_RE = re.compile(
-        r"[A-ZÀ-ỸĐ][a-zà-ỹđ]+(?:\s+[A-ZÀ-ỸĐ][a-zà-ỹđ]+){1,3}"
+        rf"[{_VN_UPPER}][{_VN_LOWER}]+(?:\s+[{_VN_UPPER}][{_VN_LOWER}]+){{1,3}}"
     )
 
     @classmethod
@@ -2698,10 +2704,49 @@ class AI(commands.Cog):
         return base + "\n\n---\n\n" + evidence
 
     @classmethod
+    def _wants_brief_list_answer(cls, query: str) -> bool:
+        q = cls._plain_text(query)
+        return any(marker in q for marker in (
+            "gach dau dong", "3 y", "ba y", "moi y", "ngan gon", "viet ngan",
+            "trinh bay nhung cach", "trinh bay cac cach", "liet ke",
+        ))
+
+    @classmethod
+    def _answer_timeout_seconds(cls, query: str, mode: str = "") -> int:
+        q = cls._plain_text(query)
+        if cls._wants_brief_list_answer(query) or (
+            len(q) <= 260 and any(marker in q for marker in ("trinh bay", "neu", "liet ke", "goi y"))
+        ):
+            return min(AI_ANSWER_TIMEOUT_SECONDS, AI_SIMPLE_ANSWER_TIMEOUT_SECONDS)
+        return AI_ANSWER_TIMEOUT_SECONDS
+
+    @classmethod
+    def _is_practical_solution_request(cls, query: str) -> bool:
+        q = cls._plain_text(query)
+        return any(marker in q for marker in (
+            "bao ton", "phat huy", "giu gin", "duy tri", "lam the nao", "nhung cach",
+            "cac cach", "giai phap", "doi song hien dai", "thuc hanh",
+        ))
+
+    @classmethod
+    def _is_argumentative_composition_request(cls, query: str) -> bool:
+        q = cls._plain_text(query)
+        return any(marker in q for marker in (
+            "luan diem", "luan cu", "luan chung", "li luan van hoc", "ly luan van hoc",
+            "phan binh luan", "viet phan binh luan", "viet bai", "hsgqg", "hoc sinh gioi",
+            "chung minh", "dan y", "mo rong", "doc dao",
+        ))
+
+    @classmethod
     def _is_literary_answer_request(cls, query: str, mode: str = "") -> bool:
-        plain = cls._plain_text(f"{mode} {query}")
+        # /van_hoi có thể hỏi văn học, nhưng cũng có thể hỏi giải pháp đời sống hoặc
+        # cách làm bài nghị luận. Không để mode "literature/van_hoi" một mình kích hoạt
+        # fallback phân tích tác phẩm/thơ.
+        if cls._is_practical_solution_request(query) or cls._is_argumentative_composition_request(query):
+            return False
+        plain = cls._plain_text(query)
         return any(marker in plain for marker in (
-            "literature", "van_hoi", "phan tich", "cam nhan", "binh giang", "binh luan",
+            "phan tich", "cam nhan", "binh giang", "binh luan",
             "phong cach", "tho", "truyen", "tac pham", "tac gia", "hinh tuong",
         ))
 
@@ -2711,6 +2756,39 @@ class AI(commands.Cog):
         if subjects:
             return subjects[0].title()
         return "tác giả/tác phẩm được hỏi"
+
+    @classmethod
+    def _practical_evidence_fallback_answer(cls, query: str, chunks: list[dict], manual_knowledge: str, web_context: str) -> str:
+        q = cls._plain_text(query)
+        if "hat ru" in q:
+            return "\n".join([
+                "- Đưa hát ru trở lại trong gia đình và giáo dục sớm: cha mẹ, ông bà, giáo viên mầm non nên hát ru bằng lời thật, giọng thật; khi lời ru còn vang trong nếp sống hằng ngày, di sản không bị biến thành đồ trưng bày.",
+                "- Sưu tầm, số hoá và truyền dạy có chọn lọc: ghi âm, chép lời, lập kho tư liệu, tổ chức câu lạc bộ/lớp học dân gian để người trẻ hiểu cả làn điệu, hoàn cảnh và tình cảm nằm sau lời ru.",
+                "- Làm mới cách lan tỏa trong đời sống hiện đại: đưa hát ru vào video ngắn, podcast, sân khấu học đường, hoạt động cộng đồng; có thể phối khí nhẹ nhàng nhưng phải giữ hồn cốt dịu êm, nhân hậu của lời ru.",
+            ])
+        return "\n".join([
+            "- Xác định giá trị cốt lõi cần giữ: phải hiểu điều gì làm nên bản sắc của di sản trước khi nói đến đổi mới.",
+            "- Tạo môi trường thực hành thường xuyên: di sản chỉ sống khi còn người học, người dùng và cộng đồng cùng tham gia.",
+            "- Làm mới hình thức lan tỏa: tận dụng giáo dục, truyền thông và sinh hoạt cộng đồng để giá trị cũ bước vào đời sống mới mà không mất hồn cốt.",
+        ])
+
+    @classmethod
+    def _argumentative_evidence_fallback_answer(cls, query: str, chunks: list[dict], manual_knowledge: str, web_context: str) -> str:
+        q = cls._plain_text(query)
+        if "nghe thuat" in q and "su that" in q:
+            return "\n\n".join([
+                "Hướng triển khai nên đặt trọng tâm ở nghịch lí: nghệ thuật không giúp con người trốn khỏi sự thật, mà giúp ta đủ sức nhìn thẳng vào sự thật mà không bị nó nghiền nát.",
+                "- Luận điểm 1: Sự thật đời sống thường thô ráp, đau đớn, hữu hạn; nghệ thuật chuyển hóa sự thật ấy thành hình tượng, nhịp điệu, câu chuyện, nhờ vậy cái đau có hình hài để con người đối thoại. Có thể dùng ca dao than thân như tiếng nói của những kiếp người nhỏ bé: nỗi khổ được cất thành lời hát nên không chìm hẳn trong câm lặng.",
+                "- Luận điểm 2: Nghệ thuật cứu con người bằng cái đẹp và lòng trắc ẩn. Ở văn học trung đại, Truyện Kiều biến bi kịch tài mệnh, lưu lạc, bị chà đạp thành tiếng thương người sâu thẳm; sự thật khắc nghiệt không mất đi, nhưng được nâng lên thành nhân đạo.",
+                "- Luận điểm 3: Nghệ thuật còn giữ cho sự thật có đời sống lâu dài trong lương tri nhân loại. Văn học hiện đại có thể lấy Chí Phèo, Vợ nhặt, Nhật ký trong tù; văn học thế giới có thể mở sang Những người khốn khổ, Ông già và biển cả, Hamlet: mỗi tác phẩm cho thấy con người đi qua đói nghèo, cô độc, phi lí, thất bại mà vẫn giữ một phần phẩm giá.",
+                "Phần bình luận muốn hay: tránh hiểu câu nói như lời ca ngợi sự thoát li. Nên chốt rằng nghệ thuật đáng quý không phải vì làm sự thật bớt thật, mà vì làm sự thật trở nên có thể chịu đựng, có thể suy ngẫm, có thể biến thành sức sống tinh thần.",
+            ])
+        return "\n\n".join([
+            "Có thể dựng bài theo trục: giải thích ý kiến, xác lập luận điểm, chọn hệ luận cứ từ gần đến xa, rồi bình luận mở rộng.",
+            "- Luận điểm: nêu một ý sắc, có quan hệ trực tiếp với nhận định, tránh kể tên tác phẩm trước khi có vấn đề.",
+            "- Lí luận văn học: dùng như xương sống tư duy, chẳng hạn văn học phản ánh đời sống qua hình tượng, sáng tạo cái đẹp, bồi dưỡng nhân đạo, đối thoại với bạn đọc.",
+            "- Luận chứng: đi từ ca dao/dân gian, trung đại, hiện đại đến thế giới để chứng minh tầm phổ quát; mỗi dẫn chứng chỉ chọn một chi tiết đắt, không kể lại tác phẩm.",
+        ])
 
     @classmethod
     def _literary_evidence_fallback_answer(cls, query: str, chunks: list[dict], manual_knowledge: str, web_context: str) -> str:
@@ -2792,6 +2870,10 @@ class AI(commands.Cog):
         mode: str = "",
     ) -> str:
         chunks = pdf_meta.get("chunks") or []
+        if cls._is_practical_solution_request(query):
+            return cls._practical_evidence_fallback_answer(query, chunks, manual_knowledge, web_context)
+        if cls._is_argumentative_composition_request(query):
+            return cls._argumentative_evidence_fallback_answer(query, chunks, manual_knowledge, web_context)
         if chunks:
             filtered_meta = cls._filter_pdf_meta_to_subject(query, None, pdf_meta) if query else pdf_meta
             chunks = filtered_meta.get("chunks") or chunks
@@ -3259,21 +3341,22 @@ class AI(commands.Cog):
             )
         guidance = Scaffold.for_plan(plan)
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode, guidance)
+        answer_timeout_seconds = self._answer_timeout_seconds(user_prompt, mode)
         timed_out = False
         try:
             answer, full_prompt = await asyncio.wait_for(
                 self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit, guidance=guidance),
-                timeout=AI_ANSWER_TIMEOUT_SECONDS,
+                timeout=answer_timeout_seconds,
             )
         except asyncio.TimeoutError:
             timed_out = True
             print(
-                f"[debug] ai_answer_timeout mode={mode} seconds={AI_ANSWER_TIMEOUT_SECONDS} "
+                f"[debug] ai_answer_timeout mode={mode} seconds={answer_timeout_seconds} "
                 f"query={user_prompt[:180]!r}",
                 flush=True,
             )
             answer = self._timeout_fallback_answer(
-                pdf_meta, manual_knowledge, web_context, AI_ANSWER_TIMEOUT_SECONDS, user_prompt, mode
+                pdf_meta, manual_knowledge, web_context, answer_timeout_seconds, user_prompt, mode
             )
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
