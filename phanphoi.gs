@@ -78,7 +78,8 @@ const BOT_ONLY_DOC_PREFIXES = ['discord'];
 function isSystemTab(name) {
   return name === DASHBOARD_NAME || name === STAGING_NAME || name === REGISTRY_NAME
       || name === DOCS_NAME || name === LOG_NAME
-      || name === TRIAL_CLIENT_TAB || name === TRIAL_DOC_TAB;
+      || name === TRIAL_CLIENT_TAB || name === TRIAL_DOC_TAB
+      || name === PMT_ORDER_TAB;
 }
 
 // Ghi 1 dòng nhật ký: thời gian | hành động | chi tiết. Không làm hỏng flow nếu lỗi.
@@ -128,6 +129,10 @@ function onOpen() {
       .addItem('Cài tự động hoá toàn bộ', 'caiDatTuDongHoa')
       .addItem('Kiểm tra trigger tự động', 'kiemTraTuDongHoa')
       .addItem('Tạo Google Form cho điện thoại', 'caiDatForm'))
+    .addSubMenu(ui.createMenu('💳 Thanh toán tự động')
+      .addItem('⚙️ Cài đặt (bot URL, mật khẩu, ngân hàng, giá, số ngày)', 'caiDatThanhToanTuDong')
+      .addItem('👀 Xem cài đặt hiện tại', 'xemCaiDatThanhToan')
+      .addItem('📱 Tạo/lấy lại Form đặt mua (gửi khách)', 'taoLaiFormDatMua'))
     .addSubMenu(ui.createMenu('🧪 Trải nghiệm')
       .addItem('Cập nhật danh sách tài liệu trải nghiệm', 'capNhatTaiLieuTraiNghiem')
       .addItem('Kiểm tra hết hạn khách trải nghiệm (ngay)', 'kiemTraHetHanTraiNghiem')
@@ -2052,4 +2057,184 @@ function xuLyFormMd(e) {
     }
   });
   ghiLog('Nạp .md cho bot', fileIds.length + ' file (tác giả: ' + (tacGia || '—') + ') -> ' + INCOMING_BOT_MD_NAME);
+}
+
+// ============================================================================
+// ============ PHASE 3: TỰ NHẬN CHUYỂN KHOẢN -> TỰ GỬI LINK DISCORD ===========
+// ============================================================================
+// KHÔNG cần sửa code. Vào Sheet > menu HVHN > 💳 Thanh toán tự động > "Cài đặt..."
+// để nhập: địa chỉ bot, mật khẩu, thông tin ngân hàng, giá gói, số ngày.
+// Các giá trị lưu trong Script Properties (không nằm trong file, không lộ lên GitHub).
+//
+// LUỒNG: Khách điền Form đặt mua -> nhận email hướng dẫn CK (kèm mã đơn) ->
+//        chuyển khoản ghi mã đơn -> SePay báo về doPost -> khớp mã + đủ tiền ->
+//        gọi bot tạo link mời -> tự gửi email link Discord cho khách.
+
+const PMT_ORDER_TAB = '_don_dat_mua'; // tab lưu đơn đặt mua (hệ thống tự tạo)
+
+function _pmtProp(key, def) {
+  const v = PropertiesService.getScriptProperties().getProperty(key);
+  return (v === null || v === undefined || v === '') ? def : v;
+}
+
+function _pmtOut(s) { return ContentService.createTextOutput(s); }
+
+function _pmtRandCode() { return Math.random().toString(36).substring(2, 8).toUpperCase(); }
+
+function _pmtOrderSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(PMT_ORDER_TAB);
+  if (!sh) {
+    sh = ss.insertSheet(PMT_ORDER_TAB);
+    sh.getRange(1, 1, 1, 6).setValues([['Thời gian', 'Mã đơn', 'Tên', 'Email', 'Số tiền', 'Trạng thái']]);
+    sh.getRange(1, 1, 1, 6).setBackground('#0b8043').setFontColor('#fff').setFontWeight('bold');
+    sh.setFrozenRows(1);
+    sh.setColumnWidth(2, 110); sh.setColumnWidth(3, 160); sh.setColumnWidth(4, 220);
+  }
+  return sh;
+}
+
+// ---- Cài đặt bằng hộp thoại (không sửa code) ----
+function caiDatThanhToanTuDong() {
+  const ui = SpreadsheetApp.getUi();
+  const props = PropertiesService.getScriptProperties();
+  function ask(msg, cur) {
+    const hint = cur ? ('\n\n(hiện tại: ' + cur + ' — để TRỐNG rồi OK nếu giữ nguyên)') : '';
+    const r = ui.prompt('Cài đặt thanh toán tự động', msg + hint, ui.ButtonSet.OK_CANCEL);
+    if (r.getSelectedButton() !== ui.Button.OK) return null;
+    return r.getResponseText().trim();
+  }
+  let v;
+  v = ask('1/5. Địa chỉ bot trên Render (vd https://ten-cua-ban.onrender.com). KHÔNG kèm /mint-invite.',
+          props.getProperty('PMT_BOT_URL'));
+  if (v === null) return; if (v) props.setProperty('PMT_BOT_URL', v.replace(/\/+$/, ''));
+
+  v = ask('2/5. Mật khẩu bot (đúng HVHN_MINT_SECRET đã đặt trên Render).',
+          props.getProperty('PMT_SECRET') ? '(đã đặt)' : '');
+  if (v === null) return; if (v) props.setProperty('PMT_SECRET', v);
+
+  v = ask('3/5. Thông tin chuyển khoản gửi khách (vd: VCB - 0123456789 - NGUYEN VAN A).',
+          props.getProperty('PMT_BANK'));
+  if (v === null) return; if (v) props.setProperty('PMT_BANK', v);
+
+  v = ask('4/5. Giá 1 gói (VND, chỉ nhập số, vd 99000).', props.getProperty('PMT_PRICE'));
+  if (v === null) return; if (v) props.setProperty('PMT_PRICE', String(parseInt(v.replace(/\D/g, ''), 10) || 0));
+
+  v = ask('5/5. Số ngày mỗi gói (vd 30).', props.getProperty('PMT_DAYS'));
+  if (v === null) return; if (v) props.setProperty('PMT_DAYS', String(parseInt(v.replace(/\D/g, ''), 10) || 30));
+
+  ui.alert('✅ Đã lưu cài đặt thanh toán.\n\nTiếp theo:\n' +
+    '1) HVHN > 💳 Thanh toán tự động > "Tạo/lấy lại Form đặt mua" rồi đăng link cho khách.\n' +
+    '2) Deploy (góc phải) > New deployment > loại Web app > Who has access: Anyone > Deploy.\n' +
+    '3) Copy "Web app URL" dán vào ô webhook của SePay.\n\n' +
+    'Lưu ý: mỗi lần sửa code phải Deploy > Manage deployments > Edit > version: New.');
+}
+
+function xemCaiDatThanhToan() {
+  const p = PropertiesService.getScriptProperties();
+  SpreadsheetApp.getUi().alert('Cài đặt thanh toán hiện tại:\n\n' +
+    '• Bot URL: ' + (p.getProperty('PMT_BOT_URL') || '(chưa đặt)') + '\n' +
+    '• Mật khẩu: ' + (p.getProperty('PMT_SECRET') ? '(đã đặt)' : '(chưa đặt)') + '\n' +
+    '• Ngân hàng: ' + (p.getProperty('PMT_BANK') || '(chưa đặt)') + '\n' +
+    '• Giá gói: ' + (p.getProperty('PMT_PRICE') || '(chưa đặt)') + ' VND\n' +
+    '• Số ngày/gói: ' + (p.getProperty('PMT_DAYS') || '30'));
+}
+
+// ---- Form đặt mua (khách tự điền) ----
+function _taoFormDatMua(props) {
+  const form = FormApp.create('HVHN — Đăng ký & thanh toán');
+  form.setDescription('Điền họ tên + email. Sau khi gửi, bạn nhận email hướng dẫn chuyển khoản. '
+    + 'Chuyển xong, hệ thống tự gửi link vào Discord qua email này.');
+  form.addTextItem().setTitle('Họ và tên').setRequired(true);
+  form.addTextItem().setTitle('Email (Gmail)').setRequired(true);
+  form.setConfirmationMessage('Đã nhận! Vui lòng kiểm email (cả mục Spam) để lấy hướng dẫn chuyển khoản.');
+  form.setAcceptingResponses(true);
+  ScriptApp.newTrigger('xuLyFormDatMua').forForm(form).onFormSubmit().create();
+  props.setProperty('FORM_DATMUA_ID', form.getId());
+  return form;
+}
+
+function taoLaiFormDatMua() {
+  const form = _taoFormDatMua(PropertiesService.getScriptProperties());
+  const msg = 'Đã tạo Form ĐẶT MUA. Đăng/gửi link này cho khách:\n\n' + form.getPublishedUrl();
+  Logger.log(msg);
+  SpreadsheetApp.getUi().alert(msg);
+}
+
+// onFormSubmit (installable trigger): sinh mã đơn + gửi email hướng dẫn chuyển khoản.
+function xuLyFormDatMua(e) {
+  let name = '', email = '';
+  e.response.getItemResponses().forEach(it => {
+    const t = it.getItem().getTitle().toLowerCase();
+    if (t.indexOf('tên') >= 0) name = String(it.getResponse()).trim();
+    else if (t.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
+  });
+  if (!name || !email) return;
+  const props = PropertiesService.getScriptProperties();
+  const bank = props.getProperty('PMT_BANK') || '(chưa cấu hình ngân hàng — vào menu HVHN cài đặt)';
+  const gia = parseInt(props.getProperty('PMT_PRICE') || '0', 10);
+  const maDon = 'HVHN' + _pmtRandCode();
+  _pmtOrderSheet().appendRow([new Date(), maDon, name, email, gia, 'cho_thanh_toan']);
+  MailApp.sendEmail(email, 'Hướng dẫn thanh toán HVHN',
+    'Chào ' + name + ',\n\n' +
+    'Vui lòng chuyển khoản:\n' +
+    '  ' + bank + '\n' +
+    '  Số tiền: ' + gia + ' VND\n' +
+    '  NỘI DUNG CHUYỂN KHOẢN (ghi ĐÚNG): ' + maDon + '\n\n' +
+    'Sau khi chuyển xong, bạn sẽ nhận link vào Discord qua chính email này (kiểm tra cả mục Spam).');
+  ghiLog('Đơn đặt mua mới', maDon + ' - ' + name + ' - ' + email);
+}
+
+// ---- SePay webhook: có tiền về -> khớp mã đơn -> xin link từ bot -> gửi khách ----
+function doPost(e) {
+  try {
+    const data = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    const noiDung = String(data.content || data.description || data.transferContent || data.addInfo || '').toUpperCase();
+    const soTien = Number(data.transferAmount || data.amount || data.amountIn || 0);
+    const sheet = _pmtOrderSheet();
+    const last = sheet.getLastRow();
+    if (last < 2) return _pmtOut('khong_khop');
+    const rows = sheet.getRange(2, 1, last - 1, 6).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      const maDon = String(rows[i][1] || '');
+      if (!maDon) continue;
+      if (noiDung.indexOf(maDon.toUpperCase()) === -1) continue; // memo không chứa mã này
+      const name = rows[i][2], email = rows[i][3], gia = Number(rows[i][4] || 0), trangThai = rows[i][5];
+      if (trangThai === 'da_xu_ly') return _pmtOut('da_xu_ly'); // chống trùng
+      if (gia > 0 && soTien > 0 && soTien < gia) {
+        ghiLog('CK thiếu tiền', maDon + ' nhận ' + soTien + '/' + gia);
+        return _pmtOut('thieu_tien');
+      }
+      const url = _pmtProp('PMT_BOT_URL', '');
+      const secret = _pmtProp('PMT_SECRET', '');
+      const days = parseInt(_pmtProp('PMT_DAYS', '30'), 10);
+      if (!url || !secret) {
+        ghiLog('Chưa cấu hình bot thanh toán', 'thiếu PMT_BOT_URL/PMT_SECRET');
+        return _pmtOut('chua_cau_hinh');
+      }
+      const res = UrlFetchApp.fetch(url + '/mint-invite', {
+        method: 'post', contentType: 'application/json',
+        headers: { 'X-HVHN-Secret': secret },
+        payload: JSON.stringify({ order_code: maDon, name: name, email: email, duration_days: days }),
+        muteHttpExceptions: true,
+      });
+      const out = JSON.parse(res.getContentText() || '{}');
+      if (!out.invite_url) {
+        ghiLog('Bot tạo link lỗi', maDon + ' -> ' + res.getContentText());
+        return _pmtOut('mint_loi');
+      }
+      MailApp.sendEmail(email, 'Link tham gia Discord HVHN',
+        'Chào ' + name + ',\n\n' +
+        'Thanh toán thành công! Bấm link sau để vào Discord:\n' +
+        out.invite_url + '\n\n' +
+        'Vào xong nhớ bấm nút "Kích hoạt trải nghiệm" để xác nhận email và nhận tài liệu nhé.');
+      sheet.getRange(i + 2, 6).setValue('da_xu_ly'); // đánh dấu, không cấp trùng
+      ghiLog('Đã cấp link Discord', maDon + ' - ' + email);
+      return _pmtOut('ok');
+    }
+    return _pmtOut('khong_khop');
+  } catch (err) {
+    ghiLog('LỖI doPost thanh toán', (err && err.message) || String(err));
+    return _pmtOut('loi');
+  }
 }
