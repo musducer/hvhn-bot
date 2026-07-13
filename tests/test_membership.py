@@ -91,6 +91,17 @@ class FakeDB:
             cand = [r for r in self.rows if r["discord_id"] == did and r["status"] == "joined"]
             cand.sort(key=lambda r: r["id"], reverse=True)
             return cand[0] if cand else None
+        if "lower(email)=lower($1) AND status='pending' AND order_code IS NOT NULL" in sql:
+            email, did = args
+            cand = [r for r in self.rows if r.get("order_code") and r["status"] == "pending"
+                    and str(r.get("email") or "").lower() == str(email).lower()]
+            cand.sort(key=lambda r: r["id"], reverse=True)
+            if not cand:
+                return None
+            row = cand[0]
+            row["discord_id"] = did
+            row["status"] = "joined"
+            return row
         if "FROM hvhn_members WHERE discord_id=" in sql:
             did = args[0]
             cand = [r for r in self.rows if r["discord_id"] == did and r["status"] in ("active", "expired")]
@@ -278,6 +289,28 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(m.bot.db.rows[0]["status"], "joined")
         self.assertEqual(m.bot.db.jobs, [])
+
+    async def test_pending_paid_order_recovers_when_invite_join_event_was_missed(self):
+        m = self._cog()
+        await m._create_pending_order("abc", 7, "PAY1", "VTKL", "trungtt.v.2427@gmail.com")
+
+        _, _, corrected = await m._activate_customer(111, "VTKL", "trungtt.v.2427@gmail.com", 111)
+
+        row = m.bot.db.rows[0]
+        self.assertFalse(corrected)
+        self.assertEqual(row["discord_id"], 111)
+        self.assertEqual(row["status"], "active")
+        self.assertEqual(m.bot.db.jobs[0]["text_payload"], "VTKL\ttrungtt.v.2427@gmail.com")
+
+    async def test_pending_order_email_recovery_claims_only_one_discord_account(self):
+        m = self._cog()
+        await m._create_pending_order("abc", 7, "PAY1", "VTKL", "trungtt.v.2427@gmail.com")
+        await m._activate_customer(111, "VTKL", "trungtt.v.2427@gmail.com", 111)
+
+        with self.assertRaises(LookupError):
+            await m._activate_customer(222, "VTKL", "trungtt.v.2427@gmail.com", 222)
+
+        self.assertEqual(m.bot.db.rows[0]["discord_id"], 111)
 
     def test_onboarding_posts_in_server_not_dm(self):
         source = inspect.getsource(Membership.on_member_join)

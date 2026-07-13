@@ -121,7 +121,8 @@ class CustomerActivationModal(discord.ui.Modal, title="Kích hoạt quyền truy
             )
         except LookupError:
             await interaction.response.send_message(
-                "Mình chưa tìm thấy lượt mời đang chờ kích hoạt của bạn. Nhờ bạn báo quản trị viên kiểm tra lại invite.",
+                "Then chưa nối được tài khoản Discord này với lượt mời của bạn. Nếu bạn vừa vào từ link HVHN, "
+                "bạn thử bấm lại sau ít giây nhé; nếu vẫn chưa được, hãy nhờ quản trị viên kiểm tra giúp bạn.",
                 ephemeral=True,
             )
             return
@@ -256,11 +257,13 @@ class Membership(commands.Cog):
         return discord.Embed(
             title=ACTIVATE_PANEL_TITLE,
             description=(
-                "Nếu bạn được HVHN mời vào nhóm để nhận học liệu, hãy làm đúng một việc:\n\n"
-                "1. Bấm nút **Kích hoạt quyền truy cập tài liệu** bên dưới.\n"
-                "2. Điền **Họ tên** và **Email nhận tài liệu** vào form hiện ra ngay trong Discord.\n"
-                "3. Then sẽ xác nhận quyền và hệ thống sẽ đưa tài liệu về email của bạn.\n\n"
-                "Bạn không cần nhắn tin riêng cho bot. Nếu chưa có lượt mời hợp lệ, form sẽ báo để bạn liên hệ quản trị viên."
+                "Chào bạn, nếu bạn đến với HVHN qua link mời để nhận học liệu, mình mời bạn dành một phút "
+                "hoàn tất bước xác nhận ở đây.\n\n"
+                "Bấm nút bên dưới; một form nhỏ sẽ hiện ra ngay trong Discord để bạn điền **Họ tên** và "
+                "**Email nhận tài liệu**. Then sẽ tiếp nhận thông tin, mở quyền phù hợp và hệ thống sẽ gửi "
+                "học liệu về đúng email ấy.\n\n"
+                "Bạn không cần nhắn tin riêng cho bot. Mỗi tài khoản Discord chỉ xác nhận một lần, để quyền "
+                "truy cập của mỗi người luôn được bảo đảm rõ ràng."
             ),
             color=0x5865F2,
         )
@@ -404,6 +407,22 @@ class Membership(commands.Cog):
             invite_code, discord_id,
         )
 
+    async def _recover_pending_order_by_email(self, discord_id: int, email: str) -> dict | None:
+        """Tự chữa trường hợp bot bỏ lỡ event invite lúc khách vừa vào server.
+
+        Chỉ áp dụng cho invite PayOS/pre-order đã có order_code và email đã chốt. UPDATE
+        có điều kiện + RETURNING là thao tác claim nguyên tử: một email pending chỉ có thể
+        gắn với một Discord account, kể cả hai người cùng bấm form.
+        """
+        return await self.bot.db.fetchrow(
+            "UPDATE hvhn_members SET discord_id=$2, status='joined' "
+            "WHERE id=(SELECT id FROM hvhn_members "
+            "WHERE lower(email)=lower($1) AND status='pending' AND order_code IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1) "
+            "RETURNING id, duration_days, name, email, order_code",
+            email, discord_id,
+        )
+
     async def _prefill_for(self, discord_id: int) -> tuple[str | None, str | None]:
         """Lấy tên/email đã có sẵn (từ form đặt mua Phase 3) để điền sẵn modal cho khách xác nhận."""
         row = await self.bot.db.fetchrow(
@@ -465,7 +484,21 @@ class Membership(commands.Cog):
             discord_id,
         )
         if row is None:
-            raise LookupError("no joined/active customer")
+            recovered = await self._recover_pending_order_by_email(discord_id, email)
+            if recovered is None:
+                raise LookupError("no joined/active customer")
+            print(
+                f"[debug] khach_activation_recovered_pending discord_id={discord_id} "
+                f"order={recovered.get('order_code') if hasattr(recovered, 'get') else 'unknown'}",
+                flush=True,
+            )
+            row = await self.bot.db.fetchrow(
+                "SELECT id, email, duration_days, expires_at, status FROM hvhn_members "
+                "WHERE discord_id=$1 AND status='joined' ORDER BY id DESC LIMIT 1",
+                discord_id,
+            )
+            if row is None:
+                raise LookupError("pending claim did not produce joined customer")
         bound_email = (row["email"] or "").strip().lower()
         if bound_email and email != bound_email:
             raise RuntimeError(
@@ -556,9 +589,9 @@ class Membership(commands.Cog):
             return
         channel = await self.ensure_activation_portal(guild)
         message = (
-            f"Chào {member.mention}, bạn đã vào server bằng link mời HVHN.\n\n"
-            "Bấm **Kích hoạt quyền truy cập tài liệu** để mở form nhập Họ tên và Email ngay tại đây. "
-            "Sau khi xác nhận, Then cấp quyền Discord; tài liệu sẽ được gửi theo email bạn vừa điền."
+            f"Chào {member.mention}, rất vui vì bạn đã đến với HVHN.\n\n"
+            "Bạn có thể bấm **Kích hoạt quyền truy cập tài liệu** ngay bên dưới để điền Họ tên và Email. "
+            "Then sẽ xác nhận quyền của bạn, còn học liệu sẽ được gửi theo email bạn đã đăng ký."
         )
         if channel:
             try:
