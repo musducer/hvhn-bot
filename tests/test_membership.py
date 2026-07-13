@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import os
 import asyncio
+import inspect
 import unittest
 from datetime import datetime, timezone, timedelta
 
@@ -80,9 +81,14 @@ class FakeDB:
                 return None
             r = cand[0]
             return {"invite_code": r.get("invite_code"), "status": r["status"]}
-        if "WHERE discord_id=$1 AND status IN ('joined','active')" in sql:
+        if "WHERE discord_id=$1 AND status='active'" in sql:
             did = args[0]
-            cand = [r for r in self.rows if r["discord_id"] == did and r["status"] in ("joined", "active")]
+            cand = [r for r in self.rows if r["discord_id"] == did and r["status"] == "active"]
+            cand.sort(key=lambda r: r["id"], reverse=True)
+            return cand[0] if cand else None
+        if "WHERE discord_id=$1 AND status='joined'" in sql:
+            did = args[0]
+            cand = [r for r in self.rows if r["discord_id"] == did and r["status"] == "joined"]
             cand.sort(key=lambda r: r["id"], reverse=True)
             return cand[0] if cand else None
         if "FROM hvhn_members WHERE discord_id=" in sql:
@@ -238,19 +244,47 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m.bot.db.jobs[0]["job_type"], "add_client")
         self.assertEqual(m.bot.db.jobs[0]["text_payload"], "An\tan@example.com")
 
-    async def test_active_customer_can_correct_email(self):
+    async def test_active_customer_cannot_change_email_or_create_another_job(self):
         m = self._cog()
         await m._create_pending_invite("abc", 7, 999)
         await m._mark_invite_joined("abc", 111)
         await m._activate_customer(111, "An", "wrong@example.com", 111)
-        expires, note, corrected = await m._activate_customer(111, "An", "right@example.com", 111)
-        self.assertTrue(corrected)
-        self.assertEqual(m.bot.db.rows[0]["email"], "right@example.com")
-        self.assertEqual([j["job_type"] for j in m.bot.db.jobs], ["add_client", "remove_client", "add_client"])
-        self.assertEqual(m.bot.db.jobs[1]["text_payload"], "wrong@example.com")
-        self.assertEqual(m.bot.db.jobs[2]["text_payload"], "An\tright@example.com")
+        with self.assertRaisesRegex(RuntimeError, "mỗi tài khoản chỉ được liên kết với một email"):
+            await m._activate_customer(111, "An", "right@example.com", 111)
+        self.assertEqual(m.bot.db.rows[0]["email"], "wrong@example.com")
+        self.assertEqual([j["job_type"] for j in m.bot.db.jobs], ["add_client"])
 
-    async def test_active_customer_without_add_job_gets_backfilled(self):
+    async def test_active_account_cannot_activate_a_second_invite_for_another_email(self):
+        m = self._cog()
+        await m._create_pending_invite("first", 7, 999)
+        await m._mark_invite_joined("first", 111)
+        await m._activate_customer(111, "An", "first@example.com", 111)
+        await m._create_pending_invite("second", 7, 999)
+        await m._mark_invite_joined("second", 111)
+
+        with self.assertRaises(RuntimeError):
+            await m._activate_customer(111, "An", "second@example.com", 111)
+
+        self.assertEqual([r["email"] for r in m.bot.db.rows if r["status"] == "active"], ["first@example.com"])
+        self.assertEqual([j["text_payload"] for j in m.bot.db.jobs], ["An\tfirst@example.com"])
+
+    async def test_paid_or_preorder_invite_is_bound_to_its_registered_email(self):
+        m = self._cog()
+        await m._create_pending_order("abc", 7, "PRE1", "An", "registered@example.com")
+        await m._mark_invite_joined("abc", 111)
+
+        with self.assertRaisesRegex(RuntimeError, "đúng email đã đăng ký"):
+            await m._activate_customer(111, "An", "other@example.com", 111)
+
+        self.assertEqual(m.bot.db.rows[0]["status"], "joined")
+        self.assertEqual(m.bot.db.jobs, [])
+
+    def test_onboarding_posts_in_server_not_dm(self):
+        source = inspect.getsource(Membership.on_member_join)
+        self.assertIn("ensure_activation_portal", source)
+        self.assertNotIn("member.send", source)
+
+    async def test_active_customer_cannot_use_button_to_backfill_a_job(self):
         m = self._cog()
         await m._create_pending_invite("abc", 7, 999)
         await m._mark_invite_joined("abc", 111)
@@ -260,11 +294,9 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         row["email"] = "an@example.com"
         row["granted_at"] = NOW
         row["expires_at"] = NOW + timedelta(days=7)
-        expires, note, corrected = await m._activate_customer(111, "An", "an@example.com", 111)
-        self.assertTrue(corrected)
-        self.assertEqual(len(m.bot.db.jobs), 1)
-        self.assertEqual(m.bot.db.jobs[0]["job_type"], "add_client")
-        self.assertEqual(m.bot.db.jobs[0]["text_payload"], "An\tan@example.com")
+        with self.assertRaises(RuntimeError):
+            await m._activate_customer(111, "An", "an@example.com", 111)
+        self.assertEqual(m.bot.db.jobs, [])
 
     async def test_activation_requires_member_still_in_guild(self):
         m = self._cog()

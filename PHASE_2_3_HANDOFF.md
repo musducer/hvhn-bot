@@ -58,14 +58,15 @@ Mục tiêu: bỏ hẳn việc admin gõ tay thông tin khách. Luồng CHỦ Đ
    - **Xác định invite nào vừa dùng** bằng cách so cache: giữ `dict[code] -> uses` (nạp ở `on_ready` và
      cache lại sau mỗi join). Khi join, fetch `guild.invites()`, tìm code có `uses` tăng (hoặc biến mất vì
      đã hết 1 lượt) và khớp `hvhn_members.invite_code` với `status='pending'`.
-   - Nếu khớp: cập nhật dòng đó `discord_id=member.id, status='joined'`. Rồi **DM cho khách** một nút
-     "Kích hoạt trải nghiệm" (persistent `discord.ui.View`, `custom_id` cố định). Nếu DM đóng → fallback:
-     nhắn ở một kênh riêng (vd `#kích-hoạt-khách`) tag khách.
+   - Nếu khớp: cập nhật dòng đó `discord_id=member.id, status='joined'`. Bot đăng hướng dẫn ngay tại
+     **#truy-cập-tài-liệu**; kênh này luôn có một nút "Kích hoạt quyền truy cập tài liệu" (persistent
+     `discord.ui.View`, `custom_id` cố định). Không dùng DM cho onboarding.
    - Nếu KHÔNG khớp invite nào (thành viên cộng đồng thường) → bỏ qua, để luồng cũ (`VerifyView`) xử lý.
-3. Khách bấm "Kích hoạt" → mở **modal** (`discord.ui.Modal`) 2 ô: **Họ tên**, **Email** (validate email).
+3. Khách bấm "Kích hoạt quyền truy cập tài liệu" → mở **modal** (`discord.ui.Modal`) 2 ô: **Họ tên**, **Email** (validate email).
    - On submit (đây là "mốc ghi nhận"): với dòng `joined` của `discord_id`, set `name,email,
      granted_at=now, expires_at=compute_new_expiry(now, None, duration_days), status='active'`.
-   - Cấp role (dùng `Membership._grant_roles`), enqueue `add_client` = `"{name}\t{email}"`, DM xác nhận.
+   - Cấp role (dùng `Membership._grant_roles`), enqueue `add_client` = `"{name}\t{email}"`, xác nhận ephemeral trong server.
+   - Mỗi `discord_id` chỉ được kích hoạt một lần: sau khi `active`, không thể dùng nút để đổi email hoặc tạo job cấp tài liệu khác; sửa sai phải qua quản trị viên.
    - Tái sử dụng `_register`/logic Phase 1 nếu tiện (nhưng ở đây là chuyển pending→active, không cộng dồn).
 
 ### Yêu cầu kỹ thuật Phase 2
@@ -74,7 +75,7 @@ Mục tiêu: bỏ hẳn việc admin gõ tay thông tin khách. Luồng CHỦ Đ
 - Bật `intents.invites = True` trong `bot.py` NẾU dùng event; hoặc chỉ fetch on-demand (khuyến nghị:
   fetch on-demand để đỡ phụ thuộc event, nhưng vẫn phải cache uses ở `on_ready`).
 - Xử lý các biên: join nhưng không kích hoạt (dọn dòng `joined` quá N giờ → huỷ); invite hết hạn chưa dùng
-  (cron dọn `pending` quá hạn); rời rồi vào lại; email sai/typo (cho sửa: nút kích hoạt lại hoặc lệnh admin).
+  (cron dọn `pending` quá hạn); rời rồi vào lại; email sai/typo (sửa qua quản trị viên, không mở lại nút cho khách).
 - KHÔNG chặn được việc khách bấm nút verify cũ để tự lấy role — CHẤP NHẬN được, vì email (cho tài liệu),
   hạn và auto-kick đều bám `hvhn_members`, độc lập với việc họ có role gì.
 - Test được: tách logic "match invite từ diff uses" thành hàm thuần `match_used_invite(before: dict,

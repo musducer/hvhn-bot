@@ -89,9 +89,6 @@ VERIFIER_EVIDENCE_MAX_CHARS = 6000
 LIT_TEMPERATURE = float(os.getenv("HVHN_LIT_TEMPERATURE", "0.7"))
 LIT_TOP_P = float(os.getenv("HVHN_LIT_TOP_P", "0.95"))
 LIT_MAX_TOKENS = int(os.getenv("HVHN_LIT_MAX_TOKENS", "3000"))
-AI_ANSWER_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_ANSWER_TIMEOUT_SECONDS", "75"))
-AI_SIMPLE_ANSWER_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_SIMPLE_ANSWER_TIMEOUT_SECONDS", "45"))
-AI_FORCE_FALLBACK_TIMEOUT_SECONDS = int(os.getenv("HVHN_AI_FORCE_FALLBACK_TIMEOUT_SECONDS", "35"))
 LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
 # Duoi nguong nay coi nhu truy xuat .md lac de -> khong nhoi vao context (tranh chep tai lieu khong lien quan).
 MD_MIN_RELEVANCE = float(os.getenv("HVHN_MD_MIN_RELEVANCE", "2.0"))
@@ -2687,22 +2684,6 @@ class AI(commands.Cog):
             return self._strip_internal_markers(answer)
         return None
 
-    @staticmethod
-    def _timeout_fallback_answer(
-        pdf_meta: dict,
-        manual_knowledge: str,
-        web_context: str,
-        elapsed_seconds: int,
-        query: str = "",
-        mode: str = "",
-    ) -> str:
-        base = (
-            f"Then bị quá thời gian phản hồi sau khoảng {elapsed_seconds} giây nên không để bạn chờ trong trạng thái “thinking” nữa.\n\n"
-            "Mình gửi trước phần căn cứ đã truy xuất được; bạn có thể hỏi lại ngắn hơn hoặc chạy `/hvhn_debug_retrieval` để xem evidence."
-        )
-        evidence = AI._evidence_fallback_answer(pdf_meta, manual_knowledge, web_context, query=query, mode=mode)
-        return base + "\n\n---\n\n" + evidence
-
     @classmethod
     def _wants_brief_list_answer(cls, query: str) -> bool:
         q = cls._plain_text(query)
@@ -2710,15 +2691,6 @@ class AI(commands.Cog):
             "gach dau dong", "3 y", "ba y", "moi y", "ngan gon", "viet ngan",
             "trinh bay nhung cach", "trinh bay cac cach", "liet ke",
         ))
-
-    @classmethod
-    def _answer_timeout_seconds(cls, query: str, mode: str = "") -> int:
-        q = cls._plain_text(query)
-        if cls._wants_brief_list_answer(query) or (
-            len(q) <= 260 and any(marker in q for marker in ("trinh bay", "neu", "liet ke", "goi y"))
-        ):
-            return min(AI_ANSWER_TIMEOUT_SECONDS, AI_SIMPLE_ANSWER_TIMEOUT_SECONDS)
-        return AI_ANSWER_TIMEOUT_SECONDS
 
     @classmethod
     def _is_practical_solution_request(cls, query: str) -> bool:
@@ -3341,23 +3313,12 @@ class AI(commands.Cog):
             )
         guidance = Scaffold.for_plan(plan)
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode, guidance)
-        answer_timeout_seconds = self._answer_timeout_seconds(user_prompt, mode)
-        timed_out = False
-        try:
-            answer, full_prompt = await asyncio.wait_for(
-                self._safe_generate(prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit, guidance=guidance),
-                timeout=answer_timeout_seconds,
-            )
-        except asyncio.TimeoutError:
-            timed_out = True
-            print(
-                f"[debug] ai_answer_timeout mode={mode} seconds={answer_timeout_seconds} "
-                f"query={user_prompt[:180]!r}",
-                flush=True,
-            )
-            answer = self._timeout_fallback_answer(
-                pdf_meta, manual_knowledge, web_context, answer_timeout_seconds, user_prompt, mode
-            )
+        # Không cắt câu trả lời sau một mốc thời gian tùy ý. Với câu hỏi văn học,
+        # nhất là khi cần đi qua Gemini Pro + verifier, fallback evidence thô có thể
+        # lạc tác giả/tác phẩm và tệ hơn nhiều so với chờ model trả lời hoàn chỉnh.
+        answer, full_prompt = await self._safe_generate(
+            prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit, guidance=guidance
+        )
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
             return
@@ -3373,17 +3334,7 @@ class AI(commands.Cog):
             if self._has_strong_evidence(pdf_meta, manual_count, feedback_count, web_count):
                 if reason == "UNKNOWN":
                     reason = "PROMPT_FILTERED"
-                try:
-                    forced = await asyncio.wait_for(
-                        self._force_grounded_answer(prompt, knowledge, web_context, mode),
-                        timeout=AI_FORCE_FALLBACK_TIMEOUT_SECONDS,
-                    )
-                except asyncio.TimeoutError:
-                    forced = None
-                    print(
-                        f"[debug] force_grounded_timeout mode={mode} seconds={AI_FORCE_FALLBACK_TIMEOUT_SECONDS}",
-                        flush=True,
-                    )
+                forced = await self._force_grounded_answer(prompt, knowledge, web_context, mode)
                 if forced and not self._insufficient_answer(forced):
                     print(f"[debug] refusal_suppressed_by=force_grounded original_reason={reason}", flush=True)
                     answer = forced
@@ -3397,9 +3348,9 @@ class AI(commands.Cog):
                 answer = answer.rstrip() + f"\n\n`REASON_CODE: {reason}`"
 
         await self._send_answer_embeds(interaction, title=title, answer=answer, full_prompt=full_prompt)
-        # Chi tru luot khi Then TRA LOI THANH CONG: khong tinh khi timeout hoac cau tra loi
-        # van la tu choi/khong du du lieu (insufficient).
-        charged = not timed_out and not self._insufficient_answer(answer)
+        # Chỉ trừ lượt khi Then trả lời thành công, không trừ với câu từ chối/
+        # không đủ dữ liệu.
+        charged = not self._insufficient_answer(answer)
         if charged:
             await self._consume_ai_quota(interaction)
         print(

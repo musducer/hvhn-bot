@@ -51,9 +51,9 @@ class FallbackRoutingTest(unittest.TestCase):
         self.assertNotIn("phong cách thơ", answer)
         self.assertNotIn("Luận Điểm", answer)
 
-    def test_short_list_question_gets_shorter_timeout(self):
+    def test_short_list_question_detection_is_kept_for_answer_planning(self):
         q = "Trình bày 3 ý thành gạch đầu dòng."
-        self.assertLess(AI._answer_timeout_seconds(q, "literature"), 75)
+        self.assertTrue(AI._wants_brief_list_answer(q))
 
 
 if __name__ == "__main__":

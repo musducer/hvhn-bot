@@ -2354,12 +2354,12 @@ function _pmtMintInvite(maDon, name, email) {
 }
 
 function _pmtSendInviteEmail(email, name, inviteUrl) {
-  const body = 'Chào ' + name + ',\n\nThanh toán của bạn đã được xác nhận. Link tham gia Discord HVHN: ' + inviteUrl + '\n\nSau khi vào Discord, hãy bấm “Kích hoạt trải nghiệm” để xác nhận email và nhận quyền truy cập học liệu.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
+  const body = 'Chào ' + name + ',\n\nThanh toán của bạn đã được xác nhận. Link tham gia Discord HVHN: ' + inviteUrl + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
   const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
     '<h2 style="margin:0 0 8px;color:#0b8043">HVHN · Thanh toán đã được xác nhận</h2><p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
     '<p>Hệ thống đã xác nhận thanh toán của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
     '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
-    '<p>Sau khi vào Discord, hãy bấm <strong>“Kích hoạt trải nghiệm”</strong> để xác nhận email và nhận quyền truy cập học liệu.</p>' +
+    '<p>Sau khi vào Discord, hãy vào kênh <strong>#truy-cập-tài-liệu</strong> và bấm <strong>“Kích hoạt quyền truy cập tài liệu”</strong> để điền Họ tên + Email.</p>' +
     '<p style="font-size:13px;color:#5f6368">Link mời có giới hạn sử dụng. Nếu link hết hiệu lực, hãy phản hồi email này để được hỗ trợ.</p><p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
   MailApp.sendEmail({ to: email, subject: '[HVHN] Thanh toán thành công – link Discord của bạn', body: body, htmlBody: html, name: 'HVHN' });
 }
@@ -2537,13 +2537,13 @@ function taoLaiFormPreorder() {
 }
 
 function _preorderSendInviteEmail(email, name, inviteUrl) {
-  const body = 'Chào ' + name + ',\n\nHVHN đã xác nhận slot nhóm học tập của bạn. Bấm link sau để tham gia Discord: ' + inviteUrl + '\n\nSau khi vào Discord, hãy bấm “Kích hoạt trải nghiệm” để xác nhận email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
+  const body = 'Chào ' + name + ',\n\nHVHN đã xác nhận slot nhóm học tập của bạn. Bấm link sau để tham gia Discord: ' + inviteUrl + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
   const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
     '<h2 style="margin:0 0 8px;color:#6a1b9a">HVHN · Xác nhận slot nhóm học tập</h2>' +
     '<p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
     '<p>HVHN đã xác nhận slot nhóm học tập của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
     '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
-    '<p>Sau khi vào Discord, hãy bấm <strong>“Kích hoạt trải nghiệm”</strong> để xác nhận email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.</p>' +
+    '<p>Sau khi vào Discord, hãy vào kênh <strong>#truy-cập-tài-liệu</strong> và bấm <strong>“Kích hoạt quyền truy cập tài liệu”</strong> để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.</p>' +
     '<p style="font-size:13px;color:#5f6368">Link mời là link riêng, có giới hạn sử dụng. Nếu cần hỗ trợ, hãy phản hồi email này.</p>' +
     '<p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
   MailApp.sendEmail({ to: email, subject: '[HVHN] Link tham gia nhóm học tập của bạn', body: body, htmlBody: html, name: 'HVHN' });
@@ -2562,7 +2562,7 @@ function _preorderFindRowByEmail(sheet, email) {
 // Form submit: mỗi email allowlist CHỈ được submit một lần. Lượt submit thứ hai
 // bị từ chối, kể cả khi nhiều người cùng dùng chung một hộp thư. Nếu khách cần
 // hỗ trợ, quản lý dùng nút gửi lại link trong tab _khach_preorder, không mở lại Form.
-// Bot vẫn lưu pending member nên khách bấm invite rồi Kích hoạt trải nghiệm như luồng thường.
+// Bot vẫn lưu pending member nên khách bấm invite rồi kích hoạt ở #truy-cập-tài-liệu như luồng thường.
 function xuLyFormPreorder(e) {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);

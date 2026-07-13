@@ -208,7 +208,13 @@ def build_guide_embed() -> discord.Embed:
     return embed
 
 
-def build_welcome_embed(member_mention: str, rules_mention: str, verify_mention: str, guide_mention: str) -> discord.Embed:
+def build_welcome_embed(
+    member_mention: str,
+    rules_mention: str,
+    verify_mention: str,
+    guide_mention: str,
+    access_mention: str,
+) -> discord.Embed:
     embed = discord.Embed(
         title="🌾 Chào mừng đến với Hồn Văn - Hồn Người!",
         description=(
@@ -227,7 +233,15 @@ def build_welcome_embed(member_mention: str, rules_mention: str, verify_mention:
         inline=False,
     )
     embed.add_field(
-        name="🕯️ Bước 2 — Thắp sáng cây bút cùng bot Then",
+        name="📚 Bước 2 — Kích hoạt quyền truy cập tài liệu",
+        value=(
+            f"Nếu bạn vào server bằng link mời của HVHN để nhận học liệu, hãy vào {access_mention}, "
+            "bấm nút và điền Họ tên + Email ngay trong form hiện ra. Bạn không cần nhắn tin riêng cho Then."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="🕯️ Bước 3 — Thắp sáng cây bút cùng bot Then",
         value=(
             f"Đọc qua {guide_mention} để làm quen với Then — người bạn đồng hành nhỏ giúp bạn viết văn, "
             "gợi ý luận điểm và trò chuyện văn chương. Xác nhận xong, bạn sẽ nhận vai trò **Dân làng Hua Tát** "
@@ -286,11 +300,13 @@ class Setup(commands.Cog):
         rules = discord.utils.get(guild.text_channels, name="luật-lệ")
         verify = discord.utils.get(guild.text_channels, name="cổng-xác-nhận")
         guide = discord.utils.get(guild.text_channels, name="hướng-dẫn-dùng-bot")
+        access = discord.utils.get(guild.text_channels, name="truy-cập-tài-liệu")
         embed = build_welcome_embed(
             member.mention,
             rules.mention if rules else "#luật-lệ",
             verify.mention if verify else "#cổng-xác-nhận",
             guide.mention if guide else "#hướng-dẫn-dùng-bot",
+            access.mention if access else "#truy-cập-tài-liệu",
         )
         try:
             await welcome.send(content=member.mention, embed=embed)
@@ -384,6 +400,9 @@ class Setup(commands.Cog):
         await get_or_create_text(info_cat, "sảnh-chào-mừng", overwrites=welcome_perms, position=0)
         rules_channel = await get_or_create_text(info_cat, "luật-lệ")
         verify_channel = await get_or_create_text(info_cat, "cổng-xác-nhận")
+        # Cổng này dành cho khách nhận học liệu: form Họ tên/Email mở ngay trong
+        # server. Không sửa hoặc thay thế các kênh xác nhận cũ.
+        access_channel = await get_or_create_text(info_cat, "truy-cập-tài-liệu", overwrites=welcome_perms)
         await get_or_create_text(info_cat, "bảng-tin-thông-báo")
         guide_channel = await get_or_create_text(info_cat, "hướng-dẫn-dùng-bot", overwrites=welcome_perms)
         guide_history = [msg async for msg in guide_channel.history(limit=5)]
@@ -414,6 +433,12 @@ class Setup(commands.Cog):
         if not any(msg.author == guild.me for msg in verify_history):
             verify_embed = discord.Embed(title="🔐 CỔNG KIỂM DUYỆT", description="Nhấn nút bên dưới để mở khóa toàn bộ các Kênh.", color=0x5865F2)
             await verify_channel.send(embed=verify_embed, view=VerifyView())
+
+        membership = self.bot.get_cog("Membership")
+        if membership is not None:
+            # Membership tự kiểm tra marker của panel nên chạy /setup nhiều lần
+            # vẫn không đăng thêm bảng/nút và không sinh kênh trùng.
+            await membership.ensure_activation_portal(guild)
 
         await interaction.followup.send("✅ Hệ thống đã được rà soát. Đã đóng băng cấu hình kênh giống hệt yêu cầu của bạn.")
 

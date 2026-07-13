@@ -9,7 +9,7 @@
 >
 > **Bổ sung 2026-07-13 — khách pre-order:** menu `HVHN → 🎟️ Khách pre-order` tạo/lấy lại một Google
 > Form dùng chung cho allowlist email. Mỗi email hợp lệ nhận một invite Discord riêng qua bot `/mint-invite`,
-> rồi tiếp tục bước Kích hoạt trải nghiệm và watcher như khách PayOS. Hướng dẫn vận hành ở mục 9 của
+> rồi tiếp tục bước **Kích hoạt quyền truy cập tài liệu** trong kênh `#truy-cập-tài-liệu` và watcher như khách PayOS. Hướng dẫn vận hành ở mục 9 của
 > `HUONG_DAN_PAYOS_QR_TU_DONG.md`.
 
 Tài liệu này ghi lại MỌI thứ đã làm cho Phase 3 tính đến 2026-07-12, để AI/người kế tiếp tiếp quản
