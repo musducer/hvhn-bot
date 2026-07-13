@@ -51,9 +51,11 @@ SHEET_XOA_TAILIEU = os.path.join(MIRROR_PARENT, "_don_sheet_xoa_tai_lieu")  # Di
 SHEET_GIAHAN_KHACH = os.path.join(MIRROR_PARENT, "_don_sheet_giahan_khach") # Discord -> Apps Script gia hạn
 SHEET_STATUS_FILE = os.path.join(MIRROR_PARENT, "_sheet_status", "sheet_status.json")
 
-# Làn nhận đơn từ Drive Desktop. 10 giây giảm đáng kể thời gian chờ file vừa đồng
-# bộ xuống máy; có thể tăng lại qua .env nếu máy/Drive quá yếu.
-POLL_SECONDS = max(5, int(os.getenv("HVHN_WATCHER_POLL_SECONDS", "10")))
+# Lan nhan don tu Drive Desktop. 5 giay van nhe voi may local, nhung cat bot
+# kha nhieu thoi gian cho so voi mac dinh cu; co the tang lai qua .env.
+POLL_SECONDS = max(3, int(os.getenv("HVHN_WATCHER_POLL_SECONDS", "5")))
+STABLE_CHECKS = max(2, int(os.getenv("HVHN_STABLE_CHECKS", "2")))
+STABLE_GAP_SECONDS = max(0.2, float(os.getenv("HVHN_STABLE_GAP_SECONDS", "0.5")))
 PDF_SYNC_SECONDS = 600
 LAST_PDF_SYNC = 0
 
@@ -285,8 +287,10 @@ def _ts():
     return time.strftime("%Y%m%d_%H%M%S")
 
 
-def _stable(path, checks=3, gap=1.0):
+def _stable(path, checks=None, gap=None):
     """Đợi file ổn định (Drive đồng bộ xong) — kích thước không đổi qua vài lần đo."""
+    checks = STABLE_CHECKS if checks is None else checks
+    gap = STABLE_GAP_SECONDS if gap is None else gap
     last = -1
     for _ in range(checks):
         try:
@@ -344,6 +348,27 @@ def _unique_path(folder, filename):
         if not candidate.exists():
             return str(candidate)
     return str(folder / f"{stem}_{uuid.uuid4().hex[:8]}{suffix}")
+
+
+def _folder_has_any(folder, suffixes):
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return False
+    suffixes = tuple(s.lower() for s in suffixes)
+    return any(name.lower().endswith(suffixes) for name in names)
+
+
+def _has_local_pending_jobs():
+    return (
+        _folder_has_any(JOBS_KHACH, [".txt"])
+        or _folder_has_any(INCOMING_DOCS, [".pdf"])
+        or _folder_has_any(INCOMING_BOT_DOCS, [".pdf"])
+        or _folder_has_any(INCOMING_BOT_MD, [".md"])
+        or _folder_has_any(INCOMING_TRIAL, [".pdf"])
+        or _folder_has_any(XOA_KHACH, [".txt"])
+        or _folder_has_any(XOA_TAILIEU, [".txt"])
+    )
 
 
 def _drive_direct_url(url):
@@ -1022,7 +1047,9 @@ async def main_async():
             await _sync_pdf_knowledge()
         except Exception:
             traceback.print_exc()
-        await asyncio.sleep(POLL_SECONDS)
+        # Neu con file dang sync/cho xu ly, quay lai nhanh hon de khong lo mot
+        # vong poll day du chi vi file vua on dinh sau khi kiem tra.
+        await asyncio.sleep(1 if _has_local_pending_jobs() else POLL_SECONDS)
 
 
 def main():

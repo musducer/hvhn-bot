@@ -279,11 +279,16 @@ function tuDongXuLyFileMoi(options) {
   }
 
   if (mergedAny) Logger.log(`Đã gộp ${totalAdded} dòng mới từ new_rows*.csv`);
-  // Trigger tổng 5 phút vẫn LUÔN chạy phanPhoi: dòng "Không thấy file" (PDF upload
-  // chậm hơn CSV) sẽ tự được thử lại. Làn nhanh 1 phút thì chỉ chạy khi CÓ CSV mới,
-  // tránh quét/ghi lại toàn bộ Sheet và Drive mỗi phút khi hệ thống đang rảnh.
-  if (mergedAny || !options.skipDistributionWhenIdle) phanPhoi();
-  return { mergedAny: mergedAny, totalAdded: totalAdded };
+  // Trigger tổng 5 phút vẫn LUÔN chạy phanPhoi đầy đủ để tự chữa lành + sync dashboard.
+  // Làn nhanh 1 phút: nếu có CSV mới thì phân phối ngay nhưng bỏ phần sync nặng;
+  // nếu rảnh thì chỉ thử lại các dòng "Không thấy file" (thường do CSV lên Drive trước PDF).
+  let distribution = null;
+  if (mergedAny || !options.skipDistributionWhenIdle) {
+    distribution = phanPhoi({ skipPostSync: !!options.skipPostSync });
+  } else if (options.retryMissingWhenIdle) {
+    distribution = phanPhoi({ onlyMissing: true, skipPostSync: true, skipDecorate: true });
+  }
+  return { mergedAny: mergedAny, totalAdded: totalAdded, distribution: distribution };
 }
 
 // LÀN NHANH 1 PHÚT: chỉ kéo new_rows*.csv mới từ watcher rồi phân phối ngay.
@@ -292,7 +297,7 @@ function hvhnXuLyNhanh() {
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return;
   try {
-    tuDongXuLyFileMoi({ skipDistributionWhenIdle: true });
+    tuDongXuLyFileMoi({ skipDistributionWhenIdle: true, retryMissingWhenIdle: true, skipPostSync: true });
   } catch (e) {
     ghiLog('LỖI làn nhanh', e.message || String(e));
     throw e;
@@ -441,10 +446,14 @@ function themMoiVaPhanPhoi() {
 
 // Xử lý MỌI tab có header đúng định dạng (TenNguoiNhan | Email | TenFile | TrangThai),
 // trừ Dashboard và tab "Nhập mới". Chạy lại vô hại: dòng đã "Xong" sẽ được bỏ qua.
-function phanPhoi() {
+function phanPhoi(options) {
+  options = options || {};
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
   const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  let distributed = 0;
+  let missing = 0;
+  let touchedRows = 0;
 
   ss.getSheets().forEach(sheet => {
     if (isSystemTab(sheet.getName())) return;
@@ -453,15 +462,20 @@ function phanPhoi() {
     if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
 
     const seen = {}; // chống trùng dòng trong cùng 1 tab
+    let touchedSheet = false;
     for (let i = 1; i < data.length; i++) {
       const [name, email, fileName, status] = data[i];
-      if (!name || !email || !fileName || String(status || '').startsWith('Xong')) continue;
+      const statusText = String(status || '');
+      if (!name || !email || !fileName || statusText.startsWith('Xong')) continue;
+      if (options.onlyMissing && !statusText.startsWith('Không thấy')) continue;
       if (_isBotOnlyDocFileName(fileName)) {
         sheet.getRange(i + 1, 4).setValue('Bot-only (không phân phối)');
+        touchedSheet = true; touchedRows++;
         continue;
       }
       if (seen[fileName]) {         // dòng lặp trong tab -> đánh dấu, không xử lý lại
         sheet.getRange(i + 1, 4).setValue('Trùng (bỏ qua)');
+        touchedSheet = true; touchedRows++;
         continue;
       }
       seen[fileName] = true;
@@ -479,6 +493,7 @@ function phanPhoi() {
           const srcFiles = sourceFolder.getFilesByName(fileName);
           if (!srcFiles.hasNext()) {
             sheet.getRange(i + 1, 4).setValue('Không thấy file: ' + fileName);
+            touchedSheet = true; touchedRows++; missing++;
             continue;
           }
           target = srcFiles.next().makeCopy(fileName, destFolder);
@@ -492,16 +507,21 @@ function phanPhoi() {
         } catch (e2) { /* thiếu Drive service - vẫn share được, chỉ là chưa khoá tải */ }
 
         sheet.getRange(i + 1, 4).setValue('Xong: ' + target.getUrl());
+        touchedSheet = true; touchedRows++; distributed++;
       } catch (e) {
         sheet.getRange(i + 1, 4).setValue('Lỗi: ' + e.message);
+        touchedSheet = true; touchedRows++;
       }
     }
-    decorateSheet(sheet);
+    if (touchedSheet && !options.skipDecorate) decorateSheet(sheet);
   });
 
-  dongBoKhachHang();   // cập nhật danh sách khách + set ngày cấp/hết hạn cho khách mới
-  capQuyenFolderKhachHangTuDong();
-  capNhatDashboard();
+  if (!options.skipPostSync) {
+    dongBoKhachHang();   // cập nhật danh sách khách + set ngày cấp/hết hạn cho khách mới
+    capQuyenFolderKhachHangTuDong();
+    capNhatDashboard();
+  }
+  return { distributed: distributed, missing: missing, touchedRows: touchedRows };
 }
 
 // ============ DASHBOARD (tổng quan + tìm kiếm) ============

@@ -128,15 +128,18 @@ Chỉ sau khi cả 7 bước đều đúng mới công khai Form.
 
 ### Tốc độ xử lý tài liệu
 
-Phiên bản hiện tại có hai làn chạy: watcher quét folder local mỗi **10 giây** và Apps Script có một
-trigger nhanh mỗi **1 phút** chỉ để nhận `new_rows*.csv`/phân phối file mới. Việc dọn dẹp, gia hạn và
-quét tổng vẫn chạy mỗi 5 phút để không lãng phí quota Google.
+Phiên bản hiện tại có hai làn chạy: watcher quét folder local mỗi **5 giây** và Apps Script có một
+trigger nhanh mỗi **1 phút** để nhận `new_rows*.csv`/phân phối file mới. Khi chưa có CSV mới, trigger
+nhanh vẫn thử lại riêng các dòng `Không thấy file` để xử lý trường hợp Google Drive đồng bộ CSV lên
+trước PDF. Việc dọn dẹp, gia hạn và quét tổng vẫn chạy mỗi 5 phút để không lãng phí quota Google.
 
 Sau khi dán/deploy `phanphoi.gs` mới, mở Sheet và bấm **HVHN → ⚙️ Cài/kiểm tra tự động hoá** một lần để
 thay trigger cũ bằng trigger nhanh. Sau đó restart `watcher.py` để nhận cấu hình mới.
 
-- Mặc định watcher dùng `HVHN_WATCHER_POLL_SECONDS=10`. Có thể đặt biến này trong `.env` thành `5` nếu
-  máy và Google Drive Desktop ổn định; không nên thấp hơn 5 giây.
+- Mặc định watcher dùng `HVHN_WATCHER_POLL_SECONDS=5`. Nếu máy hoặc Google Drive Desktop yếu, có thể
+  tăng lên `10` trong `.env`; không nên thấp hơn 3-5 giây.
+- Mặc định watcher kiểm file ổn định bằng `HVHN_STABLE_CHECKS=2` và `HVHN_STABLE_GAP_SECONDS=0.5`.
+  Nếu gặp lỗi đọc file khi Drive đang sync dở, tăng lần lượt lên `3` và `1.0`.
 - Thời gian còn lại phụ thuộc Google Drive Desktop upload file watermark lên cloud. Nếu file PDF lớn hoặc
   Drive đang đồng bộ nhiều dữ liệu, đây sẽ là nút thắt chính. Muốn bỏ hẳn chặng này cần chuyển watcher sang
   upload Google Drive API trực tiếp — một thay đổi kiến trúc riêng.

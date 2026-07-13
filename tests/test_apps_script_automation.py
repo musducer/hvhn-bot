@@ -21,6 +21,15 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function hvhnXuLyNhanh()", self.src)
         self.assertIn("ScriptApp.newTrigger('hvhnXuLyNhanh')", self.src)
         self.assertIn("skipDistributionWhenIdle: true", self.src)
+        self.assertIn("retryMissingWhenIdle: true", self.src)
+        self.assertIn("skipPostSync: true", self.src)
+
+    def test_fast_lane_retries_missing_files_without_full_post_sync(self):
+        self.assertIn("phanPhoi({ onlyMissing: true, skipPostSync: true", self.src)
+        self.assertIn("options.onlyMissing", self.src)
+        self.assertIn("statusText.startsWith('Không thấy')", self.src)
+        self.assertIn("if (!options.skipPostSync)", self.src)
+        self.assertIn("return { distributed: distributed, missing: missing, touchedRows: touchedRows }", self.src)
 
     def test_form_setup_also_installs_automation(self):
         idx_form = self.src.index("function caiDatForm()")
