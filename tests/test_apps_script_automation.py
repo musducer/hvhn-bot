@@ -53,6 +53,27 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function ketNoiWebhookPayOS", self.src)
         self.assertIn("/confirm-webhook", self.src)
 
+    def test_preorder_uses_one_reused_form_and_an_email_allowlist(self):
+        self.assertIn("🎟️ Khách pre-order", self.src)
+        self.assertIn("PREORDER_ALLOWED_EMAILS_PROP", self.src)
+        self.assertIn("function caiDatEmailPreorder()", self.src)
+        self.assertIn("function taoLaiFormPreorder()", self.src)
+        self.assertIn("_openFormIfAlive(props.getProperty(PREORDER_FORM_ID_PROP))", self.src)
+        self.assertIn("if (!form) form = _taoFormPreorder(props);", self.src)
+
+    def test_preorder_mints_idempotent_invite_and_is_not_client_data_tab(self):
+        self.assertIn("function xuLyFormPreorder(e)", self.src)
+        self.assertIn("function _preorderCode(email)", self.src)
+        self.assertIn("const out = _pmtMintInvite(code, name, email);", self.src)
+        self.assertIn("function guiLaiLinkDiscordChoPreorderDangChon()", self.src)
+        self.assertIn("name === PMT_ORDER_TAB || name === PREORDER_TAB", self.src)
+
+    def test_preorder_rejects_a_second_form_submit_for_the_same_email(self):
+        handler = self.src[self.src.index("function xuLyFormPreorder(e)"):]
+        self.assertIn("if (row) {", handler)
+        self.assertIn("Từ chối Form pre-order (đã submit)", handler)
+        self.assertIn("return;", handler)
+
 
 if __name__ == "__main__":
     unittest.main()

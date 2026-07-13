@@ -79,7 +79,7 @@ function isSystemTab(name) {
   return name === DASHBOARD_NAME || name === STAGING_NAME || name === REGISTRY_NAME
       || name === DOCS_NAME || name === LOG_NAME
       || name === TRIAL_CLIENT_TAB || name === TRIAL_DOC_TAB
-      || name === PMT_ORDER_TAB;
+      || name === PMT_ORDER_TAB || name === PREORDER_TAB;
 }
 
 // Ghi 1 dòng nhật ký: thời gian | hành động | chi tiết. Không làm hỏng flow nếu lỗi.
@@ -137,6 +137,10 @@ function onOpen() {
       .addSeparator()
       .addItem('🔁 Gửi lại link Discord cho đơn đang chọn', 'guiLaiLinkDiscordChoDonDangChon')
       .addItem('🧪 Test webhook bằng mã đơn đang chọn', 'testWebhookThanhToanChoDonDangChon'))
+    .addSubMenu(ui.createMenu('🎟️ Khách pre-order')
+      .addItem('1. Cài danh sách email được nhận slot', 'caiDatEmailPreorder')
+      .addItem('2. Tạo/lấy lại Form pre-order', 'taoLaiFormPreorder')
+      .addItem('🔁 Gửi lại link Discord cho khách đang chọn', 'guiLaiLinkDiscordChoPreorderDangChon'))
     .addSubMenu(ui.createMenu('🧪 Trải nghiệm')
       .addItem('Cập nhật danh sách tài liệu trải nghiệm', 'capNhatTaiLieuTraiNghiem')
       .addItem('Kiểm tra hết hạn khách trải nghiệm (ngay)', 'kiemTraHetHanTraiNghiem')
@@ -2444,4 +2448,184 @@ function doGet(e) {
   const text = done ? 'Thanh toán đang được xác nhận' : 'Đơn thanh toán đã được hủy';
   const detail = done ? 'Nếu giao dịch thành công, link Discord sẽ tự gửi vào email bạn đã đăng ký trong ít phút.' : 'Bạn có thể quay lại Form HVHN để tạo mã QR mới khi cần.';
   return HtmlService.createHtmlOutput('<!doctype html><html><meta name="viewport" content="width=device-width,initial-scale=1"><body style="font-family:Arial,sans-serif;max-width:620px;margin:56px auto;padding:0 20px;color:#202124"><h2 style="color:#0b8043">HVHN</h2><h3>' + _pmtEsc(text) + '</h3><p>' + _pmtEsc(detail) + '</p></body></html>').setTitle('HVHN');
+}
+
+// ============================================================================
+// =============== KHÁCH PRE-ORDER: FORM -> INVITE DISCORD RIÊNG =============
+// ============================================================================
+// Form này dành cho người đã đặt slot từ trước, không đi qua PayOS. Chỉ email
+// có trong allowlist Script Properties mới nhận invite; nhờ vậy link Form bị lộ
+// cũng không thể được dùng để vào nhóm miễn phí.
+
+const PREORDER_TAB = '_khach_preorder';
+const PREORDER_ALLOWED_EMAILS_PROP = 'PREORDER_ALLOWED_EMAILS';
+const PREORDER_FORM_ID_PROP = 'FORM_PREORDER_ID';
+
+function _preorderEmailsFromText(text) {
+  const seen = {};
+  const emails = [];
+  String(text || '').split(/[\s,;]+/).forEach(raw => {
+    const email = String(raw || '').trim().toLowerCase();
+    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || seen[email]) return;
+    seen[email] = true;
+    emails.push(email);
+  });
+  return emails;
+}
+
+function _preorderAllowedEmails() {
+  const allowed = {};
+  _preorderEmailsFromText(_pmtProp(PREORDER_ALLOWED_EMAILS_PROP, '')).forEach(email => { allowed[email] = true; });
+  return allowed;
+}
+
+function _preorderSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  let sh = ss.getSheetByName(PREORDER_TAB);
+  if (!sh) sh = ss.insertSheet(PREORDER_TAB);
+  const headers = ['Thời gian', 'Tên', 'Email', 'Mã pre-order', 'Trạng thái', 'Invite URL', 'Gửi mail lúc', 'Ghi chú'];
+  if (sh.getMaxColumns() < headers.length) sh.insertColumnsAfter(sh.getMaxColumns(), headers.length - sh.getMaxColumns());
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]);
+  sh.getRange(1, 1, 1, headers.length).setBackground('#6a1b9a').setFontColor('#fff').setFontWeight('bold');
+  sh.setFrozenRows(1);
+  sh.setColumnWidth(2, 180); sh.setColumnWidth(3, 240); sh.setColumnWidth(6, 330); sh.setColumnWidth(8, 250);
+  sh.getRange(2, 1, Math.max(1, sh.getMaxRows() - 1), 1).setNumberFormat('dd/mm/yyyy HH:mm:ss');
+  sh.getRange(2, 7, Math.max(1, sh.getMaxRows() - 1), 1).setNumberFormat('dd/mm/yyyy HH:mm:ss');
+  return sh;
+}
+
+// Dùng mã ổn định theo email: một slot luôn gắn với một mã invite duy nhất.
+function _preorderCode(email) {
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(email || '').trim().toLowerCase());
+  return 'PRE' + _pmtHex(digest).slice(0, 16).toUpperCase();
+}
+
+function caiDatEmailPreorder() {
+  const ui = SpreadsheetApp.getUi();
+  const existing = _preorderEmailsFromText(_pmtProp(PREORDER_ALLOWED_EMAILS_PROP, ''));
+  const response = ui.prompt(
+    'Danh sách khách pre-order',
+    'Dán email của những khách ĐÃ được chốt slot. Có thể ngăn cách bằng dòng mới, dấu phẩy hoặc dấu chấm phẩy.\n\nDanh sách mới sẽ thay thế danh sách cũ. Hiện có: ' + existing.length + ' email.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  const emails = _preorderEmailsFromText(response.getResponseText());
+  PropertiesService.getScriptProperties().setProperty(PREORDER_ALLOWED_EMAILS_PROP, emails.join('\n'));
+  ghiLog('Cập nhật allowlist pre-order', emails.length + ' email');
+  ui.alert('Đã lưu ' + emails.length + ' email pre-order hợp lệ. Chỉ các email này mới nhận được link Discord từ Form.');
+}
+
+function _taoFormPreorder(props) {
+  const form = FormApp.create('HVHN — Xác nhận slot nhóm học tập');
+  form.setDescription('Form dành cho khách đã được HVHN xác nhận slot trước đó. Điền đúng họ tên và email đã đăng ký để nhận link tham gia Discord riêng qua email.');
+  form.addTextItem().setTitle('Họ và tên').setRequired(true);
+  form.addTextItem().setTitle('Email nhận link Discord').setRequired(true);
+  form.setConfirmationMessage('HVHN đã nhận thông tin. Nếu email của bạn nằm trong danh sách pre-order đã xác nhận, link Discord riêng sẽ được gửi vào email này trong ít phút. Vui lòng kiểm tra cả mục Spam.');
+  form.setAcceptingResponses(true);
+  ScriptApp.newTrigger('xuLyFormPreorder').forForm(form).onFormSubmit().create();
+  props.setProperty(PREORDER_FORM_ID_PROP, form.getId());
+  return form;
+}
+
+function taoLaiFormPreorder() {
+  const props = PropertiesService.getScriptProperties();
+  let form = _openFormIfAlive(props.getProperty(PREORDER_FORM_ID_PROP));
+  if (!form) form = _taoFormPreorder(props);
+  const count = _preorderEmailsFromText(_pmtProp(PREORDER_ALLOWED_EMAILS_PROP, '')).length;
+  const msg = 'Form xác nhận slot pre-order:\n\n' + form.getPublishedUrl() + '\n\nAllowlist hiện có ' + count + ' email. Chỉ email trong allowlist mới nhận invite Discord.';
+  Logger.log(msg); SpreadsheetApp.getUi().alert(msg);
+}
+
+function _preorderSendInviteEmail(email, name, inviteUrl) {
+  const body = 'Chào ' + name + ',\n\nHVHN đã xác nhận slot nhóm học tập của bạn. Bấm link sau để tham gia Discord: ' + inviteUrl + '\n\nSau khi vào Discord, hãy bấm “Kích hoạt trải nghiệm” để xác nhận email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
+  const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
+    '<h2 style="margin:0 0 8px;color:#6a1b9a">HVHN · Xác nhận slot nhóm học tập</h2>' +
+    '<p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
+    '<p>HVHN đã xác nhận slot nhóm học tập của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
+    '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
+    '<p>Sau khi vào Discord, hãy bấm <strong>“Kích hoạt trải nghiệm”</strong> để xác nhận email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.</p>' +
+    '<p style="font-size:13px;color:#5f6368">Link mời là link riêng, có giới hạn sử dụng. Nếu cần hỗ trợ, hãy phản hồi email này.</p>' +
+    '<p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
+  MailApp.sendEmail({ to: email, subject: '[HVHN] Link tham gia nhóm học tập của bạn', body: body, htmlBody: html, name: 'HVHN' });
+}
+
+function _preorderFindRowByEmail(sheet, email) {
+  const last = sheet.getLastRow();
+  if (last < 2) return 0;
+  const emails = sheet.getRange(2, 3, last - 1, 1).getValues();
+  for (let i = 0; i < emails.length; i++) {
+    if (String(emails[i][0] || '').trim().toLowerCase() === email) return i + 2;
+  }
+  return 0;
+}
+
+// Form submit: mỗi email allowlist CHỈ được submit một lần. Lượt submit thứ hai
+// bị từ chối, kể cả khi nhiều người cùng dùng chung một hộp thư. Nếu khách cần
+// hỗ trợ, quản lý dùng nút gửi lại link trong tab _khach_preorder, không mở lại Form.
+// Bot vẫn lưu pending member nên khách bấm invite rồi Kích hoạt trải nghiệm như luồng thường.
+function xuLyFormPreorder(e) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    let name = '', email = '';
+    e.response.getItemResponses().forEach(it => {
+      const title = it.getItem().getTitle().toLowerCase();
+      if (title.indexOf('tên') >= 0) name = String(it.getResponse()).trim();
+      else if (title.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
+    });
+    if (!name || !email) return;
+    if (!_preorderAllowedEmails()[email]) {
+      ghiLog('Từ chối Form pre-order (email ngoài allowlist)', email);
+      return;
+    }
+    const sheet = _preorderSheet();
+    const code = _preorderCode(email);
+    let row = _preorderFindRowByEmail(sheet, email);
+    if (row) {
+      ghiLog('Từ chối Form pre-order (đã submit)', code + ' - ' + email);
+      return;
+    }
+    row = sheet.getLastRow() + 1;
+    sheet.getRange(row, 1, 1, 8).setValues([[new Date(), name, email, code, 'dang_tao_invite', '', '', '']]);
+    const out = _pmtMintInvite(code, name, email);
+    if (!out.invite_url) throw new Error(out.error || 'Không tạo được invite Discord.');
+    _preorderSendInviteEmail(email, name, out.invite_url);
+    sheet.getRange(row, 5).setValue('da_gui_link');
+    sheet.getRange(row, 6).setValue(out.invite_url);
+    sheet.getRange(row, 7).setValue(new Date());
+    sheet.getRange(row, 8).setValue(out.reused ? 'gui_lai_invite_cu' : 'invite_moi');
+    ghiLog('Đã cấp link Discord pre-order', code + ' - ' + name + ' - ' + email);
+  } catch (err) {
+    ghiLog('LỖI Form pre-order', (err && err.message) || String(err));
+    throw err;
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function guiLaiLinkDiscordChoPreorderDangChon() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
+  if (sheet.getName() !== PREORDER_TAB || sheet.getActiveRange().getRow() <= 1) {
+    SpreadsheetApp.getUi().alert('Hãy chọn một dòng khách trong tab ' + PREORDER_TAB + '.'); return;
+  }
+  const row = sheet.getActiveRange().getRow();
+  const values = sheet.getRange(row, 1, 1, 8).getValues()[0];
+  const name = String(values[1] || '').trim(), email = String(values[2] || '').trim().toLowerCase();
+  const code = String(values[3] || _preorderCode(email)).trim();
+  if (!name || !email) { SpreadsheetApp.getUi().alert('Dòng này thiếu tên hoặc email.'); return; }
+  try {
+    const out = _pmtMintInvite(code, name, email);
+    if (!out.invite_url) throw new Error(out.error || 'Không tạo được invite Discord.');
+    _preorderSendInviteEmail(email, name, out.invite_url);
+    sheet.getRange(row, 4).setValue(code);
+    sheet.getRange(row, 5).setValue('da_gui_lai_link');
+    sheet.getRange(row, 6).setValue(out.invite_url);
+    sheet.getRange(row, 7).setValue(new Date());
+    sheet.getRange(row, 8).setValue(out.reused ? 'gui_lai_invite_cu' : 'gui_lai_invite_moi');
+    ghiLog('Gửi lại link Discord pre-order', code + ' - ' + email);
+    SpreadsheetApp.getUi().alert('Đã gửi lại link Discord cho khách.');
+  } catch (err) {
+    ghiLog('LỖI gửi lại link Discord pre-order', (err && err.message) || String(err));
+    SpreadsheetApp.getUi().alert('Không gửi được: ' + ((err && err.message) || String(err)));
+  }
 }

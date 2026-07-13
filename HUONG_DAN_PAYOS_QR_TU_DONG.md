@@ -153,3 +153,45 @@ Gửi cho người sửa hệ thống ba thứ, không gửi secret:
 3. Thời điểm phát sinh lỗi (giờ/phút, múi giờ Việt Nam).
 
 Không gửi `Client ID`, `API Key`, `Checksum Key` hoặc `HVHN_MINT_SECRET`.
+
+## 9. Cấp Discord cho khách đã pre-order (không thanh toán lại)
+
+Luồng này dành riêng cho khách đã chốt slot trước đó. Họ không đi qua PayOS và không nhận QR; sau khi
+điền Form, hệ thống gửi một link Discord riêng đến email của họ. Khi vào Discord, họ vẫn bấm **Kích hoạt
+trải nghiệm** và watcher vẫn cấp học liệu như luồng thông thường.
+
+### Thiết lập một lần
+
+1. Dán phiên bản mới của `phanphoi.gs` vào đúng dự án Apps Script rồi lưu. Nếu dự án đang dùng Web app,
+   vào **Deploy → Manage deployments → Edit → Version: New version → Deploy** để cập nhật mã chạy.
+2. Mở lại Google Sheet để thấy menu **HVHN → 🎟️ Khách pre-order**.
+3. Bấm **1. Cài danh sách email được nhận slot**.
+4. Dán email của những khách đã chốt slot; mỗi email một dòng là dễ kiểm nhất. Có thể dùng dấu phẩy hoặc
+   chấm phẩy. Bấm **OK**.
+   - Danh sách mới **thay thế toàn bộ** danh sách cũ.
+   - Email không nằm trong danh sách sẽ không nhận invite, kể cả khi họ có link Form.
+5. Bấm **2. Tạo/lấy lại Form pre-order** và copy link hiện ra.
+   - Lần đầu hệ thống tạo **một Form duy nhất** và gắn trigger xử lý.
+   - Những lần sau nút này chỉ mở/lấy lại **đúng Form cũ**, không tạo Form hay trigger trùng.
+
+### Gửi và theo dõi
+
+1. Gửi cùng một link Form đó cho toàn bộ khách trong allowlist.
+2. Khách điền **Họ và tên** và **Email nhận link Discord**. Email phải trùng email đã đưa vào allowlist
+   (không phân biệt chữ hoa/thường).
+3. Mỗi email allowlist chỉ được **submit Form một lần duy nhất**. Lượt submit thứ hai bị từ chối, kể cả
+   khi nhiều người dùng chung một hộp thư. Hệ thống tạo một mã pre-order ổn định theo email, xin invite
+   Discord một-lần từ bot và gửi email có nút **Tham gia Discord HVHN**.
+4. Khách bấm link, vào Discord, rồi bấm **Kích hoạt trải nghiệm**. Từ bước này, role/quyền và watcher
+   cấp học liệu chạy y hệt luồng khách thanh toán thông thường.
+5. Theo dõi tại tab `_khach_preorder`:
+   - `da_gui_link`: gửi thành công.
+   - `dang_tao_invite`: đang xử lý; nếu giữ lâu, xem tab `Nhật ký` và Render.
+   - `Invite URL`, `Gửi mail lúc`, `Ghi chú`: dữ liệu kiểm tra/gửi lại.
+6. Nếu khách không thấy thư hoặc invite hết hiệu lực: chọn dòng của họ trong `_khach_preorder`, rồi bấm
+   **HVHN → 🎟️ Khách pre-order → 🔁 Gửi lại link Discord cho khách đang chọn**. Đây là đường hỗ trợ duy
+   nhất sau submit; không bảo khách điền lại Form. Bot tái sử dụng invite của mã pre-order khi còn hợp lệ,
+   nên không cấp trùng slot.
+
+Không đặt allowlist trống khi gửi Form: khi đó tất cả lượt gửi đều bị từ chối an toàn. Luồng pre-order
+chỉ cần `PMT_BOT_URL`, `PMT_SECRET` và `PMT_DAYS` đã cấu hình cho bot; không cần khóa PayOS hay webhook.
