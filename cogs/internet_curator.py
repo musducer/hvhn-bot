@@ -73,6 +73,27 @@ class InternetCurator(commands.Cog):
         finally:
             self._scan_running = False
 
+    async def _approve_row(self, row, reviewer_id: int) -> dict:
+        result = await index_md_bytes(
+            self.bot.db,
+            row["title"],
+            row["markdown"].encode("utf-8"),
+            source=row["url"],
+            author=row["author"] or "",
+            created_by=reviewer_id,
+        )
+        await self.bot.db.execute(
+            """
+            UPDATE ai_internet_items
+            SET status = 'approved', reviewed_at = now(), reviewed_by = $2, imported_doc_key = $3
+            WHERE id = $1
+            """,
+            row["id"],
+            reviewer_id,
+            result.get("doc_key"),
+        )
+        return result
+
     @tasks.loop(hours=24)
     async def internet_auto_scan(self):
         result = await self._run_scan(max_per_source=AUTO_MAX_PER_SOURCE, min_score=DEFAULT_MIN_SCORE)
@@ -214,28 +235,69 @@ class InternetCurator(commands.Cog):
         if not row:
             await interaction.followup.send("Khong thay bai pending nay, hoac bai da duoc xu ly.", ephemeral=True)
             return
-        result = await index_md_bytes(
-            self.bot.db,
-            row["title"],
-            row["markdown"].encode("utf-8"),
-            source=row["url"],
-            author=row["author"] or "",
-            created_by=interaction.user.id,
-        )
-        await self.bot.db.execute(
-            """
-            UPDATE ai_internet_items
-            SET status = 'approved', reviewed_at = now(), reviewed_by = $2, imported_doc_key = $3
-            WHERE id = $1
-            """,
-            item_id,
-            interaction.user.id,
-            result.get("doc_key"),
-        )
+        result = await self._approve_row(row, interaction.user.id)
         await interaction.followup.send(
             f"Da duyet #{item_id} va nhap kho RAG: `{result.get('title')}` | passages `{result.get('passages')}` | changed `{result.get('changed')}`.",
             ephemeral=True,
         )
+
+    @app_commands.command(name="internet_duyet_all", description="(admin) Duyet hang loat bai internet pending dat diem loc")
+    @app_commands.describe(
+        limit="So bai toi da se duyet trong mot lan",
+        diem_toi_thieu="Chi duyet bai co quality_score tu muc nay tro len",
+    )
+    async def internet_duyet_all(
+        self,
+        interaction: discord.Interaction,
+        limit: int = 10,
+        diem_toi_thieu: int = 70,
+    ):
+        if not await self._require_admin(interaction):
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        limit = max(1, min(limit, 50))
+        diem_toi_thieu = max(1, min(diem_toi_thieu, 100))
+        rows = await self.bot.db.fetch(
+            """
+            SELECT *
+            FROM ai_internet_items
+            WHERE status = 'pending_review' AND quality_score >= $1
+            ORDER BY quality_score DESC, discovered_at ASC
+            LIMIT $2
+            """,
+            diem_toi_thieu,
+            limit,
+        )
+        if not rows:
+            await interaction.followup.send(
+                f"Khong co bai pending nao dat tu `{diem_toi_thieu}/100` tro len.",
+                ephemeral=True,
+            )
+            return
+
+        approved = []
+        failed = []
+        for row in rows:
+            try:
+                result = await self._approve_row(row, interaction.user.id)
+                approved.append((row["id"], result.get("title") or row["title"], result.get("passages", 0)))
+            except Exception as exc:
+                failed.append((row["id"], str(exc)[:120]))
+
+        lines = [
+            f"Da duyet `{len(approved)}` bai internet pending dat tu `{diem_toi_thieu}/100` tro len.",
+        ]
+        if approved:
+            lines.append("")
+            lines.append("Da nhap:")
+            for item_id, title, passages in approved[:12]:
+                lines.append(f"- #{item_id} `{passages}` doan - {title}")
+        if failed:
+            lines.append("")
+            lines.append("Loi:")
+            for item_id, error in failed[:8]:
+                lines.append(f"- #{item_id}: {error}")
+        await interaction.followup.send(_clip("\n".join(lines), 1900), ephemeral=True)
 
     @app_commands.command(name="internet_tuchoi", description="(admin) Tu choi mot bai internet pending")
     async def internet_tuchoi(self, interaction: discord.Interaction, item_id: int, ly_do: str = ""):
