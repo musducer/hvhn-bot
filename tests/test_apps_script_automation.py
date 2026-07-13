@@ -67,11 +67,18 @@ class AppsScriptAutomationTest(unittest.TestCase):
 
     def test_preorder_uses_one_reused_form_and_an_email_allowlist(self):
         self.assertIn("🎟️ Khách pre-order", self.src)
-        self.assertIn("PREORDER_ALLOWED_EMAILS_PROP", self.src)
+        self.assertIn("PREORDER_SOURCE_SPREADSHEET_ID_PROP", self.src)
+        self.assertIn("PREORDER_SOURCE_GID_PROP", self.src)
+        self.assertIn("PREORDER_DEFAULT_SOURCE_SPREADSHEET_ID = '1YB9tc7mHoLijcSJgUwSGiE1z-kQwTSPF03An92sgw68'", self.src)
+        self.assertIn("PREORDER_DEFAULT_SOURCE_GID = '368858728'", self.src)
+        self.assertIn("PREORDER_DEFAULT_EMAIL_HEADER = 'Gmail của bạn là gì?'", self.src)
+        self.assertIn("function _preorderEmailsFromSourceSheet()", self.src)
+        self.assertIn("SpreadsheetApp.openById(cfg.spreadsheetId)", self.src)
         self.assertIn("function caiDatEmailPreorder()", self.src)
         self.assertIn("function taoLaiFormPreorder()", self.src)
         self.assertIn("_openFormIfAlive(props.getProperty(PREORDER_FORM_ID_PROP))", self.src)
         self.assertIn("if (!form) form = _taoFormPreorder(props);", self.src)
+        self.assertNotIn("PREORDER_ALLOWED_" + "EMAILS_PROP", self.src)
 
     def test_preorder_mints_idempotent_invite_and_is_not_client_data_tab(self):
         self.assertIn("function xuLyFormPreorder(e)", self.src)
@@ -85,6 +92,11 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("if (row) {", handler)
         self.assertIn("Từ chối Form pre-order (đã submit)", handler)
         self.assertIn("return;", handler)
+
+    def test_experience_program_automation_removed(self):
+        self.assertNotIn("Trai" + "Nghiem", self.src)
+        self.assertNotIn("khoaTai" + "Trai" + "Nghiem", self.src)
+        self.assertNotIn("_don_them_tai_lieu_" + "trai" + "_nghiem", self.src)
 
 
 if __name__ == "__main__":

@@ -159,9 +159,9 @@ Sheet: **"Phân phối - HVHN"** = `1KwCP7JcKCAR_GGlIPLUXYMk8_tdQu2Wo-E-nD5nRf6Y
 - `ensure_md_schema()` tu kiem tra kich thuoc pgvector. Khi doi provider/dimension, chi cot embedding dan xuat va index vector bi tao lai; backfill se nhung lai passage, noi dung goc khong bi xoa.
 - Test: `python -m unittest discover -s tests -p "test_*.py"` (89 test pass tai luc ban giao).
 
-## 13. Quy uoc lam viec voi Codex
+## 13. Quy uoc lam viec voi Codex/Claude
 
-- Sau khi hoan tat va kiem tra thay doi code, Codex tu dong commit va push len nhanh hien tai; khong can cho chu du an nhac lai. Khong dua file backup/untracked khong lien quan vao commit.
+- Sau khi hoan tat va kiem tra thay doi code, Codex/Claude tu dong commit va push len nhanh hien tai; khong can cho chu du an nhac lai. Khong dua file backup/untracked khong lien quan vao commit.
 
 ## 14. Jina embedding fallback - 2026-07-11
 

@@ -78,7 +78,6 @@ const BOT_ONLY_DOC_PREFIXES = ['discord'];
 function isSystemTab(name) {
   return name === DASHBOARD_NAME || name === STAGING_NAME || name === REGISTRY_NAME
       || name === DOCS_NAME || name === LOG_NAME
-      || name === TRIAL_CLIENT_TAB || name === TRIAL_DOC_TAB
       || name === PMT_ORDER_TAB || name === PREORDER_TAB;
 }
 
@@ -106,7 +105,6 @@ function onOpen() {
   ensureDashboard();
   ensureStaging();
   ensureRegistry();
-  ensureTraiNghiem();
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('HVHN')
     .addItem('🚀 Chạy tất cả NGAY (phân phối + gia hạn + hết hạn + dashboard)', 'hvhnTuDongHoa')
@@ -138,18 +136,9 @@ function onOpen() {
       .addItem('🔁 Gửi lại link Discord cho đơn đang chọn', 'guiLaiLinkDiscordChoDonDangChon')
       .addItem('🧪 Test webhook bằng mã đơn đang chọn', 'testWebhookThanhToanChoDonDangChon'))
     .addSubMenu(ui.createMenu('🎟️ Khách pre-order')
-      .addItem('1. Cài danh sách email được nhận slot', 'caiDatEmailPreorder')
+      .addItem('1. Kết nối sheet responses cũ', 'caiDatEmailPreorder')
       .addItem('2. Tạo/lấy lại Form pre-order', 'taoLaiFormPreorder')
       .addItem('🔁 Gửi lại link Discord cho khách đang chọn', 'guiLaiLinkDiscordChoPreorderDangChon'))
-    .addSubMenu(ui.createMenu('🧪 Trải nghiệm')
-      .addItem('Cập nhật danh sách tài liệu trải nghiệm', 'capNhatTaiLieuTraiNghiem')
-      .addItem('Kiểm tra hết hạn khách trải nghiệm (ngay)', 'kiemTraHetHanTraiNghiem')
-      .addItem('Xóa KHÁCH trải nghiệm đã tích', 'xoaKhachTraiNghiemDaTich')
-      .addItem('Xóa TÀI LIỆU trải nghiệm đã tích', 'xoaTaiLieuTraiNghiemDaTich')
-      .addSeparator()
-      .addItem('🗑️ XÓA CẢ CHƯƠNG TRÌNH trải nghiệm', 'xoaChuongTrinhTraiNghiem')
-      .addItem('📱 Tạo lại Form thêm khách trải nghiệm', 'taoLaiFormKhachTraiNghiem')
-      .addItem('📱 Tạo lại Form thêm tài liệu trải nghiệm', 'taoLaiFormTaiLieuTraiNghiem'))
     .addToUi();
 }
 
@@ -320,10 +309,6 @@ function hvhnTuDongHoa() {
     donTaiLieuBotOnlyKhoKhachTuDong(); // tài liệu bot-only lỡ lọt kho khách -> gỡ khỏi Sheet/Drive
     xoaKhachDaTichTuDong();   // tick Xóa khách -> tự xoá, không cần bấm menu
     xoaTaiLieuDaTichTuDong(); // tick Xóa tài liệu -> tự xoá, không cần bấm menu
-    xoaKhachTraiNghiemDaTich();     // tick Xóa khách trải nghiệm -> tự xoá
-    xoaTaiLieuTraiNghiemDaTich();   // tick Xóa tài liệu trải nghiệm -> tự xoá (trước khi rebuild tab)
-    kiemTraHetHanTraiNghiem();   // trải nghiệm quá 72h -> gỡ quyền xem folder chung
-    capNhatTaiLieuTraiNghiem();  // đồng bộ tab Tài liệu trải nghiệm + khóa tải
     capNhatTaiLieu();         // tab Tài liệu luôn mới
     canhBaoTrungTenKhach();   // B1: cảnh báo khách trùng tên (khác email) -> tránh dùng chung folder
     capNhatDashboard();       // dashboard luôn mới
@@ -342,7 +327,6 @@ function _triggerHandlers() {
     hvhnXuLyNhanh: true,
     tuDongXuLyFileMoi: true,
     kiemTraHetHan: true,
-    khoaTaiTraiNghiemLienTuc: true,
   };
 }
 
@@ -369,7 +353,6 @@ function kiemTraTuDongHoa() {
     'Số trigger hiện tại:',
     '- hvhnTuDongHoa: ' + (counts.hvhnTuDongHoa || 0),
     '- hvhnXuLyNhanh: ' + (counts.hvhnXuLyNhanh || 0),
-    '- khoaTaiTraiNghiemLienTuc: ' + (counts.khoaTaiTraiNghiemLienTuc || 0),
     '- kiemTraHetHan: ' + (counts.kiemTraHetHan || 0),
     '',
     ok
@@ -381,18 +364,19 @@ function kiemTraTuDongHoa() {
 
 function damBaoTuDongHoa() {
   if (!_coTrigger('hvhnTuDongHoa') || !_coTrigger('hvhnXuLyNhanh')
-      || !_coTrigger('khoaTaiTraiNghiemLienTuc') || !_coTrigger('kiemTraHetHan')) {
+      || !_coTrigger('kiemTraHetHan')) {
     caiDatTuDongHoa();
     return;
   }
-  SpreadsheetApp.getActiveSpreadsheet().toast('Trigger đã có: làn nhanh mỗi 1 phút + tự động hoá tổng mỗi 5 phút + khóa tải mỗi 1 phút.');
+  SpreadsheetApp.getActiveSpreadsheet().toast('Trigger đã có: làn nhanh mỗi 1 phút + tự động hoá tổng mỗi 5 phút.');
 }
 
 function caiDatTuDongHoa() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const keepHandlers = _triggerHandlers();
   ScriptApp.getProjectTriggers().forEach(t => {
-    if (keepHandlers[t.getHandlerFunction()]) ScriptApp.deleteTrigger(t);
+    const handler = t.getHandlerFunction();
+    if (keepHandlers[handler]) ScriptApp.deleteTrigger(t);
   });
 
   ScriptApp.newTrigger('hvhnTuDongHoa')
@@ -401,11 +385,6 @@ function caiDatTuDongHoa() {
     .create();
 
   ScriptApp.newTrigger('hvhnXuLyNhanh')
-    .timeBased()
-    .everyMinutes(1)
-    .create();
-
-  ScriptApp.newTrigger('khoaTaiTraiNghiemLienTuc')
     .timeBased()
     .everyMinutes(1)
     .create();
@@ -421,7 +400,7 @@ function caiDatTuDongHoa() {
   ensureRegistry();
   capNhatTaiLieu();
   capNhatDashboard();
-  ghiLog('Cài tự động hoá', 'làn nhanh new_rows mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; khóa tải trải nghiệm mỗi 1 phút; kiemTraHetHan hằng ngày 1h');
+  ghiLog('Cài tự động hoá', 'làn nhanh new_rows mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h');
   ss.toast('Đã cài tự động hoá. Làn nhanh xử lý file mới mỗi 1 phút; không cần bấm menu để cập nhật sheet.');
 }
 
@@ -758,180 +737,6 @@ function ensureRegistry() {
   ]]);
   if (isNew) decorateRegistry(reg);
   return reg;
-}
-
-function _trialSharedFolder() {
-  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID_EARLY);
-  return getOrCreateFolder(parent, TRIAL_SHARED_NAME);
-}
-
-function ensureTraiNghiem() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  let kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
-  if (!kh) kh = ss.insertSheet(TRIAL_CLIENT_TAB);
-  kh.getRange(1, 1, 1, 7).setValues([[
-    'Tên khách', 'Email', 'Ngày cấp', 'Ngày hết hạn', 'Còn lại', 'Trạng thái', 'Xóa'
-  ]]);
-  kh.getRange(1, 1, 1, 7).setBackground('#8e24aa').setFontColor('#fff').setFontWeight('bold');
-  kh.setFrozenRows(1);
-  // Ngày cấp / Ngày hết hạn: ép 24 GIỜ (HH) cho CẢ CỘT (moi dong, ke ca dong cu) — mac dinh
-  // locale la 12h nen 21:34 hien nham 9:34. Format ca cot de khong sot o nao.
-  kh.getRange(2, 3, Math.max(1, kh.getMaxRows() - 1), 2).setNumberFormat('dd/mm/yyyy HH:mm:ss');
-  if (kh.getLastRow() > 1) {
-    kh.getRange(2, TRIAL_DEL_COL, kh.getLastRow() - 1, 1).insertCheckboxes();
-  }
-
-  let tl = ss.getSheetByName(TRIAL_DOC_TAB);
-  if (!tl) tl = ss.insertSheet(TRIAL_DOC_TAB);
-  tl.getRange(1, 1, 1, 3).setValues([['Tên tài liệu', 'Trạng thái', 'Xóa']]);
-  tl.getRange(1, 1, 1, 3).setBackground('#8e24aa').setFontColor('#fff').setFontWeight('bold');
-  tl.setFrozenRows(1);
-  // KHÔNG đụng DriveApp ở đây: ensureTraiNghiem chạy trong onOpen (simple trigger,
-  // bị cấm gọi DriveApp). Folder chung sẽ được _trialSharedFolder() tạo khi chạy
-  // từ menu/trigger/form (đủ quyền).
-}
-
-// Quét folder chung -> dựng lại tab Tài liệu trải nghiệm + khóa tải từng file.
-// GIỮ NGUYÊN tick ☑Xóa đang có (theo tên file) để rebuild không nuốt tick người dùng.
-function capNhatTaiLieuTraiNghiem() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  ensureTraiNghiem();
-  const tl = ss.getSheetByName(TRIAL_DOC_TAB);
-  const shared = _trialSharedFolder();
-
-  const oldTicks = {}; // ten file -> tick dang co
-  if (tl.getLastRow() > 1) {
-    tl.getRange(2, 1, tl.getLastRow() - 1, 3).getValues().forEach(r => {
-      if (r[0]) oldTicks[String(r[0])] = r[TRIAL_DOC_DEL_COL - 1] === true;
-    });
-  }
-
-  const rows = [];
-  const files = shared.getFiles();
-  while (files.hasNext()) {
-    const f = files.next();
-    _khoaTaiFileTraiNghiem(f);
-    rows.push([f.getName(), 'Trong chương trình', oldTicks[f.getName()] === true]);
-  }
-  if (tl.getLastRow() > 1) tl.getRange(2, 1, tl.getLastRow() - 1, 3).clearContent();
-  if (rows.length) {
-    tl.getRange(2, 1, rows.length, 3).setValues(rows);
-    tl.getRange(2, TRIAL_DOC_DEL_COL, rows.length, 1).insertCheckboxes();
-  }
-}
-
-function _khoaTaiFileTraiNghiem(file) {
-  try {
-    Drive.Files.update({ copyRequiresWriterPermission: true }, file.getId());
-    return true;
-  } catch (e) {
-    ghiLog('LỖI khóa tải tài liệu trải nghiệm',
-      file.getName() + ' -> ' + (e && e.message ? e.message : String(e)));
-    return false;
-  }
-}
-
-// Trigger riêng 1 phút: thu hẹp khoảng hở giữa lúc watcher render file lên Drive và lúc Apps Script khóa tải.
-// Lưu ý: owner/editor vẫn thấy nút Download; thiết lập này chặn viewer/commenter.
-function khoaTaiTraiNghiemLienTuc() {
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) return;
-  try {
-    ensureTraiNghiem();
-    const shared = _trialSharedFolder();
-    const files = shared.getFiles();
-    let total = 0, failed = 0;
-    while (files.hasNext()) {
-      total++;
-      if (!_khoaTaiFileTraiNghiem(files.next())) failed++;
-    }
-    if (failed) ghiLog('Khóa tải trải nghiệm còn lỗi', failed + '/' + total + ' file');
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// Khách trải nghiệm quá hạn (72h) -> gỡ quyền xem folder chung của RIÊNG khách đó.
-function kiemTraHetHanTraiNghiem() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  ensureTraiNghiem();
-  const kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
-  const last = kh.getLastRow();
-  if (last < 2) return;
-  const now = _now();
-  const shared = _trialSharedFolder();
-  const vals = kh.getRange(2, 1, last - 1, 6).getValues();
-  const out = [];
-  for (let i = 0; i < vals.length; i++) {
-    const name = vals[i][0];
-    const email = vals[i][1];
-    const expiry = vals[i][3];
-    let status = vals[i][5];
-    if (email && expiry && status !== 'Đã gỡ (hết hạn)' && new Date(expiry).getTime() <= now.getTime()) {
-      try { shared.removeViewer(String(email)); } catch (e) {}
-      status = 'Đã gỡ (hết hạn)';
-      ghiLog('Trải nghiệm hết hạn - gỡ quyền', name + ' - ' + email);
-    }
-    const remaining = expiry ? _fmtRemaining(_hoursBetween(now, new Date(expiry))) : '';
-    out.push([remaining, status]);
-  }
-  kh.getRange(2, 5, out.length, 2).setValues(out);
-}
-
-// Xóa các khách trải nghiệm đã tick cột G: gỡ quyền + xóa dòng.
-function xoaKhachTraiNghiemDaTich() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
-  if (!kh || kh.getLastRow() < 2) return;
-  const shared = _trialSharedFolder();
-  const data = kh.getRange(2, 1, kh.getLastRow() - 1, 7).getValues();
-  for (let i = data.length - 1; i >= 0; i--) {
-    if (data[i][TRIAL_DEL_COL - 1] === true) {
-      try { shared.removeViewer(String(data[i][1])); } catch (e) {}
-      kh.deleteRow(i + 2);
-      ghiLog('Xóa khách trải nghiệm', data[i][0] + ' - ' + data[i][1]);
-    }
-  }
-}
-
-// Xóa các tài liệu trải nghiệm đã tick cột C: trash file trong folder chung + xóa dòng.
-function xoaTaiLieuTraiNghiemDaTich() {
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const tl = ss.getSheetByName(TRIAL_DOC_TAB);
-  if (!tl || tl.getLastRow() < 2) return;
-  const shared = _trialSharedFolder();
-  const data = tl.getRange(2, 1, tl.getLastRow() - 1, 3).getValues();
-  for (let i = data.length - 1; i >= 0; i--) {
-    if (data[i][TRIAL_DOC_DEL_COL - 1] === true) {
-      const fs = shared.getFilesByName(String(data[i][0]));
-      while (fs.hasNext()) fs.next().setTrashed(true);
-      tl.deleteRow(i + 2);
-      ghiLog('Xóa tài liệu trải nghiệm', data[i][0]);
-    }
-  }
-}
-
-// NÚT SAU CÙNG: xóa CẢ chương trình — trash mọi tài liệu + gỡ quyền mọi khách + trống 2 tab.
-function xoaChuongTrinhTraiNghiem() {
-  const ui = SpreadsheetApp.getUi();
-  const resp = ui.alert('Xóa CẢ chương trình trải nghiệm?',
-    'Sẽ xóa MỌI tài liệu trong folder chung, gỡ quyền MỌI khách trải nghiệm, và làm trống 2 tab. Không hoàn tác.',
-    ui.ButtonSet.YES_NO);
-  if (resp !== ui.Button.YES) return;
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const shared = _trialSharedFolder();
-  const kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
-  if (kh && kh.getLastRow() > 1) {
-    const emails = kh.getRange(2, 2, kh.getLastRow() - 1, 1).getValues();
-    emails.forEach(r => { if (r[0]) { try { shared.removeViewer(String(r[0])); } catch (e) {} } });
-    kh.getRange(2, 1, kh.getLastRow() - 1, 7).clearContent();
-  }
-  const files = shared.getFiles();
-  while (files.hasNext()) files.next().setTrashed(true);
-  const tl = ss.getSheetByName(TRIAL_DOC_TAB);
-  if (tl && tl.getLastRow() > 1) tl.getRange(2, 1, tl.getLastRow() - 1, 3).clearContent();
-  ghiLog('XÓA CẢ CHƯƠNG TRÌNH trải nghiệm', 'đã trash tài liệu + gỡ mọi khách');
-  ui.alert('Đã xóa cả chương trình trải nghiệm.');
 }
 
 function _today() {
@@ -1793,16 +1598,6 @@ const INCOMING_DOCS_NAME = '_don_them_tai_lieu'; // nơi chứa PDF tài liệu 
 const BOT_DOCS_FORM_NAME = '_don_them_tai_lieu_bot'; // PDF chỉ nạp cho AI/bot, không phân phối khách
 const INCOMING_BOT_MD_NAME = '_don_them_tai_lieu_bot_md'; // .md chỉ nạp cho AI/bot, không phân phối khách
 
-const TRIAL_HOURS = 72;
-const TRIAL_NAME = 'Nguyễn Văn A';
-const TRIAL_EMAIL = 'nguyenvana@gmail.com';
-const TRIAL_CLIENT_TAB = 'Khách trải nghiệm';
-const TRIAL_DOC_TAB = 'Tài liệu trải nghiệm';
-const TRIAL_SHARED_NAME = 'TÀI LIỆU TRẢI NGHIỆM';
-const INCOMING_TRIAL_NAME = '_don_them_tai_lieu_trai_nghiem';
-const TRIAL_DEL_COL = 7;      // cột G tab Khách trải nghiệm: ☑Xóa
-const TRIAL_DOC_DEL_COL = 3;  // cột C tab Tài liệu trải nghiệm: ☑Xóa
-
 // Mở form theo ID nếu form còn sống (không bị xoá/thùng rác); ngược lại trả null.
 function _openFormIfAlive(id) {
   if (!id) return null;
@@ -1887,81 +1682,6 @@ function taoLaiFormMd() {
     + 'Link GỬI quản lý: ' + form.getPublishedUrl();
   Logger.log(msg);
   SpreadsheetApp.getUi().alert(msg);
-}
-
-// ===== CHƯƠNG TRÌNH TRẢI NGHIỆM: FORM + HANDLER =====
-
-function taoLaiFormKhachTraiNghiem() {
-  const props = PropertiesService.getScriptProperties();
-  const form = FormApp.create('HVHN — Thêm khách TRẢI NGHIỆM');
-  form.setDescription('Nhập họ tên + email để cấp quyền xem tài liệu trải nghiệm (' + TRIAL_HOURS + ' giờ).');
-  form.addTextItem().setTitle('Họ và tên').setRequired(true);
-  form.addTextItem().setTitle('Email (Gmail)').setRequired(true);
-  form.setConfirmationMessage('Đã nhận! Bạn sẽ được cấp quyền xem tài liệu trải nghiệm.');
-  form.setAcceptingResponses(true);
-  ScriptApp.newTrigger('xuLyFormKhachTraiNghiem').forForm(form).onFormSubmit().create();
-  props.setProperty('FORM_KHACH_TN_ID', form.getId());
-  const msg = 'Đã tạo Form THÊM KHÁCH TRẢI NGHIỆM. Link gửi quản lý:\n\n' + form.getPublishedUrl();
-  Logger.log(msg); SpreadsheetApp.getUi().alert(msg);
-}
-
-// onFormSubmit (installable trigger) -> được phép gọi DriveApp.
-// Thêm dòng vào tab Khách trải nghiệm (hạn 72h) + cấp quyền xem folder chung NGAY.
-function xuLyFormKhachTraiNghiem(e) {
-  if (!_formAllowed(e)) return;
-  let name = '', email = '';
-  e.response.getItemResponses().forEach(it => {
-    const t = it.getItem().getTitle().toLowerCase();
-    if (t.indexOf('tên') >= 0) name = String(it.getResponse()).trim();
-    else if (t.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
-  });
-  if (!name || !email) return;
-  ensureTraiNghiem();
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
-  const kh = ss.getSheetByName(TRIAL_CLIENT_TAB);
-  const now = _now();
-  const expiry = _addHours(now, TRIAL_HOURS);
-  kh.appendRow([name, email, now, expiry, '', 'Còn hạn', false]);
-  const shared = _trialSharedFolder();
-  try { shared.addViewer(email); } catch (err) { ghiLog('LỖI cấp quyền trải nghiệm', email + ' -> ' + err); }
-  ghiLog('Thêm khách trải nghiệm', name + ' - ' + email);
-}
-
-function taoLaiFormTaiLieuTraiNghiem() {
-  const props = PropertiesService.getScriptProperties();
-  const form = FormApp.create('HVHN — Thêm tài liệu TRẢI NGHIỆM');
-  form.setDescription('Tải lên PDF cho chương trình trải nghiệm. Watermark cố định "' + TRIAL_NAME + '", phân phối vào folder chung.');
-  form.addTextItem().setTitle('Tên tài liệu (tuỳ chọn, để trống sẽ dùng tên file)');
-  // Apps Script không tạo được câu hỏi upload -> thêm tay 1 câu "Tải tệp lên" trong link SỬA.
-  form.setConfirmationMessage('Đã nhận file. Watcher trên PC sẽ đóng dấu + đưa vào folder chung.');
-  form.setAcceptingResponses(true);
-  ScriptApp.newTrigger('xuLyFormTaiLieuTraiNghiem').forForm(form).onFormSubmit().create();
-  props.setProperty('FORM_TL_TN_ID', form.getId());
-  const msg = 'Đã tạo Form THÊM TÀI LIỆU TRẢI NGHIỆM.\n\n'
-    + 'Mở link SỬA thêm tay 1 câu "Tải tệp lên" (PDF):\n' + form.getEditUrl()
-    + '\n\nLink GỬI quản lý: ' + form.getPublishedUrl();
-  Logger.log(msg); SpreadsheetApp.getUi().alert(msg);
-}
-
-// Handler: copy PDF trải nghiệm vào folder đơn _don_them_tai_lieu_trai_nghiem (watcher render).
-function xuLyFormTaiLieuTraiNghiem(e) {
-  if (!_formAllowed(e)) return;
-  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
-  const incoming = getOrCreateFolder(parent, INCOMING_TRIAL_NAME);
-  let tenTL = '';
-  let fileIds = [];
-  e.response.getItemResponses().forEach(it => {
-    const type = it.getItem().getType();
-    if (type === FormApp.ItemType.FILE_UPLOAD) fileIds = fileIds.concat(it.getResponse());
-    else if (type === FormApp.ItemType.TEXT) tenTL = String(it.getResponse()).trim();
-  });
-  fileIds.forEach(id => {
-    const f = DriveApp.getFileById(id);
-    let newName = f.getName();
-    if (tenTL) newName = tenTL.replace(/[\\\/:*?"<>|]/g, '').trim() + '.pdf';
-    if (!/\.pdf$/i.test(newName)) newName += '.pdf';
-    f.makeCopy(newName, incoming);
-  });
 }
 
 function caiDatForm() {
@@ -2499,29 +2219,93 @@ function doGet(e) {
 // ============================================================================
 // =============== KHÁCH PRE-ORDER: FORM -> INVITE DISCORD RIÊNG =============
 // ============================================================================
-// Form này dành cho người đã đặt slot từ trước, không đi qua PayOS. Chỉ email
-// có trong allowlist Script Properties mới nhận invite; nhờ vậy link Form bị lộ
-// cũng không thể được dùng để vào nhóm miễn phí.
+// Form này dành cho người đã đặt slot từ trước, không đi qua PayOS. Allowlist
+// được đọc sống từ Google Sheet responses cũ, độc lập với Sheet Phân phối.
+// Tab _khach_preorder chỉ là nhật ký cấp invite + chống submit lần hai.
 
 const PREORDER_TAB = '_khach_preorder';
-const PREORDER_ALLOWED_EMAILS_PROP = 'PREORDER_ALLOWED_EMAILS';
 const PREORDER_FORM_ID_PROP = 'FORM_PREORDER_ID';
+const PREORDER_SOURCE_SPREADSHEET_ID_PROP = 'PREORDER_SOURCE_SPREADSHEET_ID';
+const PREORDER_SOURCE_GID_PROP = 'PREORDER_SOURCE_GID';
+const PREORDER_SOURCE_SHEET_NAME_PROP = 'PREORDER_SOURCE_SHEET_NAME';
+const PREORDER_SOURCE_EMAIL_HEADER_PROP = 'PREORDER_SOURCE_EMAIL_HEADER';
+const PREORDER_DEFAULT_SOURCE_SPREADSHEET_ID = '1YB9tc7mHoLijcSJgUwSGiE1z-kQwTSPF03An92sgw68';
+const PREORDER_DEFAULT_SOURCE_GID = '368858728';
+const PREORDER_DEFAULT_EMAIL_HEADER = 'Gmail của bạn là gì?';
 
-function _preorderEmailsFromText(text) {
+function _preorderSourceFromInput(value) {
+  const text = String(value || '').trim();
+  if (!text) return { spreadsheetId: '', gid: '' };
+  const idMatch = text.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/) || text.match(/[?&]id=([a-zA-Z0-9-_]+)/);
+  const gidMatch = text.match(/[?&#]gid=([0-9]+)/);
+  return {
+    spreadsheetId: idMatch ? idMatch[1] : text,
+    gid: gidMatch ? gidMatch[1] : '',
+  };
+}
+
+function _preorderSourceConfig() {
+  const props = PropertiesService.getScriptProperties();
+  return {
+    spreadsheetId: props.getProperty(PREORDER_SOURCE_SPREADSHEET_ID_PROP) || PREORDER_DEFAULT_SOURCE_SPREADSHEET_ID,
+    gid: props.getProperty(PREORDER_SOURCE_GID_PROP) || PREORDER_DEFAULT_SOURCE_GID,
+    sheetName: props.getProperty(PREORDER_SOURCE_SHEET_NAME_PROP) || '',
+    emailHeader: props.getProperty(PREORDER_SOURCE_EMAIL_HEADER_PROP) || PREORDER_DEFAULT_EMAIL_HEADER,
+  };
+}
+
+function _preorderSheetByGid(spreadsheet, gid) {
+  const target = Number(gid || 0);
+  if (!target) return null;
+  const sheets = spreadsheet.getSheets();
+  for (let i = 0; i < sheets.length; i++) {
+    if (sheets[i].getSheetId() === target) return sheets[i];
+  }
+  return null;
+}
+
+function _preorderEmailColumnIndex(headers, configuredHeader) {
+  const normalized = headers.map(h => String(h || '').trim().toLowerCase());
+  if (configuredHeader) {
+    const needle = String(configuredHeader || '').trim().toLowerCase();
+    const exact = normalized.indexOf(needle);
+    if (exact >= 0) return exact;
+    return -1;
+  }
+  for (let i = 0; i < normalized.length; i++) {
+    if (normalized[i] === 'email' || normalized[i].indexOf('email') >= 0 || normalized[i].indexOf('gmail') >= 0) {
+      return i;
+    }
+  }
+  return -1;
+}
+
+function _preorderEmailsFromSourceSheet() {
+  const cfg = _preorderSourceConfig();
+  if (!cfg.spreadsheetId) return [];
+  const src = SpreadsheetApp.openById(cfg.spreadsheetId);
+  const sh = _preorderSheetByGid(src, cfg.gid) || (cfg.sheetName ? src.getSheetByName(cfg.sheetName) : src.getSheets()[0]);
+  if (!sh) throw new Error('Không tìm thấy tab responses cũ.');
+  const values = sh.getDataRange().getValues();
+  if (values.length < 2) return [];
+  const col = _preorderEmailColumnIndex(values[0], cfg.emailHeader);
+  if (col < 0) {
+    throw new Error('Không tìm thấy cột email trong sheet responses cũ. Hãy cấu hình đúng tiêu đề cột email.');
+  }
   const seen = {};
   const emails = [];
-  String(text || '').split(/[\s,;]+/).forEach(raw => {
-    const email = String(raw || '').trim().toLowerCase();
-    if (!email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || seen[email]) return;
+  for (let r = 1; r < values.length; r++) {
+    const email = String(values[r][col] || '').trim().toLowerCase();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || seen[email]) continue;
     seen[email] = true;
     emails.push(email);
-  });
+  }
   return emails;
 }
 
 function _preorderAllowedEmails() {
   const allowed = {};
-  _preorderEmailsFromText(_pmtProp(PREORDER_ALLOWED_EMAILS_PROP, '')).forEach(email => { allowed[email] = true; });
+  _preorderEmailsFromSourceSheet().forEach(email => { allowed[email] = true; });
   return allowed;
 }
 
@@ -2548,17 +2332,39 @@ function _preorderCode(email) {
 
 function caiDatEmailPreorder() {
   const ui = SpreadsheetApp.getUi();
-  const existing = _preorderEmailsFromText(_pmtProp(PREORDER_ALLOWED_EMAILS_PROP, ''));
-  const response = ui.prompt(
-    'Danh sách khách pre-order',
-    'Dán email của những khách ĐÃ được chốt slot. Có thể ngăn cách bằng dòng mới, dấu phẩy hoặc dấu chấm phẩy.\n\nDanh sách mới sẽ thay thế danh sách cũ. Hiện có: ' + existing.length + ' email.',
+  const props = PropertiesService.getScriptProperties();
+  const current = _preorderSourceConfig();
+  const sourceResp = ui.prompt(
+    'Kết nối sheet responses cũ',
+    'Dán URL hoặc ID của Google Sheet responses cũ đang ghi đơn mua của khách.\n\nHiện tại: ' + (current.spreadsheetId || '(chưa cài)'),
     ui.ButtonSet.OK_CANCEL
   );
-  if (response.getSelectedButton() !== ui.Button.OK) return;
-  const emails = _preorderEmailsFromText(response.getResponseText());
-  PropertiesService.getScriptProperties().setProperty(PREORDER_ALLOWED_EMAILS_PROP, emails.join('\n'));
-  ghiLog('Cập nhật allowlist pre-order', emails.length + ' email');
-  ui.alert('Đã lưu ' + emails.length + ' email pre-order hợp lệ. Chỉ các email này mới nhận được link Discord từ Form.');
+  if (sourceResp.getSelectedButton() !== ui.Button.OK) return;
+  const parsedSource = _preorderSourceFromInput(sourceResp.getResponseText());
+  if (!parsedSource.spreadsheetId) { ui.alert('Chưa nhập URL/ID Google Sheet responses cũ.'); return; }
+
+  const sheetResp = ui.prompt(
+    'Tên tab responses',
+    'Nhập tên tab chứa responses. Để trống sẽ dùng tab đầu tiên.\n\nHiện tại: ' + (current.sheetName || '(tab đầu tiên)'),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (sheetResp.getSelectedButton() !== ui.Button.OK) return;
+
+  const headerResp = ui.prompt(
+    'Cột email khách',
+    'Nhập đúng tiêu đề cột chứa email khách. Mặc định là "Gmail của bạn là gì?". Hệ thống sẽ tìm chính xác tiêu đề này.\n\nHiện tại: ' + current.emailHeader,
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (headerResp.getSelectedButton() !== ui.Button.OK) return;
+
+  props.setProperty(PREORDER_SOURCE_SPREADSHEET_ID_PROP, parsedSource.spreadsheetId);
+  props.setProperty(PREORDER_SOURCE_GID_PROP, parsedSource.gid || current.gid || '');
+  props.setProperty(PREORDER_SOURCE_SHEET_NAME_PROP, String(sheetResp.getResponseText() || '').trim());
+  props.setProperty(PREORDER_SOURCE_EMAIL_HEADER_PROP, String(headerResp.getResponseText() || '').trim() || PREORDER_DEFAULT_EMAIL_HEADER);
+
+  const emails = _preorderEmailsFromSourceSheet();
+  ghiLog('Kết nối allowlist pre-order từ sheet responses cũ', emails.length + ' email');
+  ui.alert('Đã kết nối sheet responses cũ. Hiện đọc được ' + emails.length + ' email hợp lệ. Từ giờ allowlist tự cập nhật khi sheet responses có dòng mới.');
 }
 
 function _taoFormPreorder(props) {
@@ -2577,8 +2383,11 @@ function taoLaiFormPreorder() {
   const props = PropertiesService.getScriptProperties();
   let form = _openFormIfAlive(props.getProperty(PREORDER_FORM_ID_PROP));
   if (!form) form = _taoFormPreorder(props);
-  const count = _preorderEmailsFromText(_pmtProp(PREORDER_ALLOWED_EMAILS_PROP, '')).length;
-  const msg = 'Form xác nhận slot pre-order:\n\n' + form.getPublishedUrl() + '\n\nAllowlist hiện có ' + count + ' email. Chỉ email trong allowlist mới nhận invite Discord.';
+  const cfg = _preorderSourceConfig();
+  let sourceStatus = cfg.spreadsheetId ? 'đã kết nối sheet responses cũ' : 'chưa kết nối sheet responses cũ';
+  let count = 0;
+  if (cfg.spreadsheetId) count = _preorderEmailsFromSourceSheet().length;
+  const msg = 'Form xác nhận slot pre-order:\n\n' + form.getPublishedUrl() + '\n\nAllowlist: ' + sourceStatus + ', hiện đọc được ' + count + ' email. Chỉ email có trong sheet responses cũ mới nhận invite Discord.';
   Logger.log(msg); SpreadsheetApp.getUi().alert(msg);
 }
 
@@ -2620,8 +2429,9 @@ function xuLyFormPreorder(e) {
       else if (title.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
     });
     if (!name || !email) return;
-    if (!_preorderAllowedEmails()[email]) {
-      ghiLog('Từ chối Form pre-order (email ngoài allowlist)', email);
+    const allowed = _preorderAllowedEmails();
+    if (!allowed[email]) {
+      ghiLog('Từ chối Form pre-order (email không có trong sheet responses cũ)', email);
       return;
     }
     const sheet = _preorderSheet();

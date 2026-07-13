@@ -8,7 +8,8 @@
 > Phần lịch sử SePay được giữ lại ở đây chỉ để biết vì sao kiến trúc cũ đã bị loại.
 >
 > **Bổ sung 2026-07-13 — khách pre-order:** menu `HVHN → 🎟️ Khách pre-order` tạo/lấy lại một Google
-> Form dùng chung cho allowlist email. Mỗi email hợp lệ nhận một invite Discord riêng qua bot `/mint-invite`,
+> Form dùng chung. Allowlist email được đọc sống từ sheet responses cũ độc lập
+> `1YB9tc7mHoLijcSJgUwSGiE1z-kQwTSPF03An92sgw68` (`gid=368858728`). Mỗi email hợp lệ nhận một invite Discord riêng qua bot `/mint-invite`,
 > rồi tiếp tục bước **Kích hoạt quyền truy cập tài liệu** trong kênh `#truy-cập-tài-liệu` và watcher như khách PayOS. Hướng dẫn vận hành ở mục 9 của
 > `HUONG_DAN_PAYOS_QR_TU_DONG.md`.
 
@@ -80,7 +81,7 @@ cũng có email, và trùng luôn email nhận tài liệu của watcher). Khôn
 ## 3. Đã làm — PHÍA GOOGLE (Apps Script `phanphoi.gs`). ĐÃ XONG code, CHƯA cấu hình chạy thật.
 
 `phanphoi.gs` là Apps Script gắn với Google Sheet phân phối (hệ tài liệu email-centric, có sẵn từ trước:
-phân phối PDF theo email qua Drive, trigger 5 phút, chương trình trải nghiệm…). Phase 3 được **cắm thêm**
+phân phối PDF theo email qua Drive, trigger 5 phút). Phase 3 được **cắm thêm**
 vào cuối file, tái dùng `ghiLog`, `getOrCreateFolder`, pattern form/trigger sẵn có. KHÔNG có `doPost`/
 `onFormSubmit` toàn cục trước đó → không xung đột.
 
