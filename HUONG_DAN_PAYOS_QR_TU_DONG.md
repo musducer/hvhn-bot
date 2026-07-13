@@ -126,6 +126,21 @@ Chỉ sau khi cả 7 bước đều đúng mới công khai Form.
 - Nếu khách đã trả tiền nhưng không nhận Discord: kiểm tra tab `Nhật ký` trước, sau đó chọn đúng dòng tại `_don_dat_mua` và dùng **🔁 Gửi lại link Discord cho đơn đang chọn**.
 - Nút **🧪 Test webhook bằng mã đơn đang chọn** là thao tác thật: nó cấp invite và gửi email thật. Chỉ dùng với đơn test hoặc khi hiểu rõ hậu quả.
 
+### Tốc độ xử lý tài liệu
+
+Phiên bản hiện tại có hai làn chạy: watcher quét folder local mỗi **10 giây** và Apps Script có một
+trigger nhanh mỗi **1 phút** chỉ để nhận `new_rows*.csv`/phân phối file mới. Việc dọn dẹp, gia hạn và
+quét tổng vẫn chạy mỗi 5 phút để không lãng phí quota Google.
+
+Sau khi dán/deploy `phanphoi.gs` mới, mở Sheet và bấm **HVHN → ⚙️ Cài/kiểm tra tự động hoá** một lần để
+thay trigger cũ bằng trigger nhanh. Sau đó restart `watcher.py` để nhận cấu hình mới.
+
+- Mặc định watcher dùng `HVHN_WATCHER_POLL_SECONDS=10`. Có thể đặt biến này trong `.env` thành `5` nếu
+  máy và Google Drive Desktop ổn định; không nên thấp hơn 5 giây.
+- Thời gian còn lại phụ thuộc Google Drive Desktop upload file watermark lên cloud. Nếu file PDF lớn hoặc
+  Drive đang đồng bộ nhiều dữ liệu, đây sẽ là nút thắt chính. Muốn bỏ hẳn chặng này cần chuyển watcher sang
+  upload Google Drive API trực tiếp — một thay đổi kiến trúc riêng.
+
 ## 6. Các trạng thái cần hiểu
 
 | Trạng thái | Ý nghĩa | Bạn làm gì |

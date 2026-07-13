@@ -31,6 +31,8 @@ from pdf_knowledge import (
 )
 from md_knowledge import MD_KNOWLEDGE_SCHEMA, index_md_path
 
+load_dotenv()
+
 # Các folder đơn hàng (nằm cạnh folder Source, do Apps Script tạo + Form/menu ghi vào)
 MIRROR_PARENT = os.path.dirname(MIRROR_SOURCE)
 JOBS_KHACH = os.path.join(MIRROR_PARENT, "_don_them_khach")
@@ -49,11 +51,12 @@ SHEET_XOA_TAILIEU = os.path.join(MIRROR_PARENT, "_don_sheet_xoa_tai_lieu")  # Di
 SHEET_GIAHAN_KHACH = os.path.join(MIRROR_PARENT, "_don_sheet_giahan_khach") # Discord -> Apps Script gia hạn
 SHEET_STATUS_FILE = os.path.join(MIRROR_PARENT, "_sheet_status", "sheet_status.json")
 
-POLL_SECONDS = 30
+# Làn nhận đơn từ Drive Desktop. 10 giây giảm đáng kể thời gian chờ file vừa đồng
+# bộ xuống máy; có thể tăng lại qua .env nếu máy/Drive quá yếu.
+POLL_SECONDS = max(5, int(os.getenv("HVHN_WATCHER_POLL_SECONDS", "10")))
 PDF_SYNC_SECONDS = 600
 LAST_PDF_SYNC = 0
 
-load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_DOCS_DIR = os.getenv("HVHN_BOT_DOCS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_docs"))
 STALE_PROCESSING_MINUTES = int(os.getenv("HVHN_STALE_PROCESSING_MINUTES", "30"))

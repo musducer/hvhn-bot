@@ -259,7 +259,8 @@ function mergeRowsIntoClientTabs(ss, rows) {
 // đọc nội dung, gộp vào đúng tab khách, xoá file đã xử lý, rồi phân phối + cập nhật Dashboard.
 // Gắn hàm này vào 1 Trigger chạy theo giờ (Triggers > Add Trigger > Time-driven) để tự chạy định kỳ,
 // khỏi cần mở Sheet lên bấm gì cả.
-function tuDongXuLyFileMoi() {
+function tuDongXuLyFileMoi(options) {
+  options = options || {};
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
   // Quét mọi file tên bắt đầu bằng "new_rows" và đuôi .csv (watcher ghi new_rows_<timestamp>.csv)
@@ -278,9 +279,26 @@ function tuDongXuLyFileMoi() {
   }
 
   if (mergedAny) Logger.log(`Đã gộp ${totalAdded} dòng mới từ new_rows*.csv`);
-  // LUÔN chạy phanPhoi: dòng "Xong" tự bỏ qua; dòng "Không thấy file" (do PDF upload chưa
-  // kịp lần trước) sẽ được thử lại ở lần trigger sau — tự chữa lành, không kẹt.
-  phanPhoi();
+  // Trigger tổng 5 phút vẫn LUÔN chạy phanPhoi: dòng "Không thấy file" (PDF upload
+  // chậm hơn CSV) sẽ tự được thử lại. Làn nhanh 1 phút thì chỉ chạy khi CÓ CSV mới,
+  // tránh quét/ghi lại toàn bộ Sheet và Drive mỗi phút khi hệ thống đang rảnh.
+  if (mergedAny || !options.skipDistributionWhenIdle) phanPhoi();
+  return { mergedAny: mergedAny, totalAdded: totalAdded };
+}
+
+// LÀN NHANH 1 PHÚT: chỉ kéo new_rows*.csv mới từ watcher rồi phân phối ngay.
+// Không chạy gia hạn/dọn dẹp/dashboard toàn hệ thống; những việc đó vẫn ở trigger 5 phút.
+function hvhnXuLyNhanh() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    tuDongXuLyFileMoi({ skipDistributionWhenIdle: true });
+  } catch (e) {
+    ghiLog('LỖI làn nhanh', e.message || String(e));
+    throw e;
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // TRIGGER 5 PHÚT: gom toàn bộ việc cần tự động hoá vào 1 hàm duy nhất.
@@ -316,6 +334,7 @@ function hvhnTuDongHoa() {
 function _triggerHandlers() {
   return {
     hvhnTuDongHoa: true,
+    hvhnXuLyNhanh: true,
     tuDongXuLyFileMoi: true,
     kiemTraHetHan: true,
     khoaTaiTraiNghiemLienTuc: true,
@@ -344,6 +363,7 @@ function kiemTraTuDongHoa() {
     '',
     'Số trigger hiện tại:',
     '- hvhnTuDongHoa: ' + (counts.hvhnTuDongHoa || 0),
+    '- hvhnXuLyNhanh: ' + (counts.hvhnXuLyNhanh || 0),
     '- khoaTaiTraiNghiemLienTuc: ' + (counts.khoaTaiTraiNghiemLienTuc || 0),
     '- kiemTraHetHan: ' + (counts.kiemTraHetHan || 0),
     '',
@@ -355,11 +375,12 @@ function kiemTraTuDongHoa() {
 }
 
 function damBaoTuDongHoa() {
-  if (!_coTrigger('hvhnTuDongHoa') || !_coTrigger('khoaTaiTraiNghiemLienTuc') || !_coTrigger('kiemTraHetHan')) {
+  if (!_coTrigger('hvhnTuDongHoa') || !_coTrigger('hvhnXuLyNhanh')
+      || !_coTrigger('khoaTaiTraiNghiemLienTuc') || !_coTrigger('kiemTraHetHan')) {
     caiDatTuDongHoa();
     return;
   }
-  SpreadsheetApp.getActiveSpreadsheet().toast('Trigger tự động đã có: hvhnTuDongHoa mỗi 5 phút + khóa tải mỗi 1 phút.');
+  SpreadsheetApp.getActiveSpreadsheet().toast('Trigger đã có: làn nhanh mỗi 1 phút + tự động hoá tổng mỗi 5 phút + khóa tải mỗi 1 phút.');
 }
 
 function caiDatTuDongHoa() {
@@ -372,6 +393,11 @@ function caiDatTuDongHoa() {
   ScriptApp.newTrigger('hvhnTuDongHoa')
     .timeBased()
     .everyMinutes(5)
+    .create();
+
+  ScriptApp.newTrigger('hvhnXuLyNhanh')
+    .timeBased()
+    .everyMinutes(1)
     .create();
 
   ScriptApp.newTrigger('khoaTaiTraiNghiemLienTuc')
@@ -390,8 +416,8 @@ function caiDatTuDongHoa() {
   ensureRegistry();
   capNhatTaiLieu();
   capNhatDashboard();
-  ghiLog('Cài tự động hoá', 'hvhnTuDongHoa mỗi 5 phút; khóa tải trải nghiệm mỗi 1 phút; kiemTraHetHan hằng ngày 1h');
-  ss.toast('Đã cài tự động hoá. Từ giờ không cần bấm menu để cập nhật sheet.');
+  ghiLog('Cài tự động hoá', 'làn nhanh new_rows mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; khóa tải trải nghiệm mỗi 1 phút; kiemTraHetHan hằng ngày 1h');
+  ss.toast('Đã cài tự động hoá. Làn nhanh xử lý file mới mỗi 1 phút; không cần bấm menu để cập nhật sheet.');
 }
 
 // Gộp các dòng đang nằm ở tab "Nhập mới" (đường tay dự phòng, khi không dùng new_rows.csv)

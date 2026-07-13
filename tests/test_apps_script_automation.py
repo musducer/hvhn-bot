@@ -18,6 +18,9 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function _coTrigger(handler)", self.src)
         self.assertIn("ScriptApp.newTrigger('hvhnTuDongHoa')", self.src)
         self.assertIn(".everyMinutes(5)", self.src)
+        self.assertIn("function hvhnXuLyNhanh()", self.src)
+        self.assertIn("ScriptApp.newTrigger('hvhnXuLyNhanh')", self.src)
+        self.assertIn("skipDistributionWhenIdle: true", self.src)
 
     def test_form_setup_also_installs_automation(self):
         idx_form = self.src.index("function caiDatForm()")
