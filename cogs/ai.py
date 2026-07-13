@@ -96,6 +96,10 @@ RETRIEVAL_DEBUG = os.getenv("HVHN_RETRIEVAL_DEBUG", "").strip().lower() in {"1",
 DEBUG_COMMAND_TIMEOUT_SECONDS = int(os.getenv("HVHN_DEBUG_COMMAND_TIMEOUT_SECONDS", "25"))
 PDF_DEFAULT_LIMIT = int(os.getenv("HVHN_PDF_DEFAULT_LIMIT", "7"))
 PDF_AGGREGATE_LIMIT = int(os.getenv("HVHN_PDF_AGGREGATE_LIMIT", "16"))
+# Then không có đồng hồ cắt câu trả lời: Discord giữ trạng thái thinking, còn model
+# được quyền hoàn tất suy luận. Timeout mặc định của aiohttp là 5 phút, vì vậy phải
+# đặt total=None một cách tường minh thay vì bỏ tham số timeout.
+LLM_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=None)
 TRUSTED_SOURCE_HINTS = (
     ".gov.vn",
     ".edu.vn",
@@ -984,7 +988,7 @@ class AI(commands.Cog):
         }
         if max_tokens is not None:
             payload["max_tokens"] = max_tokens
-        async with session.post(url, headers=headers, json=payload, timeout=60) as resp:
+        async with session.post(url, headers=headers, json=payload, timeout=LLM_HTTP_TIMEOUT) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 print(
@@ -1031,7 +1035,7 @@ class AI(commands.Cog):
             "contents": [{"parts": [{"text": prompt}]}],
             "generationConfig": generation_config,
         }
-        async with session.post(url, json=payload, timeout=60) as resp:
+        async with session.post(url, json=payload, timeout=LLM_HTTP_TIMEOUT) as resp:
             if resp.status != 200:
                 body = await resp.text()
                 print(
