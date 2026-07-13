@@ -7,6 +7,7 @@ from discord.ext import commands
 from discord import app_commands
 from dotenv import load_dotenv
 
+from cogs.admin_visibility import apply_admin_command_visibility
 from keep_alive import keep_alive
 from pdf_knowledge import PDF_KNOWLEDGE_SCHEMA
 from md_knowledge import MD_KNOWLEDGE_SCHEMA
@@ -247,6 +248,7 @@ class HVHNBot(commands.Bot):
         for extension in INITIAL_EXTENSIONS:
             await self.load_extension(extension)
 
+        apply_admin_command_visibility(self.tree)
         await self.tree.sync()
         print("Bot HVHN đã khởi động và đồng bộ hệ thống lệnh!", flush=True)
 

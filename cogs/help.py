@@ -2,14 +2,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-ADMIN_ONLY_COMMANDS = {
-    "giverole", "removerole", "clear", "lock", "unlock", "answer", "questions", "setup",
-    "warn", "mute", "unmute", "kick", "ban", "unban", "slowmode", "addbadword", "removebadword",
-    "announce", "hvhn_themkhach", "hvhn_tailieu_khach", "hvhn_tailieu_khach_link", "hvhn_xoakhach", "hvhn_xoatailieu",
-    "hvhn_status_full", "hvhn_retry_failed", "hvhn_khach", "hvhn_giahan",
-    "hvhn_debug_retrieval", "ai_kienthuc_them", "ai_feedback_stats", "hvhn_embed_backfill",
-    "ai_feedback_duyet",
-}
+from cogs.admin_visibility import ADMIN_ONLY_COMMANDS
 
 PAGE_SIZE = 20
 
