@@ -1,0 +1,19 @@
+[
+  {"name": "VanVN", "url": "https://vanvn.vn/", "languages": ["vi"]},
+  {"name": "Vien Van hoc VASS", "url": "https://vienvanhoc.vass.gov.vn/", "languages": ["vi"]},
+  {"name": "Van nghe Quan doi", "url": "https://vannghequandoi.com.vn/", "languages": ["vi"]},
+  {"name": "Bao Van nghe", "url": "https://baovannghe.vn/", "languages": ["vi"]},
+  {"name": "NXB Van hoc", "url": "https://nxbvanhoc.com.vn/", "languages": ["vi"]},
+  {"name": "NXB Tre", "url": "https://www.nxbtre.com.vn/", "languages": ["vi"]},
+  {"name": "NXB Kim Dong", "url": "https://nxbkimdong.com.vn/", "languages": ["vi"]},
+  {"name": "Tap chi Song Huong", "url": "http://tapchisonghuong.com.vn/", "languages": ["vi"]},
+  {"name": "Ngu van HNUE", "url": "https://nguvan.hnue.edu.vn/", "languages": ["vi"]},
+  {"name": "Tran Ngoc Hieu", "url": "https://hieutn1979.wordpress.com/tag/tr%e1%ba%a7n-ng%e1%bb%8dc-hi%e1%ba%bfu/", "languages": ["vi"]},
+  {"name": "Nobel Prize Literature", "url": "https://www.nobelprize.org/prizes/literature/", "languages": ["en"]},
+  {"name": "The Booker Prizes", "url": "https://thebookerprizes.com/", "languages": ["en"]},
+  {"name": "The Pulitzer Prizes", "url": "https://www.pulitzer.org/", "languages": ["en"]},
+  {"name": "The Paris Review", "url": "https://www.theparisreview.org/", "languages": ["en"]},
+  {"name": "Poetry Foundation", "url": "https://www.poetryfoundation.org/", "languages": ["en"]},
+  {"name": "Literary Hub", "url": "https://lithub.com/", "languages": ["en"]},
+  {"name": "World Literature Today", "url": "https://www.worldliteraturetoday.org/", "languages": ["en"]}
+]

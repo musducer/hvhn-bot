@@ -11,6 +11,7 @@ from cogs.admin_visibility import apply_admin_command_visibility
 from keep_alive import keep_alive
 from pdf_knowledge import PDF_KNOWLEDGE_SCHEMA
 from md_knowledge import MD_KNOWLEDGE_SCHEMA
+from internet_curator import INTERNET_CURATOR_SCHEMA
 
 load_dotenv()
 
@@ -23,6 +24,7 @@ INITIAL_EXTENSIONS = [
     "cogs.moderation",
     "cogs.fun",
     "cogs.ai",
+    "cogs.internet_curator",
     "cogs.doc_storage",
     "cogs.membership",
     "cogs.help",
@@ -194,6 +196,7 @@ CREATE INDEX IF NOT EXISTS idx_hvhn_members_order_code ON hvhn_members (order_co
 
 SCHEMA += PDF_KNOWLEDGE_SCHEMA
 SCHEMA += MD_KNOWLEDGE_SCHEMA
+SCHEMA += INTERNET_CURATOR_SCHEMA
 
 
 DAN_LANG_ROLE = "Dân làng Hua Tát"
