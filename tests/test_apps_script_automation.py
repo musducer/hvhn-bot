@@ -50,7 +50,8 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("_pmtMintAndSendForRow(sheet, i + 2", self.src)
 
     def test_payment_uses_payos_qr_with_fixed_amount_and_signed_webhook(self):
-        self.assertIn("const PMT_FIXED_AMOUNT = 60000", self.src)
+        self.assertIn("const PMT_DEFAULT_AMOUNT = 99999", self.src)
+        self.assertIn("function datGiaGoiHocLieu()", self.src)
         self.assertIn("function _pmtCreatePayosLink", self.src)
         self.assertIn("/v2/payment-requests", self.src)
         self.assertIn("function _pmtVerifyWebhook", self.src)
