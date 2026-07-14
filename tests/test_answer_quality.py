@@ -113,6 +113,31 @@ class AnswerQualityTest(unittest.TestCase):
         answer = 'Phong cach Nguyen Binh gan voi "chan que", mot khai niem quen thuoc trong tho ong.'
         self.assertFalse(AI._has_unverified_long_quotes(answer, ""))
 
+    def test_known_literary_fact_errors_are_flagged(self):
+        answer = (
+            "Trong cac tieu thuyet hien dai nhu Lao Hac hay Chiec thuyen ngoai xa, ta thay chat dan gian. "
+            "Nhan vat Ly Thong trong Truyen Kieu la mot sang che cua Nguyen Du, gan voi truyen thuyet Tho Tinh Ly. "
+            "Nhung ban moi cua Chinh phu nga ruou lai duoc dan gian hoa."
+        )
+        defects = AI._known_literary_fact_defects(answer)
+        self.assertGreaterEqual(len(defects), 5)
+        self.assertTrue(any("Ly Thong" in defect for defect in defects))
+        self.assertTrue(any("Lao Hac" in defect for defect in defects))
+        self.assertTrue(any("Chiec thuyen ngoai xa" in defect for defect in defects))
+        self.assertTrue(any("Chinh phu ngam" in defect for defect in defects))
+
+    def test_drop_sentences_with_known_fact_errors(self):
+        answer = (
+            "Van hoc dan gian co quan he gan bo voi van hoc viet. "
+            "Nhan vat Ly Thong trong Truyen Kieu la mot sang che cua Nguyen Du. "
+            "Van hoc viet tiep thu chat lieu dan gian roi tai tao thanh nhung gia tri moi."
+        )
+        cleaned = AI._drop_sentences_with_known_fact_errors(answer)
+        self.assertNotIn("Ly Thong", cleaned)
+        self.assertNotIn("Truyen Kieu la mot sang che", cleaned)
+        self.assertIn("Van hoc dan gian", cleaned)
+        self.assertIn("tai tao", cleaned)
+
 
 if __name__ == "__main__":
     unittest.main()

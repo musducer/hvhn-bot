@@ -2017,6 +2017,7 @@ class AI(commands.Cog):
             f"{web_block}\n\n"
             "QUY TAC BAT BUOC:\n"
             "- Khong bia tac gia, tac pham, nhan vat, nam thang, hoan canh sang tac, trich dan, nhan dinh phe binh.\n"
+            "- Truoc khi dua vi du, bat buoc tu doi chieu cap tac pham-nhan vat-the loai. Neu khong chac, dung vi du khac hoac noi khong du can cu. Vi du loi cam: Ly Thong khong thuoc Truyen Kieu ma thuoc Thach Sanh; Lao Hac va Chiec thuyen ngoai xa la truyen ngan, khong phai tieu thuyet; ten dung la Chinh phu ngam, khong duoc bia bien the ten tac pham.\n"
             "- Neu KHO TRI THUC co noi dung lien quan, chi duoc tra loi tu KHO TRI THUC do; khong dung tri nho ngoai.\n"
             "- Neu nguoi dung hoi 'chep nguyen van', 'trich dan', 'nguyen van', phai giu dung tung chu tu context; khong dien giai/paraphrase.\n"
             "- Moi cau tho/cau van dat trong ngoac kep dai hon mot cum tu phai xuat hien NGUYEN VAN trong context/evidence va dung tac gia/tac pham dang hoi. Neu khong thay, bo quote do hoac noi chua du du lieu; khong duoc lay tho nguoi khac gan cho tac gia dang hoi.\n"
@@ -2172,6 +2173,62 @@ class AI(commands.Cog):
             kept.append(part)
         cleaned = re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
         return cleaned if len(cleaned) >= 120 else answer
+
+    _KNOWN_BAD_FACT_RULES = (
+        (
+            r"\bly thong\b.{0,100}\btruyen kieu\b|\btruyen kieu\b.{0,100}\bly thong\b",
+            "Ly Thong thuoc truyen co tich Thach Sanh, khong phai Truyen Kieu.",
+        ),
+        (
+            r"\bly thong\b.{0,100}\bnguyen du\b|\bnguyen du\b.{0,100}\bly thong\b",
+            "Khong duoc gan Ly Thong cho Nguyen Du/Truyen Kieu.",
+        ),
+        (
+            r"\blao hac\b.{0,100}\btieu thuyet\b|\btieu thuyet\b.{0,100}\blao hac\b",
+            "Lao Hac la truyen ngan cua Nam Cao, khong phai tieu thuyet.",
+        ),
+        (
+            r"\bchiec thuyen ngoai xa\b.{0,100}\btieu thuyet\b|\btieu thuyet\b.{0,100}\bchiec thuyen ngoai xa\b",
+            "Chiec thuyen ngoai xa la truyen ngan cua Nguyen Minh Chau, khong phai tieu thuyet.",
+        ),
+        (
+            r"\bchinh phu nga ruou\b",
+            "Ten tac pham dung la Chinh phu ngam; 'Chinh phu nga ruou' la ten sai/bia.",
+        ),
+        (
+            r"\btho tinh ly\b",
+            "Khong co can cu dung de dua 'Tho Tinh Ly' lam truyen thuyet/nguon cho Truyen Kieu.",
+        ),
+    )
+
+    @classmethod
+    def _known_literary_fact_defects(cls, answer: str) -> list[str]:
+        plain = cls._plain_text(answer or "")
+        if not plain:
+            return []
+        defects: list[str] = []
+        for pattern, message in cls._KNOWN_BAD_FACT_RULES:
+            if re.search(pattern, plain):
+                defects.append(message)
+        return defects
+
+    @classmethod
+    def _drop_sentences_with_known_fact_errors(cls, answer: str) -> str:
+        if not cls._known_literary_fact_defects(answer):
+            return answer
+        kept: list[str] = []
+        last = 0
+        for match in re.finditer(r"[^.!?\n]+[.!?]?\s*", answer or ""):
+            segment = match.group(0)
+            kept.append((answer or "")[last:match.start()])
+            if not cls._known_literary_fact_defects(segment):
+                kept.append(segment)
+            last = match.end()
+        kept.append((answer or "")[last:])
+        cleaned = re.sub(r"\n{3,}", "\n\n", "".join(kept)).strip()
+        if cleaned and not cls._known_literary_fact_defects(cleaned):
+            return cleaned
+        return "Cau tra loi truoc co dau hieu sai kien thuc van hoc nen Then khong gui ban do. Can tra loi lai bang cac vi du da duoc xac minh."
 
     @staticmethod
     def _looks_like_dry_literary_style(answer: str) -> bool:
@@ -2447,6 +2504,9 @@ class AI(commands.Cog):
             "Hay giu cau dung, xoa hoac viet lai moi khang dinh khong du can cu thanh 'chua du du lieu de khang dinh'. "
             "Neu BANG CHUNG RUT GON co thong tin lien quan, khong duoc bien cau tra loi thanh tu choi chung chung; hay sua de tra loi bang evidence. "
             "Tuyet doi khong them tac gia/tac pham/nam/trich dan/nhan dinh moi. "
+            "Kiem ca loi dinh danh van hoc co ban: nhan vat phai dung tac pham, tac pham phai dung the loai, ten tac pham phai dung. "
+            "Neu thay cac cap sai nhu Ly Thong trong Truyen Kieu/gan cho Nguyen Du, Lao Hac hoac Chiec thuyen ngoai xa bi goi la tieu thuyet, "
+            "Chinh phu ngam bi viet thanh Chinh phu nga ruou, hay mot truyen thuyet khong co can cu duoc dua vao lam nguon, phai xoa/sua ngay. "
             "Dong thoi tu cham chat luong nhu giao vien HSG: neu cau tra loi chung chung, lap lai tu khoa, "
             "thieu chi tiet van ban cho tung tac pham, hoac co cau kieu 'thong diep sau sac/gia tri y nghia/ngon ngu giau hinh anh' "
             "ma khong phan tich rieng, hay viet lai thanh lap luan co dan chung cu the. "
@@ -2527,6 +2587,7 @@ class AI(commands.Cog):
         evidence_for_quote_check = "\n\n".join(part for part in (knowledge, web_context) if part)
         repeated_defects = self._repeated_phrase_defects(answer or "")
         style_defects = self._ai_flavored_style_defects(answer or "")
+        fact_defects = self._known_literary_fact_defects(answer or "")
         # Cau phan tich van hoc ma tra ve vai doan cut la chua dat do sau yeu cau.
         if answer and mode.startswith("literature") and len(answer) < 1500:
             style_defects = style_defects + [
@@ -2557,6 +2618,7 @@ class AI(commands.Cog):
             or self._has_unverified_long_quotes(answer, evidence_for_quote_check)
             or bool(repeated_defects)
             or bool(style_defects)
+            or bool(fact_defects)
         )
         if answer and needs_repair:
             if librarian_dump:
@@ -2594,6 +2656,12 @@ class AI(commands.Cog):
             else:
                 repair_knowledge, repair_web = knowledge, web_context
                 repetition_note = ""
+                if fact_defects:
+                    repetition_note += (
+                        "LOI KIEN THUC NGHIEM TRONG CAN SUA:\n"
+                        + "\n".join(f"  - {d}" for d in fact_defects)
+                        + "\n"
+                    )
                 if style_defects:
                     repetition_note += "LOI VAN PHONG PHAT HIEN DUOC:\n" + "\n".join(f"  - {d}" for d in style_defects) + "\n"
                 if repeated_defects:
@@ -2629,8 +2697,12 @@ class AI(commands.Cog):
             )
             still_librarian = librarian_dump and self._looks_like_librarian_dump(repaired or "")
             still_fabricated = (librarian_dump or fabricated_quotes) and self._has_unverified_long_quotes(repaired or "", "")
-            if repaired and not still_librarian and not still_fabricated:
+            still_fact_errors = self._known_literary_fact_defects(repaired or "")
+            if repaired and not still_librarian and not still_fabricated and not still_fact_errors:
                 answer = repaired
+            elif fact_defects or still_fact_errors:
+                answer = self._drop_sentences_with_known_fact_errors(repaired or answer)
+                print("[debug] fact_errors=stripped_or_blocked", flush=True)
             elif fabricated_quotes or still_fabricated:
                 # Repair van con quote bia (hoac repair drop-kho lai bia): sinh lai mot ban
                 # KHONG dan chung nguyen van; con lai thi cat han cau chua quote bia.
@@ -2671,6 +2743,9 @@ class AI(commands.Cog):
             if self._repeated_phrase_defects(answer):
                 answer = self._strip_repeated_sentences(answer)
                 print("[debug] final_guard=strip_repeated_sentences", flush=True)
+            if self._known_literary_fact_defects(answer):
+                answer = self._drop_sentences_with_known_fact_errors(answer)
+                print("[debug] final_guard=strip_known_fact_errors", flush=True)
         return answer, full_prompt
 
     async def _force_grounded_answer(self, prompt: str, knowledge: str, web_context: str, mode: str) -> str | None:
