@@ -236,7 +236,9 @@ def build_welcome_embed(
         name="📚 Bước 2 — Kích hoạt quyền truy cập tài liệu",
         value=(
             f"Nếu bạn vào server bằng link mời của HVHN để nhận học liệu, hãy vào {access_mention}, "
-            "bấm nút và điền Họ tên + Email ngay trong form hiện ra. Bạn không cần nhắn tin riêng cho Then."
+            "bấm nút và điền Họ tên + Email ngay trong form hiện ra. Hệ thống sẽ cấp học liệu và quyền dùng "
+            "**Then trên web** theo đúng email này; hãy đăng nhập Google bằng chính email bạn đã khai báo. "
+            "Bạn không cần nhắn tin riêng cho Then."
         ),
         inline=False,
     )

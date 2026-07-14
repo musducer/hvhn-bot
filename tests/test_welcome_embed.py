@@ -15,6 +15,7 @@ class WelcomeEmbedTest(unittest.TestCase):
         self.assertIn("Thành viên", blob)
         self.assertIn("Dân làng Hua Tát", blob)
         self.assertIn("Kích hoạt quyền truy cập tài liệu", blob)
+        self.assertIn("Then trên web", blob)
 
 
 if __name__ == "__main__":

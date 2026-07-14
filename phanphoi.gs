@@ -22,6 +22,10 @@ const HOURS_COL = 9;   // cột I ở tab Khách hàng: số giờ gia hạn (tr
 
 const HVHN_PARENT_FOLDER_ID_EARLY = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs';
 
+// Ứng dụng Then trên web là một file Drive riêng. Khách chỉ nhận quyền Viewer
+// bằng đúng email đã kích hoạt; quyền này đi cùng vòng đời học liệu bên dưới.
+const THEN_TREN_WEB_FILE_ID = '1I_L8b8U0y7mBx6IW_MGIOAo1lgV8eXr4';
+
 // C1: allowlist người quản lý được phép gửi Form (thêm khách/tài liệu). ĐỂ TRỐNG = TẮT
 // (nhận mọi đơn như cũ, tương thích ngược). BẬT: điền email quản lý vào đây + trong TỪNG Form
 // bật "Settings → Responses → Collect email addresses". Đơn từ email lạ sẽ bị bỏ qua + ghi log.
@@ -694,6 +698,10 @@ function capQuyenFolderKhachHangTuDong() {
     });
   }
 
+  // Cấp quyền Viewer cho Then trên web theo cùng danh sách email còn hạn.
+  // Mở file/quét quyền một lần cho cả lượt chạy, tránh gọi Drive lặp theo từng tài liệu.
+  capQuyenThenTrenWebChoKhachConHan(conHan);
+
   ss.getSheets().forEach(sheet => {
     if (isSystemTab(sheet.getName())) return;
     const data = sheet.getDataRange().getValues();
@@ -884,6 +892,7 @@ function kiemTraHetHan() {
         if (tData[r][0]) tab.getRange(r + 1, 4).setValue('Đã gỡ (hết hạn)');
       }
     }
+    _goQuyenThenTrenWebNeuKhongConHan(email, name);
     ghiLog('Hết hạn - gỡ quyền + xoá file', name + ' - ' + email);
     revoked++;
     // chi ghi o Trang thai cua dong nay — khong ghi de ca block (nuot tick nguoi dung)
@@ -1194,6 +1203,71 @@ function _removeAccess(item, email) {
   } catch (e) {}
 }
 
+// ============ THEN TRÊN WEB: QUYỀN VIEWER THEO GÓI KHÁCH ============
+
+function _thenTrenWebFile() {
+  return DriveApp.getFileById(THEN_TREN_WEB_FILE_ID);
+}
+
+// Nhận map email(lower) -> còn hạn từ registry, đảm bảo mọi email còn hạn chỉ
+// có Viewer (không Editor) trên Then trên web. Lỗi quyền của ứng dụng được ghi
+// log nhưng không làm hỏng luồng phân phối học liệu.
+function capQuyenThenTrenWebChoKhachConHan(conHan) {
+  const emails = Object.keys(conHan || {}).filter(email => conHan[email]);
+  if (!emails.length) return;
+
+  try {
+    const app = _thenTrenWebFile();
+    const editors = app.getEditors().map(user => String(user.getEmail() || '').toLowerCase());
+    const viewers = app.getViewers().map(user => String(user.getEmail() || '').toLowerCase());
+
+    emails.forEach(email => {
+      try {
+        if (editors.indexOf(email) >= 0) {
+          app.removeEditor(email);
+          editors.splice(editors.indexOf(email), 1);
+        }
+        if (viewers.indexOf(email) < 0) {
+          app.addViewer(email);
+          viewers.push(email);
+        }
+      } catch (emailError) {
+        ghiLog('LỖI cấp quyền Then trên web', email + ' - ' + ((emailError && emailError.message) || String(emailError)));
+      }
+    });
+  } catch (e) {
+    ghiLog('LỖI cấp quyền Then trên web', (e && e.message) || String(e));
+  }
+}
+
+// Chỉ thu quyền nếu email không còn một gói khác đang còn hạn. excludedName
+// được dùng khi đang xoá khách nhưng dòng registry của chính khách đó chưa bị xoá.
+function _goQuyenThenTrenWebNeuKhongConHan(email, excludedName) {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!cleanEmail) return;
+
+  try {
+    const reg = ensureRegistry();
+    const now = _now().getTime();
+    const last = reg.getLastRow();
+    if (last >= 2) {
+      const rows = reg.getRange(2, 1, last - 1, 6).getValues();
+      const conGoiKhacConHan = rows.some(row => {
+        const name = String(row[0] || '');
+        const rowEmail = String(row[1] || '').trim().toLowerCase();
+        const expiry = row[3] ? new Date(row[3]).getTime() : 0;
+        const status = String(row[5] || '');
+        return name !== String(excludedName || '') && rowEmail === cleanEmail
+          && expiry > now && status !== 'Đã gỡ quyền';
+      });
+      if (conGoiKhacConHan) return;
+    }
+    _removeAccess(_thenTrenWebFile(), cleanEmail);
+  } catch (e) {
+    ghiLog('LỖI gỡ quyền Then trên web', cleanEmail + ' - ' + ((e && e.message) || String(e)));
+  }
+}
+
 // ============ XOÁ KHÁCH ============
 
 // Ghi 1 đơn xoá (email khách / tên tài liệu) vào folder để watcher trên PC cập nhật clients.csv / docs/.
@@ -1223,6 +1297,7 @@ function _xoaFolderKhachTrenDrive(destRoot, name, email) {
 // Xoá hẳn 1 khách: file Drive + folder + tab + dòng registry + báo PC gỡ khỏi clients.csv.
 function _xoaMotKhach(ss, destRoot, name, email) {
   _xoaFolderKhachTrenDrive(destRoot, name, email);
+  _goQuyenThenTrenWebNeuKhongConHan(email, name);
   const tab = ss.getSheetByName(name);
   if (tab) ss.deleteSheet(tab);
   if (email) _ghiDonXoa(XOA_KHACH_NAME, email);

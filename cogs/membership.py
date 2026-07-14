@@ -140,7 +140,9 @@ class CustomerActivationModal(discord.ui.Modal, title="Kích hoạt quyền truy
         action = "Đã cập nhật thông tin" if corrected else "Đã kích hoạt quyền truy cập tài liệu"
         await interaction.response.send_message(
             f"✅ {action} cho **{name}**. Hạn dùng: {_fmt_ts(expires)}.\n"
-            f"Tài liệu sẽ được cấp qua email **{email}** khi watcher trên máy chủ tài liệu xử lý hàng đợi.{job_note}",
+            f"Tài liệu và quyền dùng [Then trên web](https://opal.google/open/1I_L8b8U0y7mBx6IW_MGIOAo1lgV8eXr4) "
+            f"sẽ được cấp theo email **{email}** khi watcher trên máy chủ tài liệu xử lý hàng đợi. "
+            f"Hãy mở Then trên web bằng đúng tài khoản Google này.{job_note}",
             ephemeral=True,
         )
 
@@ -260,8 +262,9 @@ class Membership(commands.Cog):
                 "Chào bạn, nếu bạn đến với HVHN qua link mời để nhận học liệu, mình mời bạn dành một phút "
                 "hoàn tất bước xác nhận ở đây.\n\n"
                 "Bấm nút bên dưới; một form nhỏ sẽ hiện ra ngay trong Discord để bạn điền **Họ tên** và "
-                "**Email nhận tài liệu**. Then sẽ tiếp nhận thông tin, mở quyền phù hợp và hệ thống sẽ gửi "
-                "học liệu về đúng email ấy.\n\n"
+                "**Email nhận tài liệu**. Then sẽ tiếp nhận thông tin; hệ thống sẽ cấp học liệu và quyền dùng "
+                "[Then trên web](https://opal.google/open/1I_L8b8U0y7mBx6IW_MGIOAo1lgV8eXr4) theo đúng email ấy. "
+                "Khi mở Then trên web, bạn hãy đăng nhập bằng chính tài khoản Google đã khai báo.\n\n"
                 "Bạn không cần nhắn tin riêng cho bot. Mỗi tài khoản Discord chỉ xác nhận một lần, để quyền "
                 "truy cập của mỗi người luôn được bảo đảm rõ ràng."
             ),
@@ -296,15 +299,18 @@ class Membership(commands.Cog):
                 print(f"[debug] khach_activation_portal_create_failed guild={guild.id} err={exc}", flush=True)
                 return self._activation_channel(guild)
 
-        has_panel = False
+        panel_message = None
         try:
             async for message in channel.history(limit=25):
                 if message.author != guild.me:
                     continue
                 if any(embed.title == ACTIVATE_PANEL_TITLE for embed in message.embeds):
-                    has_panel = True
+                    panel_message = message
                     break
-            if not has_panel:
+            if panel_message:
+                # Sửa ngay bảng cũ khi bot khởi động/chạy /setup, không tạo thêm bài hướng dẫn.
+                await panel_message.edit(embed=self._activation_portal_embed(), view=CustomerActivationView(self))
+            else:
                 await channel.send(embed=self._activation_portal_embed(), view=CustomerActivationView(self))
         except (discord.Forbidden, discord.HTTPException) as exc:
             print(f"[debug] khach_activation_portal_post_failed guild={guild.id} err={exc}", flush=True)
@@ -591,7 +597,7 @@ class Membership(commands.Cog):
         message = (
             f"Chào {member.mention}, rất vui vì bạn đã đến với HVHN.\n\n"
             "Bạn có thể bấm **Kích hoạt quyền truy cập tài liệu** ngay bên dưới để điền Họ tên và Email. "
-            "Then sẽ xác nhận quyền của bạn, còn học liệu sẽ được gửi theo email bạn đã đăng ký."
+            "Then sẽ xác nhận quyền của bạn; học liệu và quyền dùng Then trên web sẽ được cấp theo email bạn đã đăng ký."
         )
         if channel:
             try:

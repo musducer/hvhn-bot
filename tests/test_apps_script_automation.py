@@ -93,6 +93,13 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("Từ chối Form pre-order (đã submit)", handler)
         self.assertIn("return;", handler)
 
+    def test_then_web_viewer_access_follows_customer_lifecycle(self):
+        self.assertIn("const THEN_TREN_WEB_FILE_ID = '1I_L8b8U0y7mBx6IW_MGIOAo1lgV8eXr4'", self.src)
+        self.assertIn("function capQuyenThenTrenWebChoKhachConHan(conHan)", self.src)
+        self.assertIn("capQuyenThenTrenWebChoKhachConHan(conHan);", self.src)
+        self.assertIn("function _goQuyenThenTrenWebNeuKhongConHan(email, excludedName)", self.src)
+        self.assertIn("_goQuyenThenTrenWebNeuKhongConHan(email, name);", self.src)
+
     def test_experience_program_automation_removed(self):
         self.assertNotIn("Trai" + "Nghiem", self.src)
         self.assertNotIn("khoaTai" + "Trai" + "Nghiem", self.src)
