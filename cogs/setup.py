@@ -220,7 +220,7 @@ def build_welcome_embed(
         description=(
             f"Xin chào {member_mention}, thật vui vì bạn đã tìm đến ngôi nhà nhỏ này của những người yêu chữ nghĩa. 📖✨\n"
             "Ở đây có những trang văn được nâng niu, những buổi thảo luận say sưa và cả một cộng đồng luôn sẵn lòng "
-            "lắng nghe từng cảm nhận của bạn. Chỉ cần 2 bước nhỏ nữa thôi là bạn có thể an tâm dạo bước khắp mọi góc nhỏ nơi đây:"
+            "lắng nghe từng cảm nhận của bạn. Chỉ cần 3 bước nhỏ nữa thôi là bạn có thể an tâm dạo bước khắp mọi góc nhỏ nơi đây:"
         ),
         color=0x2ecc71,
     )
