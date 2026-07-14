@@ -32,6 +32,15 @@ class CompositionClassifierTest(unittest.TestCase):
         p = Planner.build("Viết bài văn phân tích bài thơ Sóng của Xuân Quỳnh")
         self.assertTrue(p.write_essay)
 
+    def test_outline_wins_over_viet_bai_inside_prompt(self):
+        p = Planner.build(
+            'Lập dàn ý chi tiết cho đề bài HSG: Viết bài văn nghị luận xã hội với chủ đề "Tìm mình trong kẻ khác".'
+        )
+        self.assertEqual(p.intent, "OUTLINE")
+        self.assertEqual(p.genre, "NLXH")
+        self.assertEqual(p.level, "HSG")
+        self.assertFalse(p.write_essay)
+
     def test_plain_question_is_none(self):
         p = Planner.build("Xuân Diệu sinh năm bao nhiêu")
         self.assertEqual(p.genre, "NONE")

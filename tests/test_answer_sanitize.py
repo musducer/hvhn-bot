@@ -28,6 +28,22 @@ class StripMetaTest(unittest.TestCase):
         self.assertNotIn("[P1]", out)
         self.assertNotIn("http", out)
 
+    def test_outline_contract_rejects_retrieval_summary(self):
+        raw = (
+            "Tóm tắt ngắn gọn nội dung & yêu cầu (ưu tiên tài liệu / manual liên quan nhất)\n"
+            "Các trích dẫn đã được cung cấp\n"
+            "Thiếu dữ liệu / cần làm rõ"
+        )
+        self.assertTrue(AI._violates_outline_contract(raw))
+
+    def test_outline_contract_accepts_actual_outline(self):
+        raw = (
+            "# Dàn ý chi tiết\nI. Mở bài\n- Nêu vấn đề.\n\n"
+            "II. Thân bài\n1. Giải thích\n2. Bàn luận\n3. Phản đề\n\n"
+            "III. Kết bài\n- Khẳng định lại vấn đề.\n\n💡 Kho chất liệu"
+        )
+        self.assertFalse(AI._violates_outline_contract(raw))
+
 
 if __name__ == "__main__":
     unittest.main()

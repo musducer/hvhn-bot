@@ -41,6 +41,14 @@ class ScaffoldTest(unittest.TestCase):
         block = Scaffold.for_plan(_plan("NLVH"))
         self.assertIn("dàn ý chi tiết", block)
 
+    def test_hsg_nlxh_outline_has_product_contract(self):
+        plan = RAGPlan(intent="OUTLINE", genre="NLXH", level="HSG")
+        block = Scaffold.for_plan(plan)
+        self.assertIn("HOP DONG DAU RA - DAN Y", block)
+        self.assertIn("Kho chat lieu", block)
+        self.assertIn("phan de/gioi han", block)
+        self.assertIn("khong tom tat tai lieu", block)
+
     def test_write_essay_switches_to_essay(self):
         block = Scaffold.for_plan(_plan("NLVH", write_essay=True))
         self.assertIn("bài văn hoàn chỉnh", block)

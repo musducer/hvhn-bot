@@ -531,7 +531,7 @@ class Planner:
         "nghi luan van hoc", "nlvh", "tac pham", "nhan vat", "doan tho", "bai tho",
         "doan trich", "kho tho", "hinh tuong", "chi tiet nghe thuat", "gia tri nhan dao",
         "binh giang", "cam nhan ve", "phan tich bai", "phan tich doan", "phan tich nhan vat",
-        "truyen ngan", "truyen dai", "tieu thuyet", "kich", "chi tiet trong", "chi tiet",
+        "truyen ngan", "truyen dai", "tieu thuyet", "kich", "chi tiet trong",
         "tinh huong truyen", "ngoi ke", "diem nhin tran thuat",
     )
     NLXH_MARKERS = (
@@ -553,11 +553,16 @@ class Planner:
     @classmethod
     def classify_composition(cls, message: str, intent: str, author: str) -> tuple[str, str, bool]:
         q = _rag_plain(message)
+        # "chi tiet" la tinh tu thong dung trong yeu cau lap dan y, khong phai dau
+        # hieu cua NLVH. Neu de tu xac dinh la NLXH/NLXH thi phai uu tien no.
+        explicit_nlxh = "nghi luan xa hoi" in q or "nlxh" in q
         literary_context = (
             any(m in q for m in cls.NLVH_MARKERS)
             or (author and any(m in q for m in ("truyen", "bai", "tho", "tac pham", "chi tiet", "nhan vat")))
         )
-        if literary_context:
+        if explicit_nlxh:
+            genre = "NLXH"
+        elif literary_context:
             genre = "NLVH"
         elif any(m in q for m in cls.NLXH_MARKERS):
             genre = "NLXH"
@@ -571,7 +576,9 @@ class Planner:
                 level = "HSG"
             elif genre == "NLVH" and any(m in q for m in cls.NHAN_DINH_MARKERS) and any(m in q for m in cls.CHUNG_MINH_MARKERS):
                 level = "HSG"
-        write_essay = any(m in q for m in cls.ESSAY_MARKERS)
+        # "Lập dàn ý cho đề: Viết bài văn ..." vẫn là yêu cầu LẬP DÀN Ý.  Cụm
+        # "viết bài" trong nguyên văn đề không được phép lật ý định của người hỏi.
+        write_essay = intent != "OUTLINE" and any(m in q for m in cls.ESSAY_MARKERS)
         return genre, level, write_essay
 
     @classmethod
@@ -825,12 +832,15 @@ class Scaffold:
     )
     _NLXH_HSG = (
         "Đây là đề nghị luận xã hội mức HSG: thường trừu tượng, đa nghĩa.\n"
-        "Mở bài: dẫn dắt có chiều sâu, nêu vấn đề.\n"
-        "Thân bài: (1) Giải mã nhiều lớp nghĩa của từ khóa; (2) Bàn luận với chiều sâu "
-        "nhân sinh và triết lí, lí lẽ chặt; (3) Phản biện đa tầng — giới hạn vấn đề, điều "
-        "kiện đúng/sai, mặt trái; (4) Dẫn chứng phong phú từ thực tế đời sống và nhân vật "
-        "lịch sử/người thật (không dùng dẫn chứng văn học); (5) Bài học nhận thức và hành động.\n"
-        "Kết bài: nâng vấn đề, để lại dư âm. Hành văn giàu hình ảnh, có dấu ấn tư duy riêng."
+        "Trục bắt buộc: giải mã đề -> bàn luận theo các vế/mối quan hệ của vấn đề -> phản đề "
+        "và điều kiện giới hạn -> bài học. Không biến thân bài thành kể lại ngữ liệu.\n"
+        "Mở bài: 1-2 cách dẫn dắt, chốt luận đề riêng ngay ở cuối.\n"
+        "Thân bài: (1) Giải thích nhiều lớp nghĩa của từ khóa, chỉ ra thông điệp của đề; "
+        "(2) Bàn luận theo từng vế, mỗi luận điểm có lí lẽ, chiều sâu nhân sinh, câu chuyển ý, "
+        "dẫn chứng đời sống và điểm cần bình; (3) Phản đề đa tầng — biểu hiện lệch, giới hạn, "
+        "điều kiện để vấn đề đúng; (4) Bài học nhận thức và hành động.\n"
+        "Kết bài: nâng vấn đề, để lại dư âm. Cuối dàn ý có mục 'Kho chất liệu' gồm từ khóa, "
+        "dẫn chứng đời sống và nhận định/châm ngôn chỉ khi chắc chắn về nguyên văn và tác giả."
     )
     _NLVH_THUONG = (
         "Mở bài: giới thiệu tác giả — tác phẩm — vấn đề nghị luận (nêu nhận định nếu đề có).\n"
@@ -875,6 +885,23 @@ class Scaffold:
         if plan.genre == "NONE":
             return ""
         skeleton = cls._skeleton(plan)
+        if plan.intent == "OUTLINE":
+            contract = (
+                "HOP DONG DAU RA - DAN Y (BAT BUOC):\n"
+                "- Chi xuat BAN DAN Y HOAN CHINH de hoc sinh co the viet bai ngay; khong tom tat tai lieu, "
+                "khong ke lai qua trinh tim/loc tai lieu, khong nhan xet ve do du hay thieu cua ngu canh, "
+                "khong liet ke trich dan da truy xuat, khong noi ve prompt/he thong.\n"
+                "- Dung cau truc ro rang: I. Mo bai; II. Than bai; III. Ket bai. Voi moi y lon, ghi ro "
+                "luan diem, li le then chot, huong trien khai/cau chuyen y, dan chung goi y va diem can binh.\n"
+                "- Day la dan y CHI TIET, khong phai bai van mau va cung khong phai vai gach dau dong chung chung. "
+                "Moi nhanh phai cho hoc sinh biet can viet gi, tai sao, va viet theo huong nao.\n"
+                "- Neu la NLXH, bat buoc co: giai thich; ban luan theo cac ve cua van de; phan de/gioi han; "
+                "bai hoc. Ket bang 'Kho chat lieu' gom keywords, dan chung doi song va chi dung trich dan "
+                "nguyen van khi chac chan. Khong dung ly luan phe binh van hoc lac de.\n"
+                "- Khong tu tao so lieu, su kien, trich dan hay gan tac gia. Khi chua chac chi tiet, viet "
+                "'co the chon mot dan chung da kiem chung ve ...' thay vi bia.\n"
+            )
+            return f"{contract}\nKHUNG TU DUY LAP LUAN:\n{skeleton}"
         if plan.write_essay:
             mode_line = (
                 "Nhiệm vụ: viết thành bài văn hoàn chỉnh, mạch lạc, các phần nối liền thành "
@@ -2007,10 +2034,24 @@ class AI(commands.Cog):
     def _guarded_prompt(prompt: str, knowledge: str, web_context: str, mode: str, guidance: str = "") -> str:
         source_block = knowledge or "KHONG CO KHO TRI THUC HVHN PHU HOP DUOC NAP."
         web_block = web_context or "KHONG CO NGUON WEB DUOC TRUY XUAT."
+        outline_rules = ""
+        if mode.startswith("outline"):
+            outline_rules = (
+                "\nCHE DO DAN Y - UU TIEN TUYET DOI:\n"
+                "- Dau ra CUOI CUNG chi la san pham dan y; khong duoc ke ve tai lieu, manual, nguon, "
+                "trich xuat, muc do du lieu, qua trinh suy nghi hay cach ban chon y.\n"
+                "- Bat dau truc tiep bang tieu de dan y, sau do dung cap bac I. Mo bai / II. Than bai / "
+                "III. Ket bai. Khong mo dau bang 'tom tat', 'cac trich dan', 'thieu du lieu', hay 'ket luan'.\n"
+                "- Day tung nhanh bang luan diem + li le + cach trien khai + dan chung goi y/diem can binh; "
+                "khong viet thanh bai van hoan chinh, khong liet ke tai lieu.\n"
+                "- Voi NLXH: bat buoc co giai thich, ban luan, phan de/gioi han, bai hoc va Kho chat lieu. "
+                "Chi dung trich dan nguyen van khi no co trong evidence hoac ban chac chan tuyet doi.\n"
+            )
         return (
             "Ban la Then, tro giang AI mon Ngu van cua HVHN. Luon tra loi bang tieng Viet co dau, tru khi nguoi dung yeu cau ngon ngu khac.\n"
             f"CHE DO: {mode}\n"
             + (f"{guidance}\n" if guidance else "")
+            + outline_rules
             + "KHO TRI THUC/FEEDBACK HVHN DA TRUY XUAT:\n"
             f"{source_block}\n\n"
             "NGUON WEB DA TRA CUU (neu co):\n"
@@ -2588,6 +2629,7 @@ class AI(commands.Cog):
         repeated_defects = self._repeated_phrase_defects(answer or "")
         style_defects = self._ai_flavored_style_defects(answer or "")
         fact_defects = self._known_literary_fact_defects(answer or "")
+        outline_violation = bool(answer) and mode.startswith("outline") and self._violates_outline_contract(answer)
         # Cau phan tich van hoc ma tra ve vai doan cut la chua dat do sau yeu cau.
         if answer and mode.startswith("literature") and len(answer) < 1500:
             style_defects = style_defects + [
@@ -2609,6 +2651,8 @@ class AI(commands.Cog):
         ungrounded = (not evidence_for_quote_check.strip()) or (bool(_subjects) and not _evidence_covers_subject)
         fabricated_quotes = bool(answer) and ungrounded and self._has_unverified_long_quotes(answer, evidence_for_quote_check)
         needs_repair = bool(answer) and (
+            outline_violation
+            or
             librarian_dump
             or fabricated_quotes
             or self._looks_like_source_dump(answer)
@@ -2621,7 +2665,21 @@ class AI(commands.Cog):
             or bool(fact_defects)
         )
         if answer and needs_repair:
-            if librarian_dump:
+            if outline_violation:
+                # Dan y bi lo meta/RAG thi bo context o lan sua. Khung dan y NLXH la
+                # san pham tu duy tu chu; giu context lac de chi khien model lap lai loi.
+                repair_knowledge, repair_web = "", ""
+                repair_prompt = (
+                    "CHI XUAT BAN DAN Y CHI TIET HOAN CHINH cho cau hoi ben duoi. Ban truoc da sai vi "
+                    "tom tat tai lieu/trich dan, noi ve du lieu thieu hay lo qua trinh chon loc. Hay vut bo "
+                    "toan bo phan meta do. Dau ra phai bat dau truc tiep bang 'Dan y chi tiet', co I. Mo bai, "
+                    "II. Than bai, III. Ket bai; moi y lon co luan diem, li le, cach trien khai/chuyen y, dan "
+                    "chung goi y va diem can binh. Neu la NLXH, phai co giai thich, ban luan, phan de/gioi han, "
+                    "bai hoc va Kho chat lieu. Khong viet bai van mau. Khong nhac tai lieu, nguon, manual, "
+                    "trich xuat, muc do du lieu, prompt hay suy nghi noi bo. Khong bia trich dan, tac gia, so lieu.\n\n"
+                    f"CAU HOI CAN LAP DAN Y:\n{prompt}"
+                )
+            elif librarian_dump:
                 # Che do 'thu thu' bam chat vao dong tai lieu lac de: cang giu kho trong
                 # prompt thi model cang liet ke. Sua bang cach BO kho di, ep viet bang
                 # kien thuc van hoc rieng.
@@ -2696,9 +2754,10 @@ class AI(commands.Cog):
                 prefer_rich_style=True,
             )
             still_librarian = librarian_dump and self._looks_like_librarian_dump(repaired or "")
+            still_outline_violation = mode.startswith("outline") and self._violates_outline_contract(repaired or "")
             still_fabricated = (librarian_dump or fabricated_quotes) and self._has_unverified_long_quotes(repaired or "", "")
             still_fact_errors = self._known_literary_fact_defects(repaired or "")
-            if repaired and not still_librarian and not still_fabricated and not still_fact_errors:
+            if repaired and not still_librarian and not still_outline_violation and not still_fabricated and not still_fact_errors:
                 answer = repaired
             elif fact_defects or still_fact_errors:
                 answer = self._drop_sentences_with_known_fact_errors(repaired or answer)
@@ -2736,7 +2795,10 @@ class AI(commands.Cog):
                 answer = self._strip_repeated_sentences(answer)
                 print("[debug] repair_fallback=strip_repeated_sentences", flush=True)
         if answer:
-            answer = await self._verify_answer(answer, prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
+            # Verifier duoc toi uu cho bai phan tich va co the bien dan y thanh loi
+            # nhan xet ve bang chung. Dan y da co output-contract va repair gate rieng.
+            if not mode.startswith("outline"):
+                answer = await self._verify_answer(answer, prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
             answer = self._strip_internal_markers(answer)
             # Chot chan cuoi: du di duong nao (repair thanh cong nhung van lap, verifier viet lai...),
             # cau lap gan nguyen van cung bi cat truoc khi gui.
@@ -2930,17 +2992,17 @@ class AI(commands.Cog):
             chunks = filtered_meta.get("chunks") or chunks
             if cls._is_literary_answer_request(query, mode):
                 return cls._literary_evidence_fallback_answer(query, chunks, manual_knowledge, web_context)
-            lines = ["Dựa trên các đoạn tài liệu đã truy xuất, có thể trả lời bằng chứng sau:"]
+            lines = ["Các ý có thể dùng để triển khai:"]
             for chunk in chunks[:3]:
                 excerpt = re.sub(r"\s+", " ", chunk.get("excerpt", "")).strip()
-                lines.append(f"- {chunk.get('title')} (đoạn {chunk.get('chunk_index')}): {excerpt[:650]}")
-            lines.append("Phần trên là trích ý trực tiếp từ evidence; cần đối chiếu thêm tài liệu gốc nếu muốn diễn giải sâu hơn.")
+                if excerpt:
+                    lines.append(f"- {excerpt[:650]}")
             return "\n".join(lines)
         if manual_knowledge:
-            return "Dựa trên tri thức HVHN đã truy xuất:\n" + cls._strip_internal_markers(_clip_text(manual_knowledge, 1800))
+            return cls._strip_internal_markers(_clip_text(manual_knowledge, 1800))
         if web_context:
-            return "Dựa trên nguồn web đã truy xuất:\n" + cls._strip_internal_markers(_clip_text(web_context, 1800))
-        return "Chưa có evidence đủ rõ để trả lời."
+            return cls._strip_internal_markers(_clip_text(web_context, 1800))
+        return "Chưa đủ căn cứ để trả lời chính xác."
 
 
     @classmethod
@@ -3114,6 +3176,27 @@ class AI(commands.Cog):
             or re.search(r"(?<![a-z])p\d+\s+va\s+p\d+", plain)
         )
 
+    _OUTLINE_META_PHRASES = (
+        "tom tat ngan gon noi dung",
+        "tom tat noi dung va yeu cau",
+        "uu tien tai lieu",
+        "cac trich dan da duoc cung cap",
+        "thieu du lieu can lam ro",
+        "danh gia muc do day du",
+        "co so ly thuyet",
+        "yeu cau viet bai luan tu su",
+        "khong the trich dan chinh xac",
+    )
+
+    @classmethod
+    def _violates_outline_contract(cls, answer: str) -> bool:
+        """True khi mo hinh tra ve meta thay vi mot dan y dung duoc ngay."""
+        plain = cls._plain_text(answer or "")
+        if any(phrase in plain for phrase in cls._OUTLINE_META_PHRASES):
+            return True
+        has_structure = "mo bai" in plain and "than bai" in plain and "ket bai" in plain
+        return not has_structure or cls._looks_like_librarian_dump(answer)
+
     # Dong meta lo may moc RAG: "Tom tat ... tu kho PDF/HVHN", "Cac doan lien quan khac",
     # "noi dung uu tien tu kho", "cac doan P1/P2 ... nen duoc uu tien su dung khi can dan chung".
     _LIBRARIAN_LINE = re.compile(
@@ -3268,6 +3351,10 @@ class AI(commands.Cog):
         print(f"[debug] before_retrieval query={user_prompt[:220]!r} mode={mode}", flush=True)
         plan = Planner.build(user_prompt)
         profile = self._request_profile(user_prompt)
+        is_standard_nlxh_outline = (
+            plan.intent == "OUTLINE" and plan.genre == "NLXH" and not plan.document_only
+        )
+        generation_mode = "outline_nlxh" if is_standard_nlxh_outline else mode
         retrieval_limit = max(plan.retrieval_limit, PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT)
         pdf_meta = await self._pdf_retrieval(user_prompt, limit=retrieval_limit)
         _empty_meta = {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
@@ -3301,6 +3388,13 @@ class AI(commands.Cog):
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
+        if is_standard_nlxh_outline:
+            # Dàn ý NLXH phổ thông/HSG phải bám trực tiếp vào đề và khung lập luận.
+            # Kho thủ công thường là nhận định văn học rời, dễ kéo model sang chế độ
+            # "thủ thư" và trả lời lạc đề.
+            manual_knowledge = ""
+            feedback_knowledge = ""
+            print("[debug] context_suppressed reason=standard_nlxh_outline", flush=True)
         # Cau hoi neu ro tac gia/tac pham nhung kho thu cong/feedback lac han chu de
         # (vd hoi Tuong Ve Huu -> tra ve phong cach tho To Huu, 100+ trich dan NLXH): bo di.
         _subjects = self._query_subjects(user_prompt, plan)
@@ -3322,7 +3416,10 @@ class AI(commands.Cog):
             flush=True,
         )
         has_local_context = bool(pdf_knowledge or manual_knowledge or feedback_knowledge)
-        web_context = "" if plan.document_only and has_local_context else await self._web_context(user_prompt, mode, has_local_context)
+        if is_standard_nlxh_outline:
+            web_context = ""
+        else:
+            web_context = "" if plan.document_only and has_local_context else await self._web_context(user_prompt, mode, has_local_context)
         manual_count = self._retrieval_count(manual_knowledge, "S")
         feedback_count = self._retrieval_count(feedback_knowledge, "F")
         web_count = self._retrieval_count(web_context, "W")
@@ -3340,7 +3437,7 @@ class AI(commands.Cog):
             teacher_feedback=feedback_knowledge,
         )
         stats = _context_part_stats(pdf_knowledge, manual_knowledge, feedback_knowledge, web_context, knowledge)
-        full_prompt_preview = self._guarded_prompt(prompt, knowledge, web_context, mode)
+        full_prompt_preview = self._guarded_prompt(prompt, knowledge, web_context, generation_mode)
         print(
             "[debug] prompt_build_done "
             f"prompt_chars={len(full_prompt_preview)} est_tokens={self._estimated_tokens(full_prompt_preview)} "
@@ -3396,7 +3493,7 @@ class AI(commands.Cog):
         # nhất là khi cần đi qua Gemini Pro + verifier, fallback evidence thô có thể
         # lạc tác giả/tác phẩm và tệ hơn nhiều so với chờ model trả lời hoàn chỉnh.
         answer, full_prompt = await self._safe_generate(
-            prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit, guidance=guidance
+            prompt, knowledge, web_context, generation_mode, retrieval_hit=retrieval_hit, guidance=guidance
         )
         if answer is None:
             await interaction.followup.send(self._ai_error_message())
@@ -3423,8 +3520,9 @@ class AI(commands.Cog):
                     answer = self._evidence_fallback_answer(pdf_meta, manual_knowledge, web_context, user_prompt, mode)
                     print(f"[debug] refusal_replaced_by=evidence_fallback original_reason={reason}", flush=True)
                     reason = ""
-            if reason and "REASON_CODE:" not in answer:
-                answer = answer.rstrip() + f"\n\n`REASON_CODE: {reason}`"
+            if reason:
+                # Reason code chi phuc vu log/debug; khong bao gio lo vao bai lam cua hoc sinh.
+                print(f"[debug] insufficient_answer_reason={reason}", flush=True)
 
         await self._send_answer_embeds(interaction, title=title, answer=answer, full_prompt=full_prompt)
         # Chỉ trừ lượt khi Then trả lời thành công, không trừ với câu từ chối/

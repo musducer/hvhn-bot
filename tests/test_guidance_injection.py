@@ -16,6 +16,11 @@ class GuidanceInjectionTest(unittest.TestCase):
         out = AI._guarded_prompt("Câu hỏi", "ctx", "", "chat")
         self.assertIn("YEU CAU NGUOI DUNG", out)
 
+    def test_outline_mode_injects_product_only_contract(self):
+        out = AI._guarded_prompt("Câu hỏi", "ctx", "", "outline_nlxh")
+        self.assertIn("CHE DO DAN Y", out)
+        self.assertIn("khong duoc ke ve tai lieu", out)
+
 
 if __name__ == "__main__":
     unittest.main()
