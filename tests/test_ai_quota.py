@@ -208,6 +208,9 @@ class AiQuotaTest(unittest.IsolatedAsyncioTestCase):
         allowed, _ = await self._use(ai, it)
         self.assertTrue(allowed)  # cung cua so, gio duoc dung tiep
 
+    def test_retrieval_guard_is_not_counted_as_a_successful_answer(self):
+        self.assertTrue(AI._insufficient_answer(AI._retrieval_guard_message()))
+
 
 if __name__ == "__main__":
     unittest.main()

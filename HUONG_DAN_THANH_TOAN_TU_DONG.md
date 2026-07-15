@@ -4,4 +4,4 @@ Tài liệu SePay cũ không còn áp dụng: SePay bị giới hạn số đơn
 
 Đọc và thực hiện duy nhất: [HUONG_DAN_PAYOS_QR_TU_DONG.md](HUONG_DAN_PAYOS_QR_TU_DONG.md).
 
-Luồng hiện hành là **PayOS QR riêng cho từng đơn → webhook HMAC → tự gửi Discord**; giá được khóa cứng **60.000đ**.
+Luồng hiện hành là **PayOS QR riêng cho từng đơn → webhook HMAC → tự gửi Discord**; giá mặc định **99.999đ** và có thể đổi an toàn trong menu **HVHN → Thanh toán tự động → Đổi giá gói học liệu**.

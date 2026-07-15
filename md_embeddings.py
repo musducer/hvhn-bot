@@ -12,16 +12,18 @@ import os
 
 import aiohttp
 
+from env_utils import env_int
+
 _TIMEOUT = aiohttp.ClientTimeout(total=45)
 _MAX_BATCH = 96
 
 # ---- cau hinh provider ----
 _JINA_MODEL = os.getenv("HVHN_JINA_MODEL", "jina-embeddings-v5-text-small")
-_JINA_DIM = int(os.getenv("HVHN_JINA_DIM", "1024"))
+_JINA_DIM = env_int("HVHN_JINA_DIM", 1024, minimum=64, maximum=4096)
 _JINA_URL = "https://api.jina.ai/v1/embeddings"
 
 _VOYAGE_MODEL = os.getenv("HVHN_VOYAGE_MODEL", "voyage-3.5-lite")
-_VOYAGE_DIM = int(os.getenv("HVHN_VOYAGE_DIM", "1024"))
+_VOYAGE_DIM = env_int("HVHN_VOYAGE_DIM", 1024, minimum=64, maximum=4096)
 _VOYAGE_URL = "https://api.voyageai.com/v1/embeddings"
 
 _GEMINI_MODELS = ("gemini-embedding-001", "text-embedding-004", "embedding-001")

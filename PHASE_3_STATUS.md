@@ -3,7 +3,7 @@
 > **Cập nhật 2026-07-13 — phương án SePay bên dưới đã được thay thế.**
 >
 > Luồng hiện hành là **PayOS QR riêng từng đơn → webhook HMAC → bot `/mint-invite` → email Discord**.
-> Giá được khóa cứng **60.000đ**. Không đối chiếu nội dung chuyển khoản, nên không bị lỗi khi ngân hàng/ví
+> Giá mặc định là **99.999đ** và được đổi bằng menu Sheet; mỗi đơn giữ nguyên giá tại lúc tạo để đối soát. Không đối chiếu nội dung chuyển khoản, nên không bị lỗi khi ngân hàng/ví
 > chèn mã hệ thống vào memo. Hướng dẫn triển khai và vận hành duy nhất: `HUONG_DAN_PAYOS_QR_TU_DONG.md`.
 > Phần lịch sử SePay được giữ lại ở đây chỉ để biết vì sao kiến trúc cũ đã bị loại.
 >

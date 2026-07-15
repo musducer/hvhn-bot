@@ -1,10 +1,14 @@
 import random
 import asyncio
-import datetime
 import discord
 from discord.ext import commands
 from discord import app_commands
 import asyncpg
+
+
+def _clip(value, limit=1024):
+    text = str(value or "")
+    return text if len(text) <= limit else text[:limit - 3] + "..."
 
 
 class Utilities(commands.Cog):
@@ -43,7 +47,8 @@ class Utilities(commands.Cog):
     @app_commands.command(name="unlock", description="Mở khóa kênh (Chỉ Admin)")
     @app_commands.checks.has_permissions(manage_channels=True)
     async def unlock(self, interaction: discord.Interaction):
-        await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=True)
+        # Khôi phục kế thừa từ category/role thay vì ép @everyone thành Allow vĩnh viễn.
+        await interaction.channel.set_permissions(interaction.guild.default_role, send_messages=None)
         await interaction.response.send_message("🔓 Kênh đã được mở khóa.")
 
     @app_commands.command(name="relax", description="Gợi ý hoạt động giải lao ngắn hạn sau giờ học căng thẳng")
@@ -53,7 +58,8 @@ class Utilities(commands.Cog):
             "Đứng lên vươn vai, rời mắt khỏi màn hình và uống một cốc nước đầy nào.",
             "Nhắm mắt lại và nghe một bản nhạc lofi không lời trong 5 phút."
         ]
-        await interaction.response.send_message(f"☕ **Đã đến giờ nghỉ ngơi:**\n{random.choice(activities)}")
+        activity = random.choice(activities)  # nosec B311
+        await interaction.response.send_message(f"☕ **Đã đến giờ nghỉ ngơi:**\n{activity}")
 
     @app_commands.command(name="timer", description="Đồng hồ đếm ngược học tập (1-180 phút)")
     async def timer(self, interaction: discord.Interaction, minutes: int):
@@ -71,6 +77,12 @@ class Utilities(commands.Cog):
 
     @app_commands.command(name="ask", description="Gửi câu hỏi ẩn danh")
     async def ask(self, interaction: discord.Interaction, question: str):
+        question = question.strip()
+        if not question or len(question) > 1000:
+            await interaction.response.send_message(
+                "❌ Câu hỏi phải có nội dung và không quá 1.000 ký tự.", ephemeral=True,
+            )
+            return
         admin_channel = discord.utils.get(interaction.guild.text_channels, name="duyệt-câu-hỏi")
         if not admin_channel:
             await interaction.response.send_message("❌ Kênh duyệt câu hỏi chưa thiết lập.", ephemeral=True)
@@ -87,24 +99,43 @@ class Utilities(commands.Cog):
     @app_commands.command(name="answer", description="Trả lời câu hỏi ẩn danh theo ID (Chỉ Admin)")
     @app_commands.checks.has_permissions(manage_messages=True)
     async def answer(self, interaction: discord.Interaction, id: int, reply: str):
-        row = await self.db.fetchrow("SELECT content, answered FROM questions WHERE id = $1", id)
-        if not row:
-            await interaction.response.send_message(f"❌ Không tìm thấy câu hỏi có ID **{id}**.", ephemeral=True)
+        reply = reply.strip()
+        if not reply or len(reply) > 1000:
+            await interaction.response.send_message(
+                "❌ Câu trả lời phải có nội dung và không quá 1.000 ký tự.", ephemeral=True,
+            )
             return
-
         public_channel = discord.utils.get(interaction.guild.text_channels, name="hỏi-đáp-bài-tập")
         if not public_channel:
             await interaction.response.send_message("❌ Không tìm thấy kênh hỏi-đáp-bài-tập.", ephemeral=True)
             return
+        # Claim atomically so two moderators cannot publish two answers for the
+        # same anonymous question.
+        row = await self.db.fetchrow(
+            "UPDATE questions SET answered=TRUE "
+            "WHERE id=$1 AND answered=FALSE RETURNING content",
+            id,
+        )
+        if not row:
+            await interaction.response.send_message(
+                f"❌ Không tìm thấy câu hỏi ID **{id}**, hoặc câu này đã được trả lời.",
+                ephemeral=True,
+            )
+            return
 
         embed = discord.Embed(title=f"📝 Q&A Ẩn Danh (ID: {id})", color=discord.Color.green())
-        embed.add_field(name="Hỏi:", value=row["content"], inline=False)
-        embed.add_field(name="Đáp:", value=reply, inline=False)
-        await public_channel.send(embed=embed)
-
-        await self.db.execute("UPDATE questions SET answered = TRUE WHERE id = $1", id)
-        note = " (câu này đã được trả lời trước đó)" if row["answered"] else ""
-        await interaction.response.send_message(f"✅ Đã đăng câu trả lời cho câu hỏi ID **{id}**{note}.", ephemeral=True)
+        embed.add_field(name="Hỏi:", value=_clip(row["content"]), inline=False)
+        embed.add_field(name="Đáp:", value=_clip(reply), inline=False)
+        try:
+            await public_channel.send(embed=embed)
+        except Exception:
+            # Posting failed, so release the claim for a clean retry.
+            await self.db.execute(
+                "UPDATE questions SET answered=FALSE WHERE id=$1 AND answered=TRUE",
+                id,
+            )
+            raise
+        await interaction.response.send_message(f"✅ Đã đăng câu trả lời cho câu hỏi ID **{id}**.", ephemeral=True)
 
     @app_commands.command(name="questions", description="Xem các câu hỏi ẩn danh chưa được trả lời (Chỉ Admin)")
     @app_commands.checks.has_permissions(manage_messages=True)
@@ -140,6 +171,11 @@ class Utilities(commands.Cog):
         if minutes <= 0 or minutes > 1440:
             await interaction.response.send_message("❌ Số phút phải từ 1 đến 1440 (24 giờ).", ephemeral=True)
             return
+        if not content.strip() or len(content) > 1800:
+            await interaction.response.send_message(
+                "❌ Nội dung nhắc phải có và không quá 1.800 ký tự.", ephemeral=True,
+            )
+            return
         await interaction.response.send_message(f"⏰ Đã đặt lời nhắc sau {minutes} phút.", ephemeral=True)
         await asyncio.sleep(minutes * 60)
         try:
@@ -160,7 +196,11 @@ class Utilities(commands.Cog):
         if user.joined_at:
             embed.add_field(name="Ngày vào server", value=user.joined_at.strftime("%d/%m/%Y"), inline=False)
         roles = [r.mention for r in user.roles if r.name != "@everyone"]
-        embed.add_field(name=f"Vai trò ({len(roles)})", value=" ".join(roles) if roles else "Không có", inline=False)
+        embed.add_field(
+            name=f"Vai trò ({len(roles)})",
+            value=_clip(" ".join(roles) if roles else "Không có"),
+            inline=False,
+        )
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name="announce", description="Đăng thông báo vào kênh bảng-tin-thông-báo (Chỉ Admin)")
@@ -169,6 +209,11 @@ class Utilities(commands.Cog):
         channel = discord.utils.get(interaction.guild.text_channels, name="bảng-tin-thông-báo")
         if not channel:
             await interaction.response.send_message("❌ Không tìm thấy kênh bảng-tin-thông-báo.", ephemeral=True)
+            return
+        if not title.strip() or len(title) > 250 or not content.strip() or len(content) > 4000:
+            await interaction.response.send_message(
+                "❌ Tiêu đề tối đa 250 ký tự; nội dung tối đa 4.000 ký tự.", ephemeral=True,
+            )
             return
         embed = discord.Embed(title=f"📢 {title}", description=content, color=discord.Color.gold())
         embed.set_footer(text=f"Thông báo từ {interaction.user.display_name}")

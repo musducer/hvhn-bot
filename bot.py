@@ -85,8 +85,10 @@ CREATE TABLE IF NOT EXISTS hvhn_doc_jobs (
     status TEXT NOT NULL DEFAULT 'pending',
     error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processing_started_at TIMESTAMPTZ,
     processed_at TIMESTAMPTZ
 );
+ALTER TABLE hvhn_doc_jobs ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS hvhn_runtime_status (
     key TEXT PRIMARY KEY,
@@ -174,7 +176,8 @@ CREATE TABLE IF NOT EXISTS hvhn_members (
     status TEXT NOT NULL DEFAULT 'active',
     notified_expiry BOOLEAN NOT NULL DEFAULT FALSE,
     created_by BIGINT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    joined_at TIMESTAMPTZ
 );
 ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS discord_id BIGINT;
 ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS email TEXT;
@@ -188,10 +191,22 @@ ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS notified_expiry BOOLEAN NOT NU
 ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS created_by BIGINT;
 ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS order_code TEXT;
+ALTER TABLE hvhn_members ADD COLUMN IF NOT EXISTS joined_at TIMESTAMPTZ;
 CREATE INDEX IF NOT EXISTS idx_hvhn_members_discord ON hvhn_members (discord_id);
 CREATE INDEX IF NOT EXISTS idx_hvhn_members_status ON hvhn_members (status);
 CREATE INDEX IF NOT EXISTS idx_hvhn_members_invite_code ON hvhn_members (invite_code);
-CREATE INDEX IF NOT EXISTS idx_hvhn_members_order_code ON hvhn_members (order_code);
+WITH duplicate_orders AS (
+    SELECT id, ROW_NUMBER() OVER (PARTITION BY order_code ORDER BY id DESC) AS duplicate_rank
+    FROM hvhn_members
+    WHERE order_code IS NOT NULL
+)
+UPDATE hvhn_members AS members
+SET order_code = NULL
+FROM duplicate_orders
+WHERE members.id = duplicate_orders.id AND duplicate_orders.duplicate_rank > 1;
+DROP INDEX IF EXISTS idx_hvhn_members_order_code;
+CREATE UNIQUE INDEX IF NOT EXISTS uq_hvhn_members_order_code
+    ON hvhn_members (order_code) WHERE order_code IS NOT NULL;
 """
 
 SCHEMA += PDF_KNOWLEDGE_SCHEMA

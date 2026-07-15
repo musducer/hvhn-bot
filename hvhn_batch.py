@@ -1,8 +1,15 @@
 import csv
 import os
+import re
+import tempfile
+import time
+import uuid
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+import pikepdf
+
 from combined_pipeline import convert_to_secure_image_pdf
+from env_utils import env_int
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CLIENTS_CSV = os.path.join(BASE_DIR, "clients.csv")
@@ -13,6 +20,11 @@ DOCS_DIR = os.path.join(BASE_DIR, "docs")
 # (mirror đang tải), tự fallback về ./output và in cảnh báo.
 MIRROR_SOURCE = r"D:\Mirror Files Drive\TÀI LIỆU ĐỘC QUYỀN HVHN\TÀI LIỆU ĐÃ WATERMARK CHƯA PHÂN PHỐI"
 LOCAL_FALLBACK = os.path.join(BASE_DIR, "output")
+MAX_RENDER_PAGES = env_int("HVHN_MAX_RENDER_PAGES", 2000, minimum=1, maximum=10000)
+RESERVED_CLIENT_NAMES = {
+    "dashboard", "nhập mới", "khách hàng", "tài liệu", "nhật ký",
+    "_don_dat_mua", "_khach_preorder",
+}
 
 
 def mirror_ready():
@@ -51,32 +63,132 @@ WARNING_TEXT = (
 )
 
 
+class RenderBatchError(RuntimeError):
+    def __init__(self, failed_jobs):
+        self.failed_jobs = list(failed_jobs)
+        super().__init__(
+            f"{len(self.failed_jobs)} bản render vẫn lỗi sau tất cả lần thử; job được giữ lại để retry"
+        )
+
+
+class DuplicateClientEmailError(ValueError):
+    pass
+
+
+class DuplicateClientNameError(ValueError):
+    pass
+
+
+def normalize_client_name(name):
+    """Return one name safe for Windows files, Drive folders, and Google Sheet tabs."""
+    value = re.sub(r'[<>:"/\\|?*\[\]\x00-\x1f]+', "_", str(name or ""))
+    value = re.sub(r"\s+", " ", value).strip(" .'_")
+    if value.startswith(("=", "+", "-", "@")):
+        value = "_" + value
+    value = value[:80].rstrip(" ._")
+    device_name = value.split(".", 1)[0].upper()
+    if device_name in {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))}:
+        value = "_" + value
+    if value.casefold() in RESERVED_CLIENT_NAMES:
+        value = "_" + value
+    return value
+
+
 def load_clients():
+    if not os.path.isfile(CLIENTS_CSV):
+        return []
     with open(CLIENTS_CSV, encoding="utf-8-sig", newline="") as f:
-        return [{"name": r["name"], "email": r["email"]} for r in csv.DictReader(f)]
+        clients = []
+        emails = set()
+        names = set()
+        for line_number, row in enumerate(csv.DictReader(f), start=2):
+            raw_name = (row.get("name") or "").strip()
+            raw_email = (row.get("email") or "").strip().lower()
+            if not raw_name and not raw_email:
+                continue
+            name = normalize_client_name(raw_name)
+            if not name or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", raw_email):
+                raise ValueError(f"clients.csv dòng {line_number} có tên/email không hợp lệ")
+            if raw_email in emails:
+                raise DuplicateClientEmailError(f"clients.csv có email trùng ở dòng {line_number}: {raw_email}")
+            name_key = name.casefold()
+            if name_key in names:
+                raise DuplicateClientNameError(f"clients.csv có tên trùng ở dòng {line_number}: {name}")
+            emails.add(raw_email)
+            names.add(name_key)
+            clients.append({"name": name, "email": raw_email})
+        return clients
+
+
+def find_client(email):
+    needle = str(email or "").strip().lower()
+    return next((client for client in load_clients() if client["email"] == needle), None)
+
+
+def _write_clients_atomic(clients):
+    root = os.path.dirname(CLIENTS_CSV) or "."
+    os.makedirs(root, exist_ok=True)
+    fd, pending_path = tempfile.mkstemp(prefix=".clients.", suffix=".part.csv", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(["name", "email"])
+            writer.writerows([[client["name"], client["email"]] for client in clients])
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(pending_path, CLIENTS_CSV)
+    finally:
+        try:
+            os.remove(pending_path)
+        except FileNotFoundError:
+            pass
 
 
 def append_client(name, email):
+    name = normalize_client_name(name)
+    email = str(email or "").strip().lower()
+    if not name or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        raise ValueError("Tên hoặc email không hợp lệ")
     clients = load_clients()
-    if any(c["email"].lower() == email.lower() for c in clients):
-        raise ValueError(f"Email {email} đã có trong clients.csv")
+    if any(c["email"] == email for c in clients):
+        raise DuplicateClientEmailError(f"Email {email} đã có trong clients.csv")
     # B1 (mitigation): chặn TRÙNG TÊN với email khác — vì folder/tab định danh theo tên nên hai
     # người cùng tên sẽ dùng chung folder (xem tài liệu của nhau). Yêu cầu tên phân biệt.
     if any(c["name"].strip().lower() == name.strip().lower() and c["email"].lower() != email.lower()
            for c in clients):
-        raise ValueError(
+        raise DuplicateClientNameError(
             f"TRÙNG TÊN: '{name}' đã tồn tại với email khác. Dùng tên phân biệt "
             f"(vd '{name} (2)') để tránh dùng chung folder tài liệu.")
-    with open(CLIENTS_CSV, "a", encoding="utf-8", newline="") as f:
-        csv.writer(f).writerow([name, email])
+    clients.append({"name": name, "email": email})
+    _write_clients_atomic(clients)
 
 
 def list_docs():
+    if not os.path.isdir(DOCS_DIR):
+        return []
     return [
         os.path.join(DOCS_DIR, f)
         for f in sorted(os.listdir(DOCS_DIR))
-        if f.lower().endswith(".pdf")
+        if f.lower().endswith(".pdf") and os.path.isfile(os.path.join(DOCS_DIR, f))
     ]
+
+
+def validate_pdf_source(path):
+    if not os.path.isfile(path) or not str(path).lower().endswith(".pdf"):
+        raise ValueError("Tài liệu phải là một file PDF tồn tại")
+    try:
+        with pikepdf.open(path) as document:
+            if len(document.pages) < 1:
+                raise ValueError("PDF không có trang nào")
+            if len(document.pages) > MAX_RENDER_PAGES:
+                raise ValueError(f"PDF vượt quá giới hạn {MAX_RENDER_PAGES} trang")
+    except pikepdf.PasswordError as exc:
+        raise ValueError("PDF có mật khẩu; hãy dùng bản không khóa để render") from exc
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"PDF không đọc được: {exc}") from exc
+    return path
 
 
 def remove_client(email):
@@ -85,18 +197,32 @@ def remove_client(email):
     kept = [c for c in clients if c["email"].lower() != email.lower()]
     if len(kept) == len(clients):
         return False
-    with open(CLIENTS_CSV, "w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["name", "email"])
-        writer.writerows([[c["name"], c["email"]] for c in kept])
+    _write_clients_atomic(kept)
     return True
+
+
+def normalize_document_base(value):
+    """Return a PDF document base name that cannot escape ``DOCS_DIR``."""
+    raw = str(value or "").strip()
+    if (not raw or raw in {".", ".."} or len(raw) > 200
+            or re.search(r'[<>:"/\\|?*\x00-\x1f]', raw)):
+        raise ValueError("Tên tài liệu không hợp lệ")
+    if raw.lower().endswith(".pdf"):
+        raw = raw[:-4].rstrip()
+    if not raw or raw in {".", ".."} or raw.endswith((".", " ")):
+        raise ValueError("Tên tài liệu không hợp lệ")
+    return raw
 
 
 def remove_doc(doc_base):
     """Xoá tài liệu gốc khỏi kho docs/ theo tên (không đuôi). Trả về True nếu có xoá."""
+    doc_base = normalize_document_base(doc_base)
+    root = os.path.abspath(DOCS_DIR)
     removed = False
     for ext in (".pdf", ".PDF"):
-        p = os.path.join(DOCS_DIR, doc_base + ext)
+        p = os.path.abspath(os.path.join(root, doc_base + ext))
+        if os.path.commonpath([root, p]) != root:
+            raise ValueError("Tên tài liệu nằm ngoài kho docs")
         if os.path.isfile(p):
             os.remove(p)
             removed = True
@@ -120,7 +246,15 @@ def _render_job(doc_path, recipient):
 def render_batch(docs, recipients, *, retries=2):
     os.makedirs(out_root(), exist_ok=True)
     rows = []
-    pending = [(doc, r) for doc in docs for r in recipients]
+    normalized_recipients = [
+        {**recipient, "name": normalize_client_name(recipient.get("name")),
+         "email": str(recipient.get("email") or "").strip().lower()}
+        for recipient in recipients
+    ]
+    if any(not recipient["name"] or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient["email"])
+           for recipient in normalized_recipients):
+        raise ValueError("Danh sách khách có tên/email không hợp lệ")
+    pending = [(doc, recipient) for doc in docs for recipient in normalized_recipients]
     attempt = 0
     # B2: retry CHÍNH XÁC các bản render thất bại (chỉ job lỗi được thử lại), tránh mất bản render.
     while pending and attempt <= retries:
@@ -142,19 +276,34 @@ def render_batch(docs, recipients, *, retries=2):
         attempt += 1
     if pending:
         print(f">> CÒN {len(pending)} bản render THẤT BẠI sau {retries} lần thử — cần xử lý tay.")
+        raise RenderBatchError(pending)
     return rows
 
 
-def write_new_rows_csv(rows, filename="new_rows.csv"):
+def write_new_rows_csv(rows, filename=None):
     if not rows:
-        return
+        return None
     root = out_root()
+    if not filename:
+        filename = f"new_rows_{time.time_ns()}_{uuid.uuid4().hex[:8]}.csv"
     out_path = os.path.join(root, filename)
     os.makedirs(root, exist_ok=True)
-    with open(out_path, "w", encoding="utf-8", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["TenNguoiNhan", "Email", "TenFile"])
-        writer.writerows(rows)
+    fd, pending_path = tempfile.mkstemp(prefix=f".{filename}.", suffix=".part", dir=root)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["TenNguoiNhan", "Email", "TenFile"])
+            writer.writerows(rows)
+            f.flush()
+            os.fsync(f.fileno())
+        # Mỗi batch mặc định có tên riêng, và file chỉ xuất hiện sau
+        # khi ghi xong. Không còn ghi đè/mất đơn khi hai batch chạy sát nhau.
+        os.replace(pending_path, out_path)
+    finally:
+        try:
+            os.remove(pending_path)
+        except FileNotFoundError:
+            pass
 
     print(f"\nĐã ghi {len(rows)} dòng vào {out_path}")
     if mirror_ready():
@@ -162,3 +311,4 @@ def write_new_rows_csv(rows, filename="new_rows.csv"):
     else:
         print(">> CẢNH BÁO: folder mirror chưa đồng bộ, đang ghi tạm vào ./output")
         print(f">> Sau khi mirror xong, copy các file trong {root} vào folder Source trên Drive.")
+    return out_path

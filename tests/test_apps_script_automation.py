@@ -36,6 +36,75 @@ class AppsScriptAutomationTest(unittest.TestCase):
         idx_call = self.src.index("caiDatTuDongHoa();", idx_form)
         self.assertGreater(idx_call, idx_form)
 
+    def test_forms_have_email_validation_and_single_submit_triggers(self):
+        self.assertIn("function _emailTextValidation()", self.src)
+        self.assertIn("requireTextIsEmail()", self.src)
+        self.assertIn("function _ensureSingleFormTrigger(handler, form)", self.src)
+        self.assertIn("trigger.getTriggerSourceId() === form.getId()", self.src)
+        self.assertIn("_ensureSingleFormTrigger('xuLyFormDatMua', form)", self.src)
+        self.assertIn("_ensureSingleFormTrigger('xuLyFormPreorder', form)", self.src)
+        self.assertIn("function _isValidPersonName(name)", self.src)
+        self.assertIn("!_isValidPersonName(name) || !_isValidEmail(email)", self.src)
+
+    def test_expiry_and_document_deletion_cover_duplicate_legacy_folders(self):
+        expiry = self.src[self.src.index("function kiemTraHetHan()"):self.src.index("function giaHanMotDong")]
+        remove_doc = self.src[self.src.index("function _xoaMotTaiLieu"):self.src.index("function xoaTaiLieuDaTich")]
+        self.assertIn("while (folders.hasNext())", expiry)
+        self.assertIn("while (folders.hasNext())", remove_doc)
+
+    def test_client_name_email_identity_is_enforced_before_distribution(self):
+        merge = self.src[
+            self.src.index("function mergeRowsIntoClientTabs"):
+            self.src.index("function tuDongXuLyFileMoi")
+        ]
+        distribution = self.src[
+            self.src.index("function phanPhoi(options)"):
+            self.src.index("function capNhatDashboard")
+        ]
+        self.assertIn("TỪ CHỐI trùng tên khách khác email", merge)
+        self.assertIn("identityMismatch", distribution)
+        self.assertIn("Lỗi định danh", distribution)
+        self.assertIn("_removeAccess(folder, cleanEmail)", distribution)
+
+    def test_invalid_reserved_clients_are_rejected_and_viewer_access_is_verified(self):
+        merge = self.src[
+            self.src.index("function mergeRowsIntoClientTabs"):
+            self.src.index("function tuDongXuLyFileMoi")
+        ]
+        share = self.src[
+            self.src.index("function _ensureOnlyViewer"):
+            self.src.index("function _removeAccess")
+        ]
+        self.assertIn("_isValidClientTabName(clientName)", merge)
+        self.assertIn("_isValidEmail(clientEmail)", merge)
+        self.assertIn("isSystemTab(clean)", self.src)
+        self.assertIn("Drive không xác nhận quyền Viewer", share)
+        self.assertIn("Không thể hạ quyền Editor", share)
+        self.assertNotIn("catch", share)
+
+    def test_migration_and_revocation_fail_closed(self):
+        migration = self.src[
+            self.src.index("function tachTheoKhach"):
+            self.src.index("function mergeRowsIntoClientTabs")
+        ]
+        revoke = self.src[
+            self.src.index("function _removeAccess"):
+            self.src.index("// ============ THEN TRÊN WEB")
+        ]
+        expiry = self.src[
+            self.src.index("function kiemTraHetHan"):
+            self.src.index("function giaHanMotDong")
+        ]
+        self.assertIn("_isValidClientTabName(name)", migration)
+        self.assertIn("groupEmails[name] !== email", migration)
+        self.assertIn("Drive chưa xác nhận gỡ hết quyền", revoke)
+        self.assertNotIn("catch", revoke)
+        self.assertIn("if (!_goQuyenThenTrenWebNeuKhongConHan", expiry)
+
+    def test_preorder_candidate_is_validated_before_properties_are_changed(self):
+        handler = self.src[self.src.index("function caiDatEmailPreorder()"):self.src.index("function _taoFormPreorder")]
+        self.assertLess(handler.index("_preorderEmailsFromConfig(candidate)"), handler.index("props.setProperty"))
+
     def test_payment_menu_has_resend_and_webhook_test_tools(self):
         self.assertIn("🔁 Gửi lại link Discord cho đơn đang chọn", self.src)
         self.assertIn("guiLaiLinkDiscordChoDonDangChon", self.src)
@@ -48,6 +117,39 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("Webhook PayOS không khớp orderCode", self.src)
         self.assertIn("data.orderCode", self.src)
         self.assertIn("_pmtMintAndSendForRow(sheet, i + 2", self.src)
+
+    def test_payment_rows_and_webhooks_are_serialized(self):
+        form_handler = self.src[
+            self.src.index("function xuLyFormDatMua(e)"):self.src.index("function _pmtMintInvite")
+        ]
+        webhook_handler = self.src[
+            self.src.index("function doPost(e)"):self.src.index("function doGet(e)")
+        ]
+        manual_resend = self.src[
+            self.src.index("function guiLaiLinkDiscordChoDonDangChon()"):
+            self.src.index("function _pmtVerifyWebhook")
+        ]
+        self.assertIn("LockService.getScriptLock()", form_handler)
+        self.assertIn("lock.waitLock(30000)", form_handler)
+        self.assertIn("LockService.getScriptLock()", webhook_handler)
+        self.assertIn("if (locked) lock.releaseLock()", webhook_handler)
+        self.assertIn("LockService.getScriptLock()", manual_resend)
+        self.assertIn("if (locked) lock.releaseLock()", manual_resend)
+        self.assertIn("currentStatus !== 'da_xu_ly'", form_handler)
+        self.assertIn("loi_gui_email_qr", form_handler)
+
+    def test_discord_renewals_have_a_bounded_idempotency_history(self):
+        handler = self.src[
+            self.src.index("function xuLyLenhGiaHanDiscordTuDong()"):
+            self.src.index("function decorateRegistry")
+        ]
+        self.assertIn("_discordRenewSeen(jobId)", handler)
+        self.assertIn("_discordRenewMark(jobId)", handler)
+        self.assertIn("history.slice(-300)", self.src)
+
+    def test_dashboard_clears_all_old_rows(self):
+        self.assertNotIn("A4:Z999", self.src)
+        self.assertIn("dash.getMaxRows() - 3", self.src)
 
     def test_payment_uses_payos_qr_with_fixed_amount_and_signed_webhook(self):
         self.assertIn("const PMT_DEFAULT_AMOUNT = 99999", self.src)
@@ -86,7 +188,11 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function _preorderCode(email)", self.src)
         self.assertIn("const out = _pmtMintInvite(code, name, email);", self.src)
         self.assertIn("function guiLaiLinkDiscordChoPreorderDangChon()", self.src)
-        self.assertIn("name === PMT_ORDER_TAB || name === PREORDER_TAB", self.src)
+        resend = self.src[self.src.index("function guiLaiLinkDiscordChoPreorderDangChon()") :]
+        self.assertIn("LockService.getScriptLock()", resend)
+        self.assertIn("if (locked) lock.releaseLock()", resend)
+        system_tabs = self.src[self.src.index("function isSystemTab"):self.src.index("function _isValidClientTabName")]
+        self.assertIn("PMT_ORDER_TAB, PREORDER_TAB", system_tabs)
 
     def test_preorder_rejects_a_second_form_submit_for_the_same_email(self):
         handler = self.src[self.src.index("function xuLyFormPreorder(e)"):]
@@ -99,7 +205,7 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function capQuyenThenTrenWebChoKhachConHan(conHan)", self.src)
         self.assertIn("capQuyenThenTrenWebChoKhachConHan(conHan);", self.src)
         self.assertIn("function _goQuyenThenTrenWebNeuKhongConHan(email, excludedName)", self.src)
-        self.assertIn("_goQuyenThenTrenWebNeuKhongConHan(email, name);", self.src)
+        self.assertIn("_goQuyenThenTrenWebNeuKhongConHan(email, name)", self.src)
 
     def test_experience_program_automation_removed(self):
         self.assertNotIn("Trai" + "Nghiem", self.src)

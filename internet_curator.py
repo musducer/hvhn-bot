@@ -1,9 +1,11 @@
 import asyncio
 import hashlib
 import html
+import ipaddress
 import json
 import os
 import re
+import tempfile
 import time
 import unicodedata
 from io import BytesIO
@@ -12,11 +14,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Iterable
 from urllib.parse import urljoin, urlsplit, urlunsplit
-from xml.etree import ElementTree
 
 import aiohttp
 import requests
+from defusedxml import ElementTree
 from pypdf import PdfReader
+from env_utils import env_int
 
 
 USER_AGENT = os.getenv(
@@ -24,9 +27,9 @@ USER_AGENT = os.getenv(
     "Mozilla/5.0 (compatible; HVHN-Internet-Curator/0.1)",
 )
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=25)
-MAX_RESPONSE_BYTES = int(os.getenv("HVHN_INTERNET_CURATOR_MAX_MB", "4")) * 1024 * 1024
-MAX_PDF_BYTES = int(os.getenv("HVHN_INTERNET_CURATOR_MAX_PDF_MB", "18")) * 1024 * 1024
-MAX_PDF_PAGES = int(os.getenv("HVHN_INTERNET_CURATOR_MAX_PDF_PAGES", "40"))
+MAX_RESPONSE_BYTES = env_int("HVHN_INTERNET_CURATOR_MAX_MB", 4, minimum=1, maximum=64) * 1024 * 1024
+MAX_PDF_BYTES = env_int("HVHN_INTERNET_CURATOR_MAX_PDF_MB", 18, minimum=1, maximum=256) * 1024 * 1024
+MAX_PDF_PAGES = env_int("HVHN_INTERNET_CURATOR_MAX_PDF_PAGES", 40, minimum=1, maximum=500)
 DEFAULT_SOURCES_PATH = Path(os.getenv("HVHN_INTERNET_SOURCES", "internet_sources.json"))
 DEFAULT_PENDING_DIR = Path(os.getenv("HVHN_INTERNET_PENDING_DIR", "internet_pending"))
 
@@ -58,7 +61,7 @@ CREATE INDEX IF NOT EXISTS idx_ai_internet_items_source ON ai_internet_items (so
 RELEVANT_TERMS = {
     "van hoc", "tho", "truyen", "tieu thuyet", "phe binh", "ly luan", "tac pham",
     "tac gia", "nha van", "nha tho", "nghien cuu", "sang tac", "doc sach",
-    "hoc thuat", "ly luan", "nghe thuat", "tap chi", "blog", "bai viet",
+    "hoc thuat", "nghe thuat", "tap chi", "blog", "bai viet",
     "literature", "poetry", "poem", "fiction", "novel", "essay", "review",
     "booker", "pulitzer", "nobel", "writer", "author", "interview", "criticism",
 }
@@ -149,11 +152,40 @@ def _slug(value: str, fallback: str = "internet") -> str:
     return (value[:90] or fallback)
 
 
+def _write_text_atomic(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, pending = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".part", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(pending, path)
+    finally:
+        try:
+            os.remove(pending)
+        except FileNotFoundError:
+            pass
+
+
 def normalize_url(url: str, base: str | None = None) -> str:
     if base:
         url = urljoin(base, url)
     parts = urlsplit(url)
-    if parts.scheme not in {"http", "https"} or not parts.netloc:
+    host = (parts.hostname or "").lower().rstrip(".")
+    try:
+        port = parts.port
+    except ValueError:
+        return ""
+    if (parts.scheme not in {"http", "https"} or not host
+            or parts.username or parts.password or port not in (None, 80, 443)
+            or host == "localhost" or host.endswith(".localhost")):
+        return ""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and not address.is_global:
         return ""
     query = parts.query if re.search(r"(^|&)p=\d+(&|$)", parts.query) else ""
     path = re.sub(r"/{2,}", "/", parts.path or "/")
@@ -166,6 +198,72 @@ def same_site(url: str, home: str) -> bool:
     a = urlsplit(url)
     b = urlsplit(home)
     return a.netloc.lower().removeprefix("www.") == b.netloc.lower().removeprefix("www.")
+
+
+def _requests_get_public(url: str, timeout: int):
+    origin = normalize_url(url)
+    if not origin:
+        return None
+    current = origin
+    for _ in range(8):
+        response = requests.get(
+            current,
+            headers={"User-Agent": USER_AGENT},
+            timeout=timeout,
+            stream=True,
+            allow_redirects=False,
+        )
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("location", "")
+        target = normalize_url(location, current) if location else ""
+        response.close()
+        if not target or not same_site(target, origin):
+            return None
+        current = target
+    return None
+
+
+async def _aiohttp_get_public(session: aiohttp.ClientSession, url: str):
+    origin = normalize_url(url)
+    if not origin:
+        return None
+    current = origin
+    for _ in range(8):
+        response = await session.get(
+            current,
+            headers={"User-Agent": USER_AGENT},
+            timeout=REQUEST_TIMEOUT,
+            allow_redirects=False,
+        )
+        if response.status not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("location", "")
+        target = normalize_url(location, current) if location else ""
+        response.release()
+        if not target or not same_site(target, origin):
+            return None
+        current = target
+    return None
+
+
+def _read_requests_bounded(response, limit: int) -> bytes | None:
+    declared = response.headers.get("content-length", "")
+    try:
+        if declared and int(declared) > limit:
+            return None
+    except ValueError:
+        pass
+    chunks = []
+    total = 0
+    for chunk in response.iter_content(chunk_size=256 * 1024):
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            return None
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def load_sources(path: Path | str = DEFAULT_SOURCES_PATH) -> list[InternetSource]:
@@ -376,11 +474,15 @@ def extract_article(raw_html: str, url: str) -> dict:
 
 
 def fetch_pdf_text_requests(url: str) -> str:
+    resp = None
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=35, allow_redirects=True)
-        if resp.status_code >= 400 or len(resp.content) > MAX_PDF_BYTES:
+        resp = _requests_get_public(url, timeout=35)
+        if resp is None or resp.status_code >= 400:
             return ""
-        reader = PdfReader(BytesIO(resp.content))
+        data = _read_requests_bounded(resp, MAX_PDF_BYTES)
+        if data is None:
+            return ""
+        reader = PdfReader(BytesIO(data))
         pages = []
         for page in reader.pages[:MAX_PDF_PAGES]:
             try:
@@ -393,6 +495,9 @@ def fetch_pdf_text_requests(url: str) -> str:
         return "\n\n".join(pages)[:60000]
     except Exception:
         return ""
+    finally:
+        if resp is not None:
+            resp.close()
 
 
 def link_score(url: str) -> int:
@@ -444,7 +549,10 @@ def parse_xml_links(text: str, base_url: str) -> list[str]:
 
 async def fetch_text(session: aiohttp.ClientSession, url: str) -> tuple[str, str]:
     async def _read_once() -> tuple[str, str]:
-        async with session.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT, allow_redirects=True) as resp:
+        resp = await _aiohttp_get_public(session, url)
+        if resp is None:
+            return "", ""
+        try:
             if resp.status >= 400:
                 return await asyncio.to_thread(fetch_text_requests, url)
             data = await resp.content.read(MAX_RESPONSE_BYTES + 1)
@@ -453,6 +561,8 @@ async def fetch_text(session: aiohttp.ClientSession, url: str) -> tuple[str, str
             content_type = resp.headers.get("content-type", "")
             encoding = resp.charset or "utf-8"
             return data.decode(encoding, errors="replace"), content_type
+        finally:
+            resp.release()
 
     try:
         text, content_type = await _read_once()
@@ -475,20 +585,25 @@ async def fetch_text(session: aiohttp.ClientSession, url: str) -> tuple[str, str
 
 
 def fetch_text_requests(url: str) -> tuple[str, str]:
+    resp = None
     try:
-        resp = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20, allow_redirects=True)
-        if resp.status_code >= 400:
+        resp = _requests_get_public(url, timeout=20)
+        if resp is None or resp.status_code >= 400:
             return "", ""
         content_type = resp.headers.get("content-type", "")
-        if len(resp.content) > MAX_RESPONSE_BYTES:
+        data = _read_requests_bounded(resp, MAX_RESPONSE_BYTES)
+        if data is None:
             return "", ""
         if "html" in content_type.lower() and "charset" not in content_type.lower():
-            resp.encoding = "utf-8"
+            encoding = "utf-8"
         else:
-            resp.encoding = resp.encoding or "utf-8"
-        return resp.text, content_type
+            encoding = resp.encoding or "utf-8"
+        return data.decode(encoding, errors="replace"), content_type
     except requests.RequestException:
         return "", ""
+    finally:
+        if resp is not None:
+            resp.close()
 
 
 async def discover_source_urls(
@@ -508,7 +623,7 @@ async def discover_source_urls(
     seed_urls = [urljoin(home.rstrip("/") + "/", path) for path in seed_paths]
 
     for seed in seed_urls:
-        text, ctype = await fetch_text(session, seed)
+        text, _ = await fetch_text(session, seed)
         if not text:
             continue
         urls = [u for u in parse_xml_links(text, seed) if same_site(u, home)]
@@ -729,10 +844,10 @@ async def store_pending_articles(db, articles: list[Article], pending_dir: Path 
         )
         if row_id:
             inserted += 1
-            digest = hashlib.sha1(article.url.encode("utf-8")).hexdigest()[:10]
+            digest = hashlib.sha256(article.url.encode("utf-8")).hexdigest()[:10]
             filename = f"{int(time.time())}_{row_id}_{_slug(article.title)}_{digest}.md"
             try:
-                (pending_dir / filename).write_text(article.markdown, encoding="utf-8")
+                _write_text_atomic(pending_dir / filename, article.markdown)
             except OSError:
                 pass
     return inserted
@@ -762,8 +877,8 @@ async def scan_sources(
                 session,
                 source,
                 max_candidates=max(12, max_per_source * 4),
-                max_pages=int(os.getenv("HVHN_INTERNET_DISCOVERY_PAGES", "24")),
-                max_depth=int(os.getenv("HVHN_INTERNET_DISCOVERY_DEPTH", "2")),
+                max_pages=env_int("HVHN_INTERNET_DISCOVERY_PAGES", 24, minimum=1, maximum=200),
+                max_depth=env_int("HVHN_INTERNET_DISCOVERY_DEPTH", 2, minimum=0, maximum=5),
             )
             urls = discovered["urls"]
             total_discovered += len(urls)

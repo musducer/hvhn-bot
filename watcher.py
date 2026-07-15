@@ -6,25 +6,29 @@ Hoặc bấm đúp run_watcher.bat. Cứ để chạy khi PC bật; đơn tới 
 import os
 import time
 import shutil
+import filecmp
 import traceback
 import asyncio
 import json
 import uuid
 import socket
+from contextlib import suppress
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse, urlunparse
 
 import requests
 import asyncpg
 from dotenv import load_dotenv
+from download_policy import is_allowed_pdf_url, safe_redirect_url
+from env_utils import env_float, env_int
 
 from hvhn_batch import (
     MIRROR_SOURCE, DOCS_DIR, load_clients, append_client,
     list_docs, render_batch, write_new_rows_csv, remove_client, remove_doc,
+    find_client, validate_pdf_source, normalize_document_base, DuplicateClientNameError,
 )
 from pdf_knowledge import (
     PDF_KNOWLEDGE_SCHEMA,
-    index_pdf_path,
     remove_pdf_document_by_title,
     sync_pdf_folder,
 )
@@ -49,24 +53,27 @@ SHEET_STATUS_FILE = os.path.join(MIRROR_PARENT, "_sheet_status", "sheet_status.j
 
 # Lan nhan don tu Drive Desktop. 5 giay van nhe voi may local, nhung cat bot
 # kha nhieu thoi gian cho so voi mac dinh cu; co the tang lai qua .env.
-POLL_SECONDS = max(3, int(os.getenv("HVHN_WATCHER_POLL_SECONDS", "5")))
-STABLE_CHECKS = max(2, int(os.getenv("HVHN_STABLE_CHECKS", "2")))
-STABLE_GAP_SECONDS = max(0.2, float(os.getenv("HVHN_STABLE_GAP_SECONDS", "0.5")))
+POLL_SECONDS = env_int("HVHN_WATCHER_POLL_SECONDS", 5, minimum=3, maximum=300)
+STABLE_CHECKS = env_int("HVHN_STABLE_CHECKS", 2, minimum=2, maximum=20)
+STABLE_GAP_SECONDS = env_float("HVHN_STABLE_GAP_SECONDS", 0.5, minimum=0.2, maximum=30)
+MAX_PDF_MB = env_int("HVHN_MAX_PDF_MB", 300, minimum=1, maximum=1024)
+MAX_PDF_BYTES = MAX_PDF_MB * 1024 * 1024
 PDF_SYNC_SECONDS = 600
 LAST_PDF_SYNC = 0
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 BOT_DOCS_DIR = os.getenv("HVHN_BOT_DOCS_DIR", os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot_docs"))
-STALE_PROCESSING_MINUTES = int(os.getenv("HVHN_STALE_PROCESSING_MINUTES", "30"))
+STALE_PROCESSING_MINUTES = env_int("HVHN_STALE_PROCESSING_MINUTES", 30, minimum=2, maximum=1440)
+JOB_LEASE_REFRESH_SECONDS = max(5, min(60, STALE_PROCESSING_MINUTES * 20))
 
 DB_RETRY_BASE_SECONDS = 2
 DB_RETRY_MAX_SECONDS = 60
-DB_CONNECT_TIMEOUT_SECONDS = float(os.getenv("HVHN_DB_CONNECT_TIMEOUT_SECONDS", "20"))
-DB_COMMAND_TIMEOUT_SECONDS = float(os.getenv("HVHN_DB_COMMAND_TIMEOUT_SECONDS", "30"))
-DB_QUERY_TIMEOUT_SECONDS = float(os.getenv("HVHN_DB_QUERY_TIMEOUT_SECONDS", "30"))
-DB_LONG_QUERY_SECONDS = float(os.getenv("HVHN_DB_LONG_QUERY_SECONDS", "5"))
-DB_POOL_MIN_SIZE = int(os.getenv("HVHN_DB_POOL_MIN_SIZE", "1"))
-DB_POOL_MAX_SIZE = int(os.getenv("HVHN_DB_POOL_MAX_SIZE", "4"))
+DB_CONNECT_TIMEOUT_SECONDS = env_float("HVHN_DB_CONNECT_TIMEOUT_SECONDS", 20, minimum=1, maximum=300)
+DB_COMMAND_TIMEOUT_SECONDS = env_float("HVHN_DB_COMMAND_TIMEOUT_SECONDS", 30, minimum=1, maximum=600)
+DB_QUERY_TIMEOUT_SECONDS = env_float("HVHN_DB_QUERY_TIMEOUT_SECONDS", 30, minimum=1, maximum=600)
+DB_LONG_QUERY_SECONDS = env_float("HVHN_DB_LONG_QUERY_SECONDS", 5, minimum=0.1, maximum=300)
+DB_POOL_MIN_SIZE = env_int("HVHN_DB_POOL_MIN_SIZE", 1, minimum=1, maximum=20)
+DB_POOL_MAX_SIZE = max(DB_POOL_MIN_SIZE, env_int("HVHN_DB_POOL_MAX_SIZE", 4, minimum=1, maximum=20))
 _db_backoff_seconds = DB_RETRY_BASE_SECONDS
 _last_db_error = ""
 _db_pool = None
@@ -166,7 +173,7 @@ async def _reset_db_pool(reason):
     if pool is not None:
         try:
             pool.terminate()
-        except Exception:
+        except Exception:  # nosec B110
             pass
     print(f"[DB] pool_reset loop={old_loop_id} reason={reason}", flush=True)
 
@@ -236,8 +243,10 @@ CREATE TABLE IF NOT EXISTS hvhn_doc_jobs (
     status TEXT NOT NULL DEFAULT 'pending',
     error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    processing_started_at TIMESTAMPTZ,
     processed_at TIMESTAMPTZ
 );
+ALTER TABLE hvhn_doc_jobs ADD COLUMN IF NOT EXISTS processing_started_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS hvhn_runtime_status (
     key TEXT PRIMARY KEY,
@@ -298,7 +307,9 @@ def _stable(path, checks=None, gap=None):
             time.sleep(gap)
         else:
             return True
-    return True
+    # Kích thước đổi ở mọi lần đo: Drive vẫn đang ghi. Giữ job lại
+    # cho vòng poll sau thay vì đọc/render một file dở dang.
+    return False
 
 
 def _safe_stem(value, fallback="don"):
@@ -325,9 +336,50 @@ def _write_atomic(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".part")
-    with open(tmp_path, "wb") as f:
-        f.write(data)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _write_valid_pdf(path, data):
+    if len(data) > MAX_PDF_BYTES:
+        raise ValueError(f"PDF exceeds the {MAX_PDF_MB}MB limit")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pending = path.with_name(f".{path.name}.{uuid.uuid4().hex[:8]}.part.pdf")
+    try:
+        with open(pending, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        # Validate the private temporary file. The Drive mirror never observes
+        # corrupt/truncated PDF bytes under the final filename.
+        _validate_local_pdf(str(pending))
+        if path.exists():
+            if filecmp.cmp(pending, path, shallow=False):
+                return str(path)
+            raise FileExistsError(f"Refusing to replace an existing PDF: {path.name}")
+        os.replace(pending, path)
+        return str(path)
+    finally:
+        try:
+            pending.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _validate_local_pdf(path):
+    if os.path.getsize(path) > MAX_PDF_BYTES:
+        raise ValueError(f"PDF exceeds the {MAX_PDF_MB}MB limit")
+    return validate_pdf_source(path)
 
 
 def _unique_path(folder, filename):
@@ -344,6 +396,39 @@ def _unique_path(folder, filename):
         if not candidate.exists():
             return str(candidate)
     return str(folder / f"{stem}_{uuid.uuid4().hex[:8]}{suffix}")
+
+
+def _discord_pdf_path(folder, filename, job_id):
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    stem = _safe_stem(Path(filename or "tai_lieu.pdf").stem, "tai_lieu")
+    return str(folder / f"discord_{int(job_id)}__{stem}.pdf")
+
+
+def _copy_pdf_to_store(source, folder, filename):
+    folder = Path(folder)
+    folder.mkdir(parents=True, exist_ok=True)
+    # A lost DB acknowledgement or duplicate Form upload may give the same
+    # bytes another inbox filename. Content is authoritative: reuse the first
+    # stored document so it is never distributed twice under suffixes.
+    for existing in folder.glob("*.pdf"):
+        try:
+            if filecmp.cmp(source, existing, shallow=False):
+                return str(existing)
+        except OSError:
+            continue
+    safe_name = _safe_stem(Path(filename).stem, "tai_lieu") + ".pdf"
+    target = Path(_unique_path(folder, safe_name))
+    pending = target.with_name(target.name + ".part")
+    try:
+        shutil.copy2(source, pending)
+        os.replace(pending, target)
+    finally:
+        try:
+            pending.unlink()
+        except FileNotFoundError:
+            pass
+    return str(target)
 
 
 def _folder_has_any(folder, suffixes):
@@ -368,7 +453,7 @@ def _has_local_pending_jobs():
 
 def _drive_direct_url(url):
     parsed = urlparse(url.strip())
-    if "drive.google.com" not in parsed.netloc:
+    if (parsed.hostname or "").lower() != "drive.google.com":
         return url.strip()
     if "/file/d/" in parsed.path:
         file_id = parsed.path.split("/file/d/", 1)[1].split("/", 1)[0]
@@ -379,33 +464,86 @@ def _drive_direct_url(url):
     return url.strip()
 
 
-def _download_pdf(url, filename, target_folder):
-    target = _unique_path(target_folder, filename or "tai_lieu.pdf")
+def _safe_session_get(session, url, *, headers, params=None):
+    if not is_allowed_pdf_url(url):
+        raise ValueError("Only public HTTPS Google Drive links are accepted")
+    current_url = url
+    current_params = params
+    for _ in range(8):
+        response = session.get(
+            current_url,
+            params=current_params,
+            stream=True,
+            timeout=(20, 180),
+            headers=headers,
+            allow_redirects=False,
+        )
+        if response.status_code not in (301, 302, 303, 307, 308):
+            return response
+        location = response.headers.get("Location", "")
+        try:
+            next_url = safe_redirect_url(response.url or current_url, location)
+        finally:
+            response.close()
+        current_url = next_url
+        current_params = None
+    raise RuntimeError("Google Drive download redirected too many times")
+
+
+def _download_pdf(url, filename, target_folder, *, target_path=None):
+    target = str(target_path) if target_path else _unique_path(target_folder, filename or "tai_lieu.pdf")
     direct_url = _drive_direct_url(url)
     headers = {"User-Agent": "Mozilla/5.0 HVHN-Watcher/1.0"}
     last_error = None
     for attempt in range(1, 5):
-        tmp = target + ".part"
+        tmp = target + f".{uuid.uuid4().hex[:8]}.part.pdf"
         try:
             with requests.Session() as session:
-                resp = session.get(direct_url, stream=True, timeout=(20, 180), headers=headers)
-                token = None
-                for key, value in session.cookies.items():
-                    if key.startswith("download_warning"):
-                        token = value
-                        break
-                if token:
-                    resp.close()
-                    resp = session.get(direct_url, params={"confirm": token}, stream=True, timeout=(20, 180), headers=headers)
-                resp.raise_for_status()
-                with open(tmp, "wb") as f:
-                    for chunk in resp.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
+                resp = _safe_session_get(session, direct_url, headers=headers)
+                try:
+                    token = None
+                    for key, value in session.cookies.items():
+                        if key.startswith("download_warning"):
+                            token = value
+                            break
+                    if token:
+                        resp.close()
+                        resp = _safe_session_get(
+                            session,
+                            direct_url,
+                            params={"confirm": token},
+                            headers=headers,
+                        )
+                    resp.raise_for_status()
+                    try:
+                        declared_size = int(resp.headers.get("Content-Length", "0") or 0)
+                    except ValueError:
+                        declared_size = 0
+                    if declared_size > MAX_PDF_BYTES:
+                        raise ValueError(f"PDF exceeds the {MAX_PDF_MB}MB download limit")
+                    downloaded = 0
+                    with open(tmp, "wb") as f:
+                        for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                            if not chunk:
+                                continue
+                            downloaded += len(chunk)
+                            if downloaded > MAX_PDF_BYTES:
+                                raise ValueError(f"PDF exceeds the {MAX_PDF_MB}MB download limit")
                             f.write(chunk)
+                        f.flush()
+                        os.fsync(f.fileno())
+                finally:
+                    resp.close()
                 with open(tmp, "rb") as f:
                     head = f.read(5)
                 if head != b"%PDF-":
                     raise ValueError("Link khong tai ra PDF that. Dat Google Drive 'Anyone with the link can view' hoac dung Google Form upload.")
+                _validate_local_pdf(tmp)
+                if os.path.exists(target):
+                    if filecmp.cmp(tmp, target, shallow=False):
+                        os.remove(tmp)
+                        return target
+                    raise FileExistsError(f"Refusing to replace an existing PDF: {os.path.basename(target)}")
                 os.replace(tmp, target)
                 print(f"[DOWNLOAD] ok attempt={attempt} file={os.path.basename(target)}", flush=True)
                 return target
@@ -443,10 +581,11 @@ async def _fetch_discord_jobs():
                         conn.execute,
                         """
                         UPDATE hvhn_doc_jobs
-                        SET status = 'pending', error = NULL
+                        SET status = 'pending', error = NULL, processing_started_at = NULL
                         WHERE status = 'processing'
                           AND processed_at IS NULL
-                          AND created_at < now() - ($1::int * interval '1 minute')
+                          AND COALESCE(processing_started_at, created_at)
+                              < now() - ($1::int * interval '1 minute')
                         """,
                         STALE_PROCESSING_MINUTES,
                     )
@@ -458,7 +597,7 @@ async def _fetch_discord_jobs():
                         FROM hvhn_doc_jobs
                         WHERE status = 'pending'
                         ORDER BY created_at ASC
-                        LIMIT 10
+                        LIMIT 1
                         FOR UPDATE SKIP LOCKED
                         """,
                     )
@@ -467,7 +606,9 @@ async def _fetch_discord_jobs():
                         await _db_call(
                             "watcher_mark_processing",
                             conn.execute,
-                            "UPDATE hvhn_doc_jobs SET status = 'processing' WHERE id = ANY($1::int[])",
+                            "UPDATE hvhn_doc_jobs SET status = 'processing', "
+                            "processing_started_at = now(), processed_at = NULL "
+                            "WHERE id = ANY($1::int[])",
                             ids,
                         )
                 ok = True
@@ -487,10 +628,10 @@ async def _fetch_discord_jobs():
 async def _mark_discord_job(job_id, status, error=None, clear_file=False):
     global _db_acquire_count, _db_release_count
     if not DATABASE_URL:
-        return
+        return False
     pool = await _get_db_pool("mark_job")
     if pool is None:
-        return
+        return False
     started = time.perf_counter()
     ok = False
     try:
@@ -506,6 +647,7 @@ async def _mark_discord_job(job_id, status, error=None, clear_file=False):
                     """
                     UPDATE hvhn_doc_jobs
                     SET status = $2, error = $3, processed_at = now(),
+                        processing_started_at = NULL,
                         file_data = CASE WHEN $4 THEN NULL ELSE file_data END
                     WHERE id = $1
                     """,
@@ -524,6 +666,38 @@ async def _mark_discord_job(job_id, status, error=None, clear_file=False):
         _log_pool("mark_job_after_release")
         if ok and not _last_db_error:
             _mark_db_success("mark_job", started)
+    return ok
+
+
+async def _ack_discord_job(job_id, status, error=None, clear_file=False):
+    """Retry only the DB acknowledgement while the processing lease is alive."""
+    for attempt in range(1, 6):
+        if await _mark_discord_job(job_id, status, error, clear_file):
+            return True
+        if attempt < 5:
+            await asyncio.sleep(min(30, 2 ** attempt))
+    print(f"[DB] job_ack_exhausted job={job_id} status={status}", flush=True)
+    return False
+
+
+async def _renew_discord_job_lease(job_id):
+    while True:
+        await asyncio.sleep(JOB_LEASE_REFRESH_SECONDS)
+        pool = await _get_db_pool("renew_job_lease")
+        if pool is None:
+            continue
+        try:
+            async with pool.acquire() as conn:
+                await _db_call(
+                    "renew_job_lease",
+                    conn.execute,
+                    "UPDATE hvhn_doc_jobs SET processing_started_at = now() "
+                    "WHERE id = $1 AND status = 'processing'",
+                    job_id,
+                )
+        except Exception as exc:
+            print(f"[DB] lease_refresh_failed job={job_id} err={type(exc).__name__}: {exc}", flush=True)
+            await _reset_db_pool(f"renew_job_lease:{type(exc).__name__}:{exc}")
 
 
 def _materialize_discord_job(job):
@@ -539,13 +713,13 @@ def _materialize_discord_job(job):
         data = bytes(job["file_data"] or b"")
         if not data:
             return None  # file_data đã bị xoá (job đã xử lý trước) -> đánh done, không ghi trùng
-        target = _unique_path(INCOMING_DOCS, filename)
-        _write_atomic(target, data)
-        return target
+        target = _discord_pdf_path(INCOMING_DOCS, filename, job["id"])
+        return _write_valid_pdf(target, data)
     elif job_type == "add_document_url":
         url = (job["text_payload"] or "").strip()
         filename = job["file_name"] or f"tai_lieu_{job['id']}.pdf"
-        return _download_pdf(url, filename, INCOMING_DOCS)
+        target = _discord_pdf_path(INCOMING_DOCS, filename, job["id"])
+        return _download_pdf(url, filename, INCOMING_DOCS, target_path=target)
     elif job_type == "add_bot_document":
         filename = job["file_name"] or f"bot_tai_lieu_{job['id']}.pdf"
         if not filename.lower().endswith(".pdf"):
@@ -554,28 +728,32 @@ def _materialize_discord_job(job):
         if not data:
             return None  # đã xử lý trước (file_data đã xoá) -> đánh done, không ghi trùng
         os.makedirs(BOT_DOCS_DIR, exist_ok=True)
-        target = _unique_path(BOT_DOCS_DIR, filename)
-        _write_atomic(target, data)
-        return target
+        target = _discord_pdf_path(BOT_DOCS_DIR, filename, job["id"])
+        return _write_valid_pdf(target, data)
     elif job_type == "add_bot_document_url":
         url = (job["text_payload"] or "").strip()
         filename = job["file_name"] or f"bot_tai_lieu_{job['id']}.pdf"
         os.makedirs(BOT_DOCS_DIR, exist_ok=True)
-        return _download_pdf(url, filename, BOT_DOCS_DIR)
+        target = _discord_pdf_path(BOT_DOCS_DIR, filename, job["id"])
+        return _download_pdf(url, filename, BOT_DOCS_DIR, target_path=target)
     elif job_type == "remove_client":
         email = (job["text_payload"] or "").strip()
         _write_atomic(os.path.join(SHEET_XOA_KHACH, _job_name("discord_sheet_xoa_khach", email, ".txt")), email.encode("utf-8"))
         _write_atomic(os.path.join(XOA_KHACH, _job_name("discord_xoa_khach", email, ".txt")), email.encode("utf-8"))
         return None
     elif job_type == "remove_document":
-        doc_base = os.path.splitext((job["text_payload"] or "").strip())[0]
+        doc_base = normalize_document_base(job["text_payload"])
         _write_atomic(os.path.join(SHEET_XOA_TAILIEU, _job_name("discord_sheet_xoa_tailieu", doc_base, ".txt")), doc_base.encode("utf-8"))
         _write_atomic(os.path.join(XOA_TAILIEU, _job_name("discord_xoa_tailieu", doc_base, ".txt")), doc_base.encode("utf-8"))
         return None
     elif job_type == "renew_client":
         payload = (job["text_payload"] or "").strip()
         label = payload.split("\t")[0] if payload else str(job["id"])
-        _write_atomic(os.path.join(SHEET_GIAHAN_KHACH, _job_name("discord_giahan_khach", label, ".txt")), payload.encode("utf-8"))
+        idempotent_payload = payload + f"\tjob:{job['id']}"
+        _write_atomic(
+            os.path.join(SHEET_GIAHAN_KHACH, _job_name("discord_giahan_khach", label, ".txt")),
+            idempotent_payload.encode("utf-8"),
+        )
         return None
     else:
         raise ValueError(f"Loại đơn không hỗ trợ: {job_type}")
@@ -584,17 +762,26 @@ def _materialize_discord_job(job):
 async def _xu_ly_don_discord():
     jobs = await _fetch_discord_jobs()
     for job in jobs:
+        lease_task = asyncio.create_task(
+            _renew_discord_job_lease(job["id"]),
+            name=f"hvhn-job-lease-{job['id']}",
+        )
         try:
-            path = _materialize_discord_job(job)
+            path = await asyncio.to_thread(_materialize_discord_job, job)
             final_status = "done"
             if path and str(path).lower().endswith(".pdf"):
                 final_status = await _index_pdf_for_ai(path)
-            await _mark_discord_job(job["id"], final_status, clear_file=True)
-            print(f"[DISCORD] don #{job['id']} -> {final_status}", flush=True)
+            acknowledged = await _ack_discord_job(job["id"], final_status, clear_file=True)
+            suffix = "" if acknowledged else " (cho DB ack lai)"
+            print(f"[DISCORD] don #{job['id']} -> {final_status}{suffix}", flush=True)
         except Exception as exc:
             status = "download_failed" if "download_failed" in str(exc).lower() else "error"
-            await _mark_discord_job(job["id"], status, str(exc))
+            await _ack_discord_job(job["id"], status, str(exc))
             print(f"[DISCORD] LOI don #{job['id']} status={status}: {exc}", flush=True)
+        finally:
+            lease_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await lease_task
 
 
 def _count_files(folder, suffix=None):
@@ -662,94 +849,92 @@ async def _sync_runtime_status():
                 await _db_call("runtime_status_schema", conn.execute, DOC_JOB_SCHEMA)
                 # B5: gói toàn bộ cập nhật cache vào 1 transaction (TRUNCATE+INSERT atomic) —
                 # tránh dashboard rỗng tạm thời nếu lỗi mạng xảy ra giữa TRUNCATE và INSERT.
-                _tr = conn.transaction()
-                await _tr.start()
-                for key, value in status.items():
-                    await _upsert_runtime_status(conn, key, value)
-                for key, value in _db_health_snapshot().items():
-                    await _upsert_runtime_status(conn, key, value)
+                async with conn.transaction():
+                    for key, value in status.items():
+                        await _upsert_runtime_status(conn, key, value)
+                    for key, value in _db_health_snapshot().items():
+                        await _upsert_runtime_status(conn, key, value)
 
-                await _db_call("runtime_truncate_clients", conn.execute, "TRUNCATE hvhn_clients_cache")
-                if clients:
-                    await _db_call(
-                        "runtime_upsert_clients",
-                        conn.executemany,
-                        """
-                        INSERT INTO hvhn_clients_cache (email, name, doc_count, updated_at)
-                        VALUES ($1, $2, $3, now())
-                        ON CONFLICT (email) DO UPDATE
-                        SET name = EXCLUDED.name, doc_count = EXCLUDED.doc_count, updated_at = now()
-                        """,
-                        [(c["email"].lower(), c["name"], doc_count) for c in clients],
-                    )
-
-                await _db_call("runtime_truncate_docs", conn.execute, "TRUNCATE hvhn_docs_cache")
-                if docs:
-                    await _db_call(
-                        "runtime_upsert_docs",
-                        conn.executemany,
-                        """
-                        INSERT INTO hvhn_docs_cache (doc_name, updated_at)
-                        VALUES ($1, now())
-                        ON CONFLICT (doc_name) DO UPDATE SET updated_at = now()
-                        """,
-                        [(d,) for d in docs],
-                    )
-
-                if os.path.isfile(SHEET_STATUS_FILE):
-                    with open(SHEET_STATUS_FILE, encoding="utf-8") as f:
-                        snapshot = json.load(f)
-                    sheet_clients = snapshot.get("clients") or []
-                    sheet_docs = snapshot.get("docs") or []
-
-                    await _db_call("runtime_truncate_sheet_clients", conn.execute, "TRUNCATE hvhn_sheet_clients")
-                    if sheet_clients:
+                    await _db_call("runtime_truncate_clients", conn.execute, "TRUNCATE hvhn_clients_cache")
+                    if clients:
                         await _db_call(
-                            "runtime_upsert_sheet_clients",
+                            "runtime_upsert_clients",
                             conn.executemany,
                             """
-                            INSERT INTO hvhn_sheet_clients
-                                (email, name, grant_date, expiry_date, days_left, status, doc_count, updated_at)
-                            VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                            INSERT INTO hvhn_clients_cache (email, name, doc_count, updated_at)
+                            VALUES ($1, $2, $3, now())
                             ON CONFLICT (email) DO UPDATE
-                            SET name = EXCLUDED.name,
-                                grant_date = EXCLUDED.grant_date,
-                                expiry_date = EXCLUDED.expiry_date,
-                                days_left = EXCLUDED.days_left,
-                                status = EXCLUDED.status,
-                                doc_count = EXCLUDED.doc_count,
-                                updated_at = now()
+                            SET name = EXCLUDED.name, doc_count = EXCLUDED.doc_count, updated_at = now()
                             """,
-                            [
-                                (
-                                    str(c.get("email", "")).lower(),
-                                    c.get("name") or "",
-                                    c.get("grant_date") or "",
-                                    c.get("expiry_date") or "",
-                                    c.get("days_left"),
-                                    c.get("status") or "",
-                                    int(c.get("doc_count") or 0),
-                                )
-                                for c in sheet_clients
-                                if c.get("email") and c.get("name")
-                            ],
+                            [(c["email"].lower(), c["name"], doc_count) for c in clients],
                         )
 
-                    await _db_call("runtime_truncate_sheet_docs", conn.execute, "TRUNCATE hvhn_sheet_docs")
-                    if sheet_docs:
+                    await _db_call("runtime_truncate_docs", conn.execute, "TRUNCATE hvhn_docs_cache")
+                    if docs:
                         await _db_call(
-                            "runtime_upsert_sheet_docs",
+                            "runtime_upsert_docs",
                             conn.executemany,
                             """
-                            INSERT INTO hvhn_sheet_docs (doc_name, client_count, updated_at)
-                            VALUES ($1, $2, now())
-                            ON CONFLICT (doc_name) DO UPDATE
-                            SET client_count = EXCLUDED.client_count, updated_at = now()
+                            INSERT INTO hvhn_docs_cache (doc_name, updated_at)
+                            VALUES ($1, now())
+                            ON CONFLICT (doc_name) DO UPDATE SET updated_at = now()
                             """,
-                            [(d.get("doc_name") or "", int(d.get("client_count") or 0)) for d in sheet_docs if d.get("doc_name")],
+                            [(d,) for d in docs],
                         )
-                    await _upsert_runtime_status(conn, "sheet_status_exported_at", str(snapshot.get("exported_at") or ""))
-                await _tr.commit()  # B5: chốt transaction — mọi cache đổi cùng lúc hoặc không đổi gì
+
+                    if os.path.isfile(SHEET_STATUS_FILE):
+                        with open(SHEET_STATUS_FILE, encoding="utf-8") as f:
+                            snapshot = json.load(f)
+                        sheet_clients = snapshot.get("clients") or []
+                        sheet_docs = snapshot.get("docs") or []
+
+                        await _db_call("runtime_truncate_sheet_clients", conn.execute, "TRUNCATE hvhn_sheet_clients")
+                        if sheet_clients:
+                            await _db_call(
+                                "runtime_upsert_sheet_clients",
+                                conn.executemany,
+                                """
+                                INSERT INTO hvhn_sheet_clients
+                                    (email, name, grant_date, expiry_date, days_left, status, doc_count, updated_at)
+                                VALUES ($1, $2, $3, $4, $5, $6, $7, now())
+                                ON CONFLICT (email) DO UPDATE
+                                SET name = EXCLUDED.name,
+                                    grant_date = EXCLUDED.grant_date,
+                                    expiry_date = EXCLUDED.expiry_date,
+                                    days_left = EXCLUDED.days_left,
+                                    status = EXCLUDED.status,
+                                    doc_count = EXCLUDED.doc_count,
+                                    updated_at = now()
+                                """,
+                                [
+                                    (
+                                        str(c.get("email", "")).lower(),
+                                        c.get("name") or "",
+                                        c.get("grant_date") or "",
+                                        c.get("expiry_date") or "",
+                                        c.get("days_left"),
+                                        c.get("status") or "",
+                                        int(c.get("doc_count") or 0),
+                                    )
+                                    for c in sheet_clients
+                                    if c.get("email") and c.get("name")
+                                ],
+                            )
+
+                        await _db_call("runtime_truncate_sheet_docs", conn.execute, "TRUNCATE hvhn_sheet_docs")
+                        if sheet_docs:
+                            await _db_call(
+                                "runtime_upsert_sheet_docs",
+                                conn.executemany,
+                                """
+                                INSERT INTO hvhn_sheet_docs (doc_name, client_count, updated_at)
+                                VALUES ($1, $2, now())
+                                ON CONFLICT (doc_name) DO UPDATE
+                                SET client_count = EXCLUDED.client_count, updated_at = now()
+                                """,
+                                [(d.get("doc_name") or "", int(d.get("client_count") or 0)) for d in sheet_docs if d.get("doc_name")],
+                            )
+                        await _upsert_runtime_status(conn, "sheet_status_exported_at", str(snapshot.get("exported_at") or ""))
                 ok = True
             finally:
                 _db_release_count += 1
@@ -841,16 +1026,17 @@ def _process_add_client_payload(payload, *, source="queue"):
     docs = list_docs()
     print(f"[KHÁCH] {name} - {email} ({source}) docs={len(docs)}", flush=True)
 
-    try:
+    existing = find_client(email)
+    if existing:
+        # Email là định danh bền vững. Khi retry/submit lại với tên gõ khác,
+        # luôn render theo tên đã lưu để không tạo thêm folder/tab cho cùng khách.
+        name = existing["name"]
+        print("  (email đã có trong clients.csv, dùng lại tên đã lưu và render lại)", flush=True)
+    else:
         append_client(name, email)
-    except ValueError as ve:
-        if "TRÙNG TÊN" in str(ve):
-            # B1: không render khách trùng tên (tránh ghi vào folder của người khác cùng tên).
-            raise
-        print("  (email đã có trong clients.csv, chỉ render lại)", flush=True)
 
     rows = render_batch(docs, [{"name": name, "email": email}])
-    write_new_rows_csv(rows, filename=f"new_rows_khach_{_ts()}.csv")
+    write_new_rows_csv(rows, filename=f"new_rows_khach_{_ts()}_{uuid.uuid4().hex[:8]}.csv")
     print(f"[KHÁCH] xong {name} - {email}: rows={len(rows)}", flush=True)
     return rows
 
@@ -868,12 +1054,10 @@ def xu_ly_don_them_khach():
                 payload = f.read().strip()
             try:
                 _process_add_client_payload(payload, source=os.path.basename(path))
-            except ValueError as ve:
-                if "TRÙNG TÊN" in str(ve):
-                    print(f"  BỎ QUA đơn khách: {ve}", flush=True)
-                    os.remove(path)
-                    continue
-                raise
+            except DuplicateClientNameError as exc:
+                print(f"  BỎ QUA đơn khách: {exc}", flush=True)
+                os.remove(path)
+                continue
             os.remove(path)
         except Exception:
             print("  LỖI xử lý đơn khách:", flush=True)
@@ -891,16 +1075,17 @@ async def xu_ly_don_them_tai_lieu():
             continue
         try:
             print(f"[TÀI LIỆU] {pdf}", flush=True)
-            dest_doc = os.path.join(DOCS_DIR, pdf)
-            os.makedirs(DOCS_DIR, exist_ok=True)
-            shutil.copy2(path, dest_doc)  # lưu vào kho docs/ để khách mới sau này cũng nhận
+            _validate_local_pdf(path)
+            # Replays reuse the exact same source; genuinely different files with the
+            # same upload name get a suffix instead of overwriting the existing book.
+            dest_doc = _copy_pdf_to_store(path, DOCS_DIR, pdf)
             await _index_pdf_for_ai(dest_doc)
 
             clients = load_clients()
             rows = render_batch([dest_doc], clients)
-            write_new_rows_csv(rows, filename=f"new_rows_tailieu_{_ts()}.csv")
+            write_new_rows_csv(rows, filename=f"new_rows_tailieu_{_ts()}_{uuid.uuid4().hex[:8]}.csv")
 
-            shutil.move(path, os.path.join(PROCESSED_DOCS, pdf))  # dọn khỏi hộp đơn
+            shutil.move(path, _unique_path(PROCESSED_DOCS, pdf))  # dọn khỏi hộp đơn
         except Exception:
             print("  LỖI xử lý đơn tài liệu:", flush=True)
             traceback.print_exc()
@@ -917,8 +1102,8 @@ async def xu_ly_don_them_tai_lieu_bot():
             continue
         try:
             print(f"[TAI LIEU BOT] {pdf}", flush=True)
-            target = _unique_path(BOT_DOCS_DIR, pdf)
-            shutil.copy2(path, target)
+            _validate_local_pdf(path)
+            target = _copy_pdf_to_store(path, BOT_DOCS_DIR, pdf)
             await _index_pdf_for_ai(target)
             os.remove(path)
         except Exception:

@@ -15,19 +15,22 @@ class Leveling(commands.Cog):
             return
 
         user_id = message.author.id
-        result = await self.db.fetchrow("SELECT xp, level FROM users WHERE user_id = $1", user_id)
+        result = await self.db.fetchrow(
+            """
+            INSERT INTO users (user_id, xp, level)
+            VALUES ($1, 10, 1)
+            ON CONFLICT (user_id) DO UPDATE
+            SET xp = COALESCE(users.xp, 0) + 10,
+                level = 1 + ((COALESCE(users.xp, 0) + 10) / 100)
+            RETURNING xp, level
+            """,
+            user_id,
+        )
+        xp = result["xp"]
+        new_level = result["level"]
+        previous_level = 1 + ((xp - 10) // 100)
 
-        if result is None:
-            await self.db.execute("INSERT INTO users (user_id, xp, level) VALUES ($1, $2, $3)", user_id, 10, 1)
-            return
-
-        xp = result["xp"] + 10
-        current_level = result["level"]
-        new_level = 1 + (xp // 100)
-
-        if new_level > current_level:
-            await self.db.execute("UPDATE users SET level = $1, xp = $2 WHERE user_id = $3", new_level, xp, user_id)
-
+        if new_level > previous_level:
             guild = message.guild
             if new_level == 5:
                 role = discord.utils.get(guild.roles, name="Nhà thơ mộng mơ")
@@ -39,8 +42,6 @@ class Leveling(commands.Cog):
                 if role:
                     await message.author.add_roles(role)
                 await message.channel.send(f"🔥 Xuất sắc! {message.author.mention} đã đạt Cấp 10, thăng hạng **Chiến thần Nghị luận**!")
-        else:
-            await self.db.execute("UPDATE users SET xp = $1 WHERE user_id = $2", xp, user_id)
 
     @app_commands.command(name="rank", description="Kiểm tra cấp độ và XP hiện tại của bạn")
     async def rank(self, interaction: discord.Interaction, member: discord.Member = None):

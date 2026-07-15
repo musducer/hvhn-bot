@@ -13,16 +13,19 @@ class FakeTx:
 
 
 class FakeConn:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, rows=None):
         self.fail = fail
+        self.rows = list(rows or [])
+        self.execute_calls = []
 
     async def execute(self, *args):
+        self.execute_calls.append(args)
         if self.fail:
             raise TimeoutError("simulated db timeout")
         return "OK"
 
     async def fetch(self, *args):
-        return []
+        return self.rows
 
     def transaction(self):
         return FakeTx()
@@ -44,13 +47,16 @@ class FakeAcquire:
 
 
 class FakePool:
-    def __init__(self, fail=False):
+    def __init__(self, fail=False, rows=None):
         self.fail = fail
+        self.rows = rows
         self.active = 0
         self.released = 0
+        self.last_conn = None
 
     def acquire(self):
-        return FakeAcquire(self, FakeConn(fail=self.fail))
+        self.last_conn = FakeConn(fail=self.fail, rows=self.rows)
+        return FakeAcquire(self, self.last_conn)
 
     def get_size(self):
         return 1
@@ -95,6 +101,24 @@ class WatcherDbRecoveryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls["n"], 2)
         self.assertTrue(all(pool.active == 0 for pool in pools))
         self.assertTrue(all(pool.released == 1 for pool in pools))
+
+    async def test_processing_lease_starts_when_job_is_claimed(self):
+        job = {"id": 7, "job_type": "add_client", "text_payload": "An\ta@example.com",
+               "file_name": None, "file_data": None}
+        pool = FakePool(rows=[job])
+
+        async def fake_pool(_context):
+            return pool
+
+        with patch.object(watcher, "DATABASE_URL", "postgresql://test"), \
+                patch.object(watcher, "_get_db_pool", fake_pool):
+            rows = await watcher._fetch_discord_jobs()
+
+        self.assertEqual(rows[0]["id"], 7)
+        sql = "\n".join(str(call[0]) for call in pool.last_conn.execute_calls)
+        self.assertIn("COALESCE(processing_started_at, created_at)", sql)
+        self.assertIn("processing_started_at = now()", sql)
+        self.assertIn("ADD COLUMN IF NOT EXISTS processing_started_at", sql)
 
 
 if __name__ == "__main__":

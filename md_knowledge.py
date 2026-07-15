@@ -211,13 +211,13 @@ def parse_markdown(text: str) -> dict:
     for line in body.split("\n"):
         m = _HEADING.match(line)
         if m:
-            if cur_title or any(l.strip() for l in cur_lines):
+            if cur_title or any(line_text.strip() for line_text in cur_lines):
                 sections.append((cur_title, cur_lines))
             cur_title = m.group(2).strip()
             cur_lines = []
             continue
         cur_lines.append(line)
-    if cur_title or any(l.strip() for l in cur_lines):
+    if cur_title or any(line_text.strip() for line_text in cur_lines):
         sections.append((cur_title, cur_lines))
 
     # 2) trich fact nhan dinh + dung passage
@@ -237,7 +237,7 @@ def parse_markdown(text: str) -> dict:
 
     title = meta.get("title") or (sections[0][0] if sections and sections[0][0] else "")
     if not title:
-        first_line = next((l.strip() for l in body.split("\n") if l.strip()), "")
+        first_line = next((line_text.strip() for line_text in body.split("\n") if line_text.strip()), "")
         if len(first_line) <= 100 and not _LINE_START.match(first_line):
             title = first_line
     author = _detect_author(meta, body)
@@ -285,7 +285,7 @@ async def ensure_md_schema(db) -> None:
     # unaccent: khop tra cuu khong phan biet dau (go sai/thieu dau van trung). Optional.
     try:
         await db.execute("CREATE EXTENSION IF NOT EXISTS unaccent")
-    except Exception:
+    except Exception:  # nosec B110
         pass
     # pgvector: tra cuu ngu nghia. Neu khong co ext thi bo qua (hybrid tu dong lui ve tu khoa).
     try:
@@ -328,9 +328,9 @@ async def ensure_md_schema(db) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_ai_md_passages_vec "
                 "ON ai_md_passages USING hnsw (embedding vector_cosine_ops)"
             )
-        except Exception:
+        except Exception:  # nosec B110
             pass  # hnsw can pgvector >=0.5; khong co index van chay (seq scan)
-    except Exception:
+    except Exception:  # nosec B110
         pass
 
 
@@ -377,7 +377,7 @@ async def backfill_embeddings(db, embed_fn, *, batch: int = 40, max_passages: in
                 await asyncio.sleep(30)  # het quota tam -> nghi roi thu lai chinh lo nay
                 continue
             return {"embedded": done, "ok": False, "error": last_error()}
-        for r, vec in zip(rows, vectors):
+        for r, vec in zip(rows, vectors, strict=True):
             for attempt in range(4):  # chịu deadlock tạm thời với watcher đang re-index
                 try:
                     await db.execute(

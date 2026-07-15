@@ -69,13 +69,14 @@ class LiteraryFallbackTest(unittest.TestCase):
 
 
 class TopicAnchorGroundingTest(unittest.TestCase):
-    def _meta(self, *chunks):
+    def _meta(self, *chunks, quotes=None):
         return {
             "context": "",
             "selected_count": len(chunks),
             "candidate_count": len(chunks),
             "top_score": 9.0,
             "chunks": list(chunks),
+            "quotes": list(quotes or []),
         }
 
     def test_existentialism_question_rejects_story_that_only_matches_generic_words(self):
@@ -86,9 +87,15 @@ class TopicAnchorGroundingTest(unittest.TestCase):
             "content": "Người kể học ở Penang rồi làm giám sát lao động. Champoon là con gái Đại ca.",
             "excerpt": "Người kể học ở Penang rồi làm giám sát lao động.",
         }
-        filtered = AI._filter_pdf_meta_to_topic(query, self._meta(wrong_story))
+        wrong_quote = {
+            "title": "Hoa Champoon",
+            "author": "Không rõ",
+            "quote": "Người kể trở về Pa-nga sau thời gian học tập.",
+        }
+        filtered = AI._filter_pdf_meta_to_topic(query, self._meta(wrong_story, quotes=[wrong_quote]))
         self.assertEqual(AI._query_topic_anchors(query), ["hien sinh"])
         self.assertEqual(filtered["chunks"], [])
+        self.assertEqual(filtered["quotes"], [])
         self.assertEqual(filtered["context"], "")
 
     def test_existentialism_question_keeps_actual_topic_evidence(self):
@@ -101,6 +108,37 @@ class TopicAnchorGroundingTest(unittest.TestCase):
         }
         filtered = AI._filter_pdf_meta_to_topic(query, self._meta(relevant))
         self.assertEqual(filtered["chunks"], [relevant])
+
+    def test_topic_filter_also_handles_quote_only_retrieval(self):
+        query = "Trình bày hiểu biết về phong trào văn học hiện sinh"
+        relevant_quote = {
+            "title": "Nhận định về văn học hiện sinh",
+            "author": "Jean-Paul Sartre",
+            "quote": "Con người phải tự chịu trách nhiệm về lựa chọn của mình.",
+        }
+        wrong_quote = {
+            "title": "Hoa Champoon",
+            "author": "Không rõ",
+            "quote": "Người kể làm việc tại một công ty khai khoáng.",
+        }
+        filtered = AI._filter_pdf_meta_to_topic(
+            query,
+            self._meta(quotes=[wrong_quote, relevant_quote]),
+        )
+        self.assertEqual(filtered["quotes"], [relevant_quote])
+
+    def test_generic_request_wording_does_not_become_a_topic_anchor(self):
+        self.assertEqual(
+            AI._query_topic_anchors("Trích dẫn quan niệm của Sartre về văn học"),
+            [],
+        )
+
+    def test_final_answer_gate_rejects_the_original_off_topic_story(self):
+        query = "Trình bày hiểu biết về phong trào văn học hiện sinh"
+        wrong = "Người kể làm việc ở mỏ rồi yêu Champoon, con gái của Đại ca."
+        right = "Văn học hiện sinh đặt con người trước tự do, lựa chọn và trách nhiệm."
+        self.assertFalse(AI._answer_matches_topic(query, wrong))
+        self.assertTrue(AI._answer_matches_topic(query, right))
 
     def test_librarian_dump_detector_catches_report_shape_from_regression(self):
         raw = (

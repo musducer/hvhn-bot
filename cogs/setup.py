@@ -104,7 +104,7 @@ def _link_channels(guild, text: str) -> str:
     return re.sub(r"#([0-9A-Za-zÀ-ỹĐđ_-]+)", repl, text)
 
 
-def build_rules_embed(chapters: list[tuple[str, str]], guild=None) -> discord.Embed:
+def build_rules_embed(chapters: list[tuple[str, str]], guild=None, *, start_index: int = 1) -> discord.Embed:
     embed = discord.Embed(
         title="📜 Bộ luật chính thức — Nhóm học tập Hồn Văn · Hồn Người",
         description=(
@@ -113,11 +113,42 @@ def build_rules_embed(chapters: list[tuple[str, str]], guild=None) -> discord.Em
         ),
         color=0x2b2d31,
     )
-    for i, (title, body) in enumerate(chapters, start=1):
+    for i, (title, body) in enumerate(chapters, start=start_index):
         value = _link_channels(guild, body)[:1024]
         embed.add_field(name=f"Chương {_roman(i)}. {title}"[:256], value=value or "​", inline=False)
     embed.set_footer(text="Quản trị viên cập nhật luật bằng /luat_sua, /luat_them, /luat_xoa rồi /luat_dang.")
     return embed
+
+
+def build_rules_embeds(chapters: list[tuple[str, str]], guild=None) -> list[discord.Embed]:
+    """Split an arbitrary rule set within Discord's field and 6000-char limits."""
+    if not chapters:
+        return [build_rules_embed([], guild)]
+
+    pages: list[discord.Embed] = []
+    start = 0
+    while start < len(chapters):
+        end = start
+        best: discord.Embed | None = None
+        while end < len(chapters) and end - start < 25:
+            candidate = build_rules_embed(chapters[start:end + 1], guild, start_index=start + 1)
+            if len(candidate) > 5900:
+                break
+            best = candidate
+            end += 1
+        if best is None:
+            # Each chapter is already clipped to Discord's per-field limits, so this
+            # is only a defensive fallback if the surrounding copy grows later.
+            best = build_rules_embed(chapters[start:start + 1], guild, start_index=start + 1)
+            end = start + 1
+        pages.append(best)
+        start = end
+
+    if len(pages) > 1:
+        total = len(pages)
+        for number, embed in enumerate(pages, start=1):
+            embed.title = f"{embed.title} ({number}/{total})"[:256]
+    return pages
 
 
 async def load_rules(db) -> list[tuple[int, str, str]]:
@@ -154,14 +185,15 @@ async def _renumber_rules(db) -> None:
 async def render_rules_to_channel(guild, db, rules_channel) -> None:
     rows = await ensure_rules(db)
     chapters = [(t, b) for (_, t, b) in rows]
-    embed = build_rules_embed(chapters, guild)
+    embeds = build_rules_embeds(chapters, guild)
     old = [m async for m in rules_channel.history(limit=30) if m.author == guild.me]
     for m in old:
         try:
             await m.delete()
         except discord.HTTPException:
             pass
-    await rules_channel.send(embed=embed)
+    for embed in embeds:
+        await rules_channel.send(embed=embed)
 
 
 def build_guide_embed() -> discord.Embed:
@@ -268,7 +300,7 @@ class BotGuideView(discord.ui.View):
             await interaction.response.send_message("Bạn đã có quyền dùng bot Then rồi!", ephemeral=True)
         else:
             await interaction.user.add_roles(role)
-            await interaction.response.send_message(f"🤖 Đã mở khóa quyền dùng bot Then. Chào mừng \"Dân làng Hua Tát\"!", ephemeral=True)
+            await interaction.response.send_message("🤖 Đã mở khóa quyền dùng bot Then. Chào mừng \"Dân làng Hua Tát\"!", ephemeral=True)
 
 
 class VerifyView(discord.ui.View):
@@ -353,6 +385,8 @@ class Setup(commands.Cog):
             cat = discord.utils.get(guild.categories, name=name)
             if not cat:
                 cat = await guild.create_category(name, overwrites=overwrites)
+            else:
+                cat = await cat.edit(overwrites=overwrites, reason="HVHN /setup restore") or cat
             return cat
 
         async def get_or_create_text(cat, name, overwrites=None, position=None):
@@ -364,6 +398,15 @@ class Setup(commands.Cog):
                     channel = await guild.create_text_channel(name, category=cat)
                 if position is not None:
                     await channel.edit(position=position)
+            else:
+                options = {"category": cat, "reason": "HVHN /setup restore"}
+                if overwrites is None:
+                    options["sync_permissions"] = True
+                else:
+                    options["overwrites"] = overwrites
+                if position is not None:
+                    options["position"] = position
+                channel = await channel.edit(**options) or channel
             return channel
 
         async def get_or_create_forum(cat, name, overwrites=None):
@@ -374,6 +417,13 @@ class Setup(commands.Cog):
                         channel = await guild.create_forum_channel(name, category=cat, overwrites=overwrites)
                     else:
                         channel = await guild.create_forum_channel(name, category=cat)
+                else:
+                    options = {"category": cat, "reason": "HVHN /setup restore"}
+                    if overwrites is None:
+                        options["sync_permissions"] = True
+                    else:
+                        options["overwrites"] = overwrites
+                    channel = await channel.edit(**options) or channel
                 return channel
             else:
                 channel = discord.utils.get(guild.text_channels, name=name, category=cat)
@@ -382,14 +432,25 @@ class Setup(commands.Cog):
                         channel = await guild.create_text_channel(name, category=cat, overwrites=overwrites)
                     else:
                         channel = await guild.create_text_channel(name, category=cat)
+                else:
+                    options = {"category": cat, "reason": "HVHN /setup restore"}
+                    if overwrites is None:
+                        options["sync_permissions"] = True
+                    else:
+                        options["overwrites"] = overwrites
+                    channel = await channel.edit(**options) or channel
                 return channel
 
         async def get_or_create_voice(cat, name, user_limit=None):
             channel = discord.utils.get(guild.voice_channels, name=name, category=cat)
             if not channel:
                 channel = await guild.create_voice_channel(name, category=cat)
-                if user_limit:
-                    await channel.edit(user_limit=user_limit)
+            channel = await channel.edit(
+                category=cat,
+                sync_permissions=True,
+                user_limit=user_limit or 0,
+                reason="HVHN /setup restore",
+            ) or channel
             return channel
 
         # 3. TIẾN HÀNH TẠO KÊNH
@@ -404,11 +465,17 @@ class Setup(commands.Cog):
         verify_channel = await get_or_create_text(info_cat, "cổng-xác-nhận")
         # Cổng này dành cho khách nhận học liệu: form Họ tên/Email mở ngay trong
         # server. Không sửa hoặc thay thế các kênh xác nhận cũ.
-        access_channel = await get_or_create_text(info_cat, "truy-cập-tài-liệu", overwrites=welcome_perms)
+        await get_or_create_text(info_cat, "truy-cập-tài-liệu", overwrites=welcome_perms)
         await get_or_create_text(info_cat, "bảng-tin-thông-báo")
         guide_channel = await get_or_create_text(info_cat, "hướng-dẫn-dùng-bot", overwrites=welcome_perms)
-        guide_history = [msg async for msg in guide_channel.history(limit=5)]
-        if not any(msg.author == guild.me for msg in guide_history):
+        guide_history = [msg async for msg in guide_channel.history(limit=50)]
+        guide_message = next((
+            msg for msg in guide_history
+            if msg.author == guild.me and any(embed.title == build_guide_embed().title for embed in msg.embeds)
+        ), None)
+        if guide_message:
+            await guide_message.edit(embed=build_guide_embed(), view=BotGuideView())
+        else:
             await guide_channel.send(embed=build_guide_embed(), view=BotGuideView())
 
         study_cat = await get_or_create_category("📚 GÓC HỌC TẬP - NGỮ VĂN", member_only)
@@ -431,9 +498,15 @@ class Setup(commands.Cog):
         # 4. CẬP NHẬT LUẬT VÀ XÁC NHẬN — dùng chung bộ luật lưu DB (sửa bằng /luat_*).
         await render_rules_to_channel(guild, self.bot.db, rules_channel)
 
-        verify_history = [msg async for msg in verify_channel.history(limit=5)]
-        if not any(msg.author == guild.me for msg in verify_history):
-            verify_embed = discord.Embed(title="🔐 CỔNG KIỂM DUYỆT", description="Nhấn nút bên dưới để mở khóa toàn bộ các Kênh.", color=0x5865F2)
+        verify_embed = discord.Embed(title="🔐 CỔNG KIỂM DUYỆT", description="Nhấn nút bên dưới để mở khóa toàn bộ các Kênh.", color=0x5865F2)
+        verify_history = [msg async for msg in verify_channel.history(limit=50)]
+        verify_message = next((
+            msg for msg in verify_history
+            if msg.author == guild.me and any(embed.title == verify_embed.title for embed in msg.embeds)
+        ), None)
+        if verify_message:
+            await verify_message.edit(embed=verify_embed, view=VerifyView())
+        else:
             await verify_channel.send(embed=verify_embed, view=VerifyView())
 
         membership = self.bot.get_cog("Membership")

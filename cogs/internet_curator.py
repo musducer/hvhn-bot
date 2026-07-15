@@ -4,15 +4,16 @@ import os
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from env_utils import env_int
 
 from internet_curator import ensure_internet_schema, scan_sources
 from md_knowledge import index_md_bytes
 
 
 AUTO_SCAN_ENABLED = os.getenv("HVHN_INTERNET_CURATOR_AUTO", "1").strip().lower() not in {"0", "false", "no", "off"}
-AUTO_SCAN_HOURS = max(1, int(os.getenv("HVHN_INTERNET_CURATOR_HOURS", "24")))
-AUTO_MAX_PER_SOURCE = max(1, int(os.getenv("HVHN_INTERNET_CURATOR_AUTO_PER_SOURCE", "3")))
-DEFAULT_MIN_SCORE = max(1, min(100, int(os.getenv("HVHN_INTERNET_CURATOR_MIN_SCORE", "55"))))
+AUTO_SCAN_HOURS = env_int("HVHN_INTERNET_CURATOR_HOURS", 24, minimum=1, maximum=8760)
+AUTO_MAX_PER_SOURCE = env_int("HVHN_INTERNET_CURATOR_AUTO_PER_SOURCE", 3, minimum=1, maximum=100)
+DEFAULT_MIN_SCORE = env_int("HVHN_INTERNET_CURATOR_MIN_SCORE", 55, minimum=1, maximum=100)
 
 
 def _clip(value: str, limit: int = 950) -> str:

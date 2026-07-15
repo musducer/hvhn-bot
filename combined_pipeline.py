@@ -9,6 +9,10 @@ import img2pdf
 import pikepdf
 from PIL import Image, ImageChops, ImageStat
 
+from console_utils import configure_utf8_stdio
+
+
+configure_utf8_stdio()
 
 FONT_ALIAS = "vnfont"
 # Font Windows hỗ trợ tiếng Việt có dấu. Đổi sang r"C:\Windows\Fonts\times.ttf" nếu muốn serif.
@@ -159,21 +163,29 @@ def convert_to_secure_image_pdf(input_path, output_path, recipient_name, recipie
                                  warning_text, dpi=200, owner_password=None):
     owner_password = owner_password or secrets.token_urlsafe(24)  # random/file, không cần nhớ
     work_dir = tempfile.mkdtemp(prefix="img_pdf_work_")  # thư mục riêng/job, an toàn song song
+    output_dir = os.path.dirname(os.path.abspath(output_path))
+    os.makedirs(output_dir, exist_ok=True)
+    fd, pending_output = tempfile.mkstemp(
+        prefix=f".{os.path.basename(output_path)}.",
+        suffix=".part.pdf",
+        dir=output_dir,
+    )
+    os.close(fd)
+    os.remove(pending_output)
 
     try:
         # 1. Render từng trang PDF thành ảnh PNG bằng PyMuPDF, chèn watermark lên từng trang
-        doc = fitz.open(input_path)
         zoom = dpi / 72  # 72 là DPI gốc của PDF
         matrix = fitz.Matrix(zoom, zoom)
 
         pages = []
-        for i, page in enumerate(doc):
-            pix = page.get_pixmap(matrix=matrix)
-            pix = _add_watermark_to_page(pix, recipient_name, recipient_email, warning_text)
-            png_path = os.path.join(work_dir, f"page-{i:03d}.png")
-            pix.save(png_path)
-            pages.append(png_path)
-        doc.close()
+        with fitz.open(input_path) as doc:
+            for i, page in enumerate(doc):
+                pix = page.get_pixmap(matrix=matrix)
+                pix = _add_watermark_to_page(pix, recipient_name, recipient_email, warning_text)
+                png_path = os.path.join(work_dir, f"page-{i:03d}.png")
+                pix.save(png_path)
+                pages.append(png_path)
 
         if not pages:
             raise RuntimeError("Không render được trang nào, kiểm tra lại input_path")
@@ -185,7 +197,6 @@ def convert_to_secure_image_pdf(input_path, output_path, recipient_name, recipie
             f.write(img2pdf.convert(pages))
 
         # 3. Mã hoá + khoá quyền (không cho trích xuất/in/sửa)
-        pdf = pikepdf.open(temp_pdf)
         permissions = pikepdf.Permissions(
             extract=False,
             accessibility=False,
@@ -196,20 +207,27 @@ def convert_to_secure_image_pdf(input_path, output_path, recipient_name, recipie
             modify_assembly=False,
             modify_form=False,
         )
-        pdf.save(
-            output_path,
-            encryption=pikepdf.Encryption(
-                user="",
-                owner=owner_password,
-                R=6,
-                allow=permissions,
-            ),
-        )
-        pdf.close()
+        with pikepdf.open(temp_pdf) as pdf:
+            pdf.save(
+                pending_output,
+                encryption=pikepdf.Encryption(
+                    user="",
+                    owner=owner_password,
+                    R=6,
+                    allow=permissions,
+                ),
+            )
+        # Chỉ công bố tên file cuối sau khi PDF đã ghi xong. Drive Desktop
+        # và watcher vì thế không bao giờ nhìn thấy một PDF dở dang.
+        os.replace(pending_output, output_path)
         print(f"Hoàn tất: {output_path}")
     finally:
         # 4. Dọn thư mục tạm dù thành công hay lỗi
         import shutil
+        try:
+            os.remove(pending_output)
+        except FileNotFoundError:
+            pass
         shutil.rmtree(work_dir, ignore_errors=True)
 
 

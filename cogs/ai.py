@@ -12,6 +12,7 @@ import aiohttp
 import discord
 from discord import app_commands
 from discord.ext import commands
+from env_utils import env_float, env_int
 from md_knowledge import build_md_context, retrieve_md_knowledge, backfill_embeddings, count_missing_embeddings
 import md_embeddings
 
@@ -71,31 +72,40 @@ EXTRA_OPENAI_PROVIDERS = [
 MAX_DISCORD_LEN = 3800
 # Gioi han luot dung cac lenh AI cho 'Dan lang Hua Tat' (admin/mod duoc mien). Cua so CO DINH
 # tinh tu luot dung dau tien trong moi chu ky. Cau hinh luu DB (ai_usage_limits), env chi la mac dinh.
-AI_LIMIT_DAILY_MAX = int(os.getenv("HVHN_AI_LIMIT_DAILY", "7"))
-AI_LIMIT_DAILY_HOURS = int(os.getenv("HVHN_AI_LIMIT_DAILY_HOURS", "24"))
-AI_LIMIT_WEEKLY_MAX = int(os.getenv("HVHN_AI_LIMIT_WEEKLY", "30"))
-AI_LIMIT_WEEKLY_HOURS = int(os.getenv("HVHN_AI_LIMIT_WEEKLY_HOURS", str(24 * 7)))
+AI_LIMIT_DAILY_MAX = env_int("HVHN_AI_LIMIT_DAILY", 7, minimum=0, maximum=10000)
+AI_LIMIT_DAILY_HOURS = env_int("HVHN_AI_LIMIT_DAILY_HOURS", 24, minimum=1, maximum=8760)
+AI_LIMIT_WEEKLY_MAX = env_int("HVHN_AI_LIMIT_WEEKLY", 30, minimum=0, maximum=10000)
+AI_LIMIT_WEEKLY_HOURS = env_int("HVHN_AI_LIMIT_WEEKLY_HOURS", 24 * 7, minimum=1, maximum=8760)
 WEB_RESULT_LIMIT = 3
 WEB_CONTEXT_LIMIT = 3
-GROQ_MAX_PROMPT_CHARS = int(os.getenv("GROQ_MAX_PROMPT_CHARS", "24000"))
-GROQ_SAFE_PROMPT_CHARS = int(os.getenv("GROQ_SAFE_PROMPT_CHARS", "18000"))
-CONTEXT_MAX_CHARS = int(os.getenv("HVHN_CONTEXT_MAX_CHARS", "18000"))
-COMPACT_CONTEXT_MAX_CHARS = int(os.getenv("HVHN_COMPACT_CONTEXT_MAX_CHARS", "9000"))
+GROQ_MAX_PROMPT_CHARS = env_int("GROQ_MAX_PROMPT_CHARS", 24000, minimum=2000, maximum=500000)
+GROQ_SAFE_PROMPT_CHARS = min(
+    GROQ_MAX_PROMPT_CHARS,
+    env_int("GROQ_SAFE_PROMPT_CHARS", 18000, minimum=1000, maximum=500000),
+)
+CONTEXT_MAX_CHARS = env_int("HVHN_CONTEXT_MAX_CHARS", 18000, minimum=1000, maximum=500000)
+COMPACT_CONTEXT_MAX_CHARS = min(
+    CONTEXT_MAX_CHARS,
+    env_int("HVHN_COMPACT_CONTEXT_MAX_CHARS", 9000, minimum=500, maximum=500000),
+)
 SYSTEM_EXTRA_MAX_CHARS = 32000
 VERIFIER_EVIDENCE_MAX_CHARS = 6000
 # Sampling cho nhanh sinh cau tra loi VAN HOC chinh: noi rong de van co chat,
 # giau tu vung, khong khô/lap; do dai du de phan tich sau. Cac nhanh factual/
 # verifier van giu mac dinh chat (temp thap, top_p 0.4) de khong tang ao giac.
-LIT_TEMPERATURE = float(os.getenv("HVHN_LIT_TEMPERATURE", "0.7"))
-LIT_TOP_P = float(os.getenv("HVHN_LIT_TOP_P", "0.95"))
-LIT_MAX_TOKENS = int(os.getenv("HVHN_LIT_MAX_TOKENS", "3000"))
-LOW_RETRIEVAL_SCORE = float(os.getenv("HVHN_LOW_RETRIEVAL_SCORE", "1.0"))
+LIT_TEMPERATURE = env_float("HVHN_LIT_TEMPERATURE", 0.7, minimum=0, maximum=2)
+LIT_TOP_P = env_float("HVHN_LIT_TOP_P", 0.95, minimum=0.05, maximum=1)
+LIT_MAX_TOKENS = env_int("HVHN_LIT_MAX_TOKENS", 3000, minimum=128, maximum=32768)
+LOW_RETRIEVAL_SCORE = env_float("HVHN_LOW_RETRIEVAL_SCORE", 1.0, minimum=0, maximum=1000)
 # Duoi nguong nay coi nhu truy xuat .md lac de -> khong nhoi vao context (tranh chep tai lieu khong lien quan).
-MD_MIN_RELEVANCE = float(os.getenv("HVHN_MD_MIN_RELEVANCE", "2.0"))
+MD_MIN_RELEVANCE = env_float("HVHN_MD_MIN_RELEVANCE", 2.0, minimum=0, maximum=1000)
 RETRIEVAL_DEBUG = os.getenv("HVHN_RETRIEVAL_DEBUG", "").strip().lower() in {"1", "true", "yes", "on"}
-DEBUG_COMMAND_TIMEOUT_SECONDS = int(os.getenv("HVHN_DEBUG_COMMAND_TIMEOUT_SECONDS", "25"))
-PDF_DEFAULT_LIMIT = int(os.getenv("HVHN_PDF_DEFAULT_LIMIT", "7"))
-PDF_AGGREGATE_LIMIT = int(os.getenv("HVHN_PDF_AGGREGATE_LIMIT", "16"))
+DEBUG_COMMAND_TIMEOUT_SECONDS = env_int("HVHN_DEBUG_COMMAND_TIMEOUT_SECONDS", 25, minimum=5, maximum=600)
+PDF_DEFAULT_LIMIT = env_int("HVHN_PDF_DEFAULT_LIMIT", 7, minimum=1, maximum=50)
+PDF_AGGREGATE_LIMIT = max(
+    PDF_DEFAULT_LIMIT,
+    env_int("HVHN_PDF_AGGREGATE_LIMIT", 16, minimum=1, maximum=100),
+)
 # Then không có đồng hồ cắt câu trả lời: Discord giữ trạng thái thinking, còn model
 # được quyền hoàn tất suy luận. Timeout mặc định của aiohttp là 5 phút, vì vậy phải
 # đặt total=None một cách tường minh thay vì bỏ tham số timeout.
@@ -924,6 +934,9 @@ class AI(commands.Cog):
         self.tavily_key = os.getenv("TAVILY_API_KEY", "").strip()
         self.last_ai_errors: list[str] = []
         self._last_verifier_rejected = False
+        self._embed_running = False
+        self._embed_started = False
+        self._embed_task: asyncio.Task | None = None
         print(f"[ai] GROQ_MODEL={GROQ_MODEL}", flush=True)
         print(f"[ai] GEMINI_MODEL={GEMINI_MODEL}", flush=True)
         print(f"[ai] groq_keys={len(self.groq_keys)} gemini_keys={len(self.gemini_keys)}", flush=True)
@@ -1491,7 +1504,14 @@ class AI(commands.Cog):
     @staticmethod
     def _insufficient_answer(answer: str) -> bool:
         lowered = AI._plain_text(answer or "")
-        return "khong du du lieu de khang dinh" in lowered or "chua du du lieu de khang dinh" in lowered
+        return (
+            "khong du du lieu de khang dinh" in lowered
+            or "chua du du lieu de khang dinh" in lowered
+            or (
+                "khong tim duoc ngu canh khop truc tiep" in lowered
+                and "da chan mot cau tra loi" in lowered
+            )
+        )
 
     @staticmethod
     def _query_terms(query: str, limit: int = 16) -> list[str]:
@@ -1503,7 +1523,7 @@ class AI(commands.Cog):
         stop = {
             "hay", "theo", "tai", "lieu", "nap", "cho", "biet", "la", "gi", "ve", "cua", "mot", "cac",
             "nhung", "moi", "can", "dung", "trong", "duoc", "voi", "neu", "hoi", "van", "chuong",
-            "nhan", "dinh", "tong", "hop", "trich", "dan", "nguyen", "van", "chep",
+            "nhan", "dinh", "tong", "hop", "trich", "dan", "nguyen", "chep",
         }
         terms = []
         for term in cls._query_terms(query, 32):
@@ -1537,7 +1557,7 @@ class AI(commands.Cog):
         "nha van", "quan niem", "viet nam", "ha noi", "sai gon", "cach mang",
         "trinh bay", "nhung cach", "cac cach", "bao ton", "phat huy", "nghe thuat",
         "hat ru", "doi song", "hien dai", "luan diem", "luan cu", "luan chung",
-        "li luan", "ly luan", "van hoc", "binh luan", "phan binh",
+        "li luan", "ly luan", "phan binh",
     }
     # Chuoi 2-4 am tiet cung viet hoa kieu Viet ("Nguyen Binh", "Nguyen Huy Thiep",
     # "Vo Nhat") -> ung vien ten rieng.
@@ -1602,11 +1622,16 @@ class AI(commands.Cog):
         if not subjects:
             return False
         chunks = pdf_meta.get("chunks") or []
-        if not chunks:
+        quotes = pdf_meta.get("quotes") or []
+        if not chunks and not quotes:
             return False
         haystack = " ".join(
             (c.get("title") or "") + " " + (c.get("first_500") or "") + " " + (c.get("excerpt") or "")
             for c in chunks
+        )
+        haystack += " " + " ".join(
+            " ".join(str(quote.get(key) or "") for key in ("title", "author", "source", "quote"))
+            for quote in quotes
         )
         return not cls._text_mentions_subject(subjects, haystack)
 
@@ -1620,7 +1645,8 @@ class AI(commands.Cog):
         """
         subjects = cls._query_subjects(query, plan)
         chunks = list(pdf_meta.get("chunks") or [])
-        if not subjects or not chunks:
+        quotes = list(pdf_meta.get("quotes") or [])
+        if not subjects or (not chunks and not quotes):
             return pdf_meta
         kept = [
             c for c in chunks
@@ -1632,13 +1658,20 @@ class AI(commands.Cog):
                 ),
             )
         ]
-        # Neu khong giu duoc gi thi de _context_off_subject/low relevance xu ly; khong tu cat rong o day.
-        if not kept or len(kept) == len(chunks):
+        kept_quotes = [
+            quote for quote in quotes
+            if cls._text_mentions_subject(
+                subjects,
+                " ".join(str(quote.get(key) or "") for key in ("title", "author", "source", "quote")),
+            )
+        ]
+        if len(kept) == len(chunks) and len(kept_quotes) == len(quotes):
             return pdf_meta
         filtered = dict(pdf_meta)
         filtered["chunks"] = kept
+        filtered["quotes"] = kept_quotes
         filtered["selected_count"] = len(kept)
-        filtered["context"] = build_md_context(kept)
+        filtered["context"] = build_md_context(kept) if kept else ""
         return filtered
 
     # Các từ dùng để mở đầu/yêu cầu bài làm xuất hiện trong gần như mọi câu hỏi Ngữ văn.
@@ -1647,11 +1680,13 @@ class AI(commands.Cog):
     # một truyện chỉ tình cờ có từ "sinh". Cụm neo còn lại phải là "hiện sinh".
     _TOPIC_NOISE_TERMS = {
         "trinh", "bay", "hieu", "biet", "hay", "cho", "viet", "noi", "neu", "lam",
-        "phan", "tich", "cam", "nhan", "binh", "luan", "trinh", "bac", "y", "kien",
+        "phan", "tich", "cam", "nhan", "binh", "luan", "bac", "y", "kien",
         "ve", "cua", "trong", "voi", "va", "la", "gi", "nhung", "cac", "mot", "nhieu",
-        "phong", "trao", "van", "hoc", "tac", "pham", "tacgia", "tacgia", "nha", "tho",
-        "nha", "van", "chu", "nghia", "noi", "dung", "dac", "diem", "gia", "tri",
-        "the", "nghe", "thuat", "doan", "trich", "bai", "cau", "van", "tho",
+        "phong", "trao", "van", "hoc", "tac", "pham", "tacgia", "nha", "tho",
+        "chu", "nghia", "dung", "dac", "diem", "gia", "tri",
+        "the", "nghe", "thuat", "doan", "trich", "dan", "bai", "cau",
+        "quan", "niem", "dinh", "tong", "hop", "khai", "quat", "chung", "minh", "so", "sanh",
+        "nhan", "vat", "tam", "trang", "dien", "bien", "li", "ly",
     }
 
     @classmethod
@@ -1694,6 +1729,11 @@ class AI(commands.Cog):
         return any(anchor in haystack for anchor in anchors)
 
     @classmethod
+    def _answer_matches_topic(cls, query: str, answer: str) -> bool:
+        anchors = cls._query_topic_anchors(query)
+        return bool(answer.strip()) and (not anchors or cls._text_matches_topic_anchor(query, answer))
+
+    @classmethod
     def _filter_pdf_meta_to_topic(cls, query: str, pdf_meta: dict) -> dict:
         """Chỉ giữ các đoạn có cụm chủ đề đặc thù của truy vấn.
 
@@ -1705,7 +1745,8 @@ class AI(commands.Cog):
         if not cls._query_topic_anchors(query):
             return pdf_meta
         chunks = list(pdf_meta.get("chunks") or [])
-        if not chunks:
+        quotes = list(pdf_meta.get("quotes") or [])
+        if not chunks and not quotes:
             return pdf_meta
         kept = [
             chunk for chunk in chunks
@@ -1716,16 +1757,24 @@ class AI(commands.Cog):
                 )),
             )
         ]
-        if not kept:
+        kept_quotes = [
+            quote for quote in quotes
+            if cls._text_matches_topic_anchor(
+                query,
+                " ".join(str(quote.get(key) or "") for key in ("title", "author", "source", "quote")),
+            )
+        ]
+        if not kept and not kept_quotes:
             filtered = dict(pdf_meta)
             filtered.update({"context": "", "chunks": [], "quotes": [], "selected_count": 0})
             return filtered
-        if len(kept) == len(chunks):
+        if len(kept) == len(chunks) and len(kept_quotes) == len(quotes):
             return pdf_meta
         filtered = dict(pdf_meta)
         filtered["chunks"] = kept
+        filtered["quotes"] = kept_quotes
         filtered["selected_count"] = len(kept)
-        filtered["context"] = build_md_context(kept)
+        filtered["context"] = build_md_context(kept) if kept else ""
         return filtered
 
     @classmethod
@@ -1829,7 +1878,7 @@ class AI(commands.Cog):
 
     def _start_embed_backfill(self) -> bool:
         # Job nen co nhip, chi 1 lan chay dong thoi. Tra True neu vua khoi dong.
-        if getattr(self, "_embed_running", False) or not md_embeddings.has_keys():
+        if self._embed_running or (self._embed_task and not self._embed_task.done()) or not md_embeddings.has_keys():
             return False
         self._embed_running = True
 
@@ -1847,12 +1896,16 @@ class AI(commands.Cog):
             finally:
                 self._embed_running = False
 
-        asyncio.create_task(_bg())
+        self._embed_task = asyncio.create_task(_bg(), name="hvhn-embedding-backfill")
         return True
+
+    def cog_unload(self):
+        if self._embed_task and not self._embed_task.done():
+            self._embed_task.cancel()
 
     @commands.Cog.listener()
     async def on_ready(self):
-        if getattr(self, "_embed_started", False) or not md_embeddings.has_keys():
+        if self._embed_started or not md_embeddings.has_keys():
             return
         self._embed_started = True
         self._start_embed_backfill()
@@ -2708,6 +2761,7 @@ class AI(commands.Cog):
         *,
         retrieval_hit: bool = False,
         guidance: str = "",
+        topic_query: str = "",
     ) -> tuple[str | None, str]:
         self._last_verifier_rejected = False
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode, guidance)
@@ -2912,6 +2966,14 @@ class AI(commands.Cog):
                     f"[debug] final_guard=librarian_dump recovered={bool(recovered)}",
                     flush=True,
                 )
+            if topic_query and not self._answer_matches_topic(topic_query, answer):
+                recovered = await self._recover_direct_answer(topic_query)
+                if recovered and self._answer_matches_topic(topic_query, recovered):
+                    answer = recovered
+                    print("[debug] final_guard=off_topic recovered=True", flush=True)
+                else:
+                    answer = self._retrieval_guard_message()
+                    print("[debug] final_guard=off_topic recovered=False", flush=True)
             # Chot chan cuoi: du di duong nao (repair thanh cong nhung van lap, verifier viet lai...),
             # cau lap gan nguyen van cung bi cat truoc khi gui.
             if self._repeated_phrase_defects(answer):
@@ -3660,7 +3722,13 @@ class AI(commands.Cog):
         # nhất là khi cần đi qua Gemini Pro + verifier, fallback evidence thô có thể
         # lạc tác giả/tác phẩm và tệ hơn nhiều so với chờ model trả lời hoàn chỉnh.
         answer, full_prompt = await self._safe_generate(
-            prompt, knowledge, web_context, generation_mode, retrieval_hit=retrieval_hit, guidance=guidance
+            prompt,
+            knowledge,
+            web_context,
+            generation_mode,
+            retrieval_hit=retrieval_hit,
+            guidance=guidance,
+            topic_query=user_prompt,
         )
         if answer is None:
             await interaction.followup.send(self._ai_error_message())

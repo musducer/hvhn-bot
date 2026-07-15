@@ -6,6 +6,11 @@ from discord import app_commands
 import asyncpg
 
 
+def _clip(value, limit):
+    text = str(value or "")
+    return text if len(text) <= limit else text[:limit - 3] + "..."
+
+
 class RevealAnswerView(discord.ui.View):
     def __init__(self, answer: str):
         super().__init__(timeout=60)
@@ -13,7 +18,7 @@ class RevealAnswerView(discord.ui.View):
 
     @discord.ui.button(label="Xem đáp án", style=discord.ButtonStyle.primary, emoji="🔎")
     async def reveal(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(f"📖 **Đáp án:** {self.answer}", ephemeral=True)
+        await interaction.response.send_message(f"📖 **Đáp án:** {_clip(self.answer, 1800)}", ephemeral=True)
 
 
 class Study(commands.Cog):
@@ -24,6 +29,12 @@ class Study(commands.Cog):
     # ---------------- Flashcards ----------------
     @app_commands.command(name="flashcard_add", description="Thêm một flashcard câu hỏi/đáp án cho môn Ngữ Văn")
     async def flashcard_add(self, interaction: discord.Interaction, question: str, answer: str):
+        question, answer = question.strip(), answer.strip()
+        if not question or not answer or len(question) > 1500 or len(answer) > 1800:
+            await interaction.response.send_message(
+                "❌ Câu hỏi tối đa 1.500 ký tự và đáp án tối đa 1.800 ký tự.", ephemeral=True,
+            )
+            return
         await self.db.execute(
             "INSERT INTO flashcards (question, answer, author_id) VALUES ($1, $2, $3)",
             question, answer, interaction.user.id
@@ -37,13 +48,17 @@ class Study(commands.Cog):
             await interaction.response.send_message("📭 Chưa có flashcard nào. Dùng `/flashcard_add` để thêm nhé!", ephemeral=True)
             return
         await interaction.response.send_message(
-            f"🧠 **Câu hỏi:** {row['question']}",
+            f"🧠 **Câu hỏi:** {_clip(row['question'], 1800)}",
             view=RevealAnswerView(row["answer"])
         )
 
     # ---------------- Quotes ----------------
     @app_commands.command(name="quote_add", description="Đóng góp một trích dẫn hay cho server")
     async def quote_add(self, interaction: discord.Interaction, content: str):
+        content = content.strip()
+        if not content or len(content) > 1700:
+            await interaction.response.send_message("❌ Trích dẫn phải có nội dung và không quá 1.700 ký tự.", ephemeral=True)
+            return
         await self.db.execute(
             "INSERT INTO quotes (content, author_id) VALUES ($1, $2)", content, interaction.user.id
         )
@@ -55,11 +70,15 @@ class Study(commands.Cog):
         if not row:
             await interaction.response.send_message("📭 Chưa có trích dẫn nào. Dùng `/quote_add` để đóng góp nhé!", ephemeral=True)
             return
-        await interaction.response.send_message(f"💬 *\"{row['content']}\"*\n— <@{row['author_id']}>")
+        await interaction.response.send_message(f"💬 *\"{_clip(row['content'], 1700)}\"*\n— <@{row['author_id']}>")
 
     # ---------------- Deadlines ----------------
     @app_commands.command(name="deadline_add", description="Thêm một mốc deadline/kiểm tra (định dạng ngày: YYYY-MM-DD)")
     async def deadline_add(self, interaction: discord.Interaction, name: str, date: str):
+        name = name.strip()
+        if not name or len(name) > 200:
+            await interaction.response.send_message("❌ Tên deadline phải có nội dung và không quá 200 ký tự.", ephemeral=True)
+            return
         try:
             due_date = datetime.date.fromisoformat(date)
         except ValueError:
@@ -81,15 +100,20 @@ class Study(commands.Cog):
             return
         embed = discord.Embed(title="📅 DEADLINE SẮP TỚI", color=discord.Color.blue())
         for row in rows:
-            embed.add_field(name=row["name"], value=row["due_date"].isoformat(), inline=False)
+            embed.add_field(name=_clip(row["name"], 250), value=row["due_date"].isoformat(), inline=False)
         await interaction.response.send_message(embed=embed)
 
     # ---------------- Poll ----------------
     @app_commands.command(name="poll", description="Tạo một cuộc bình chọn nhanh (tối đa 5 lựa chọn, cách nhau bởi dấu phẩy)")
     async def poll(self, interaction: discord.Interaction, question: str, options: str):
+        question = question.strip()
         choices = [opt.strip() for opt in options.split(",") if opt.strip()][:5]
-        if len(choices) < 2:
-            await interaction.response.send_message("❌ Cần ít nhất 2 lựa chọn, cách nhau bởi dấu phẩy.", ephemeral=True)
+        if (not question or len(question) > 245 or len(choices) < 2
+                or any(len(choice) > 500 for choice in choices)):
+            await interaction.response.send_message(
+                "❌ Cần câu hỏi tối đa 245 ký tự và 2–5 lựa chọn, mỗi lựa chọn tối đa 500 ký tự.",
+                ephemeral=True,
+            )
             return
 
         number_emojis = ["1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣"]

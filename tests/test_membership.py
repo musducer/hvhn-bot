@@ -4,6 +4,7 @@ import asyncio
 import inspect
 import unittest
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 
 os.environ.setdefault("GROQ_API_KEYS", "x")
 
@@ -63,6 +64,21 @@ class InviteMatchTest(unittest.TestCase):
     def test_email_validation(self):
         self.assertTrue(valid_email("A@Example.com"))
         self.assertFalse(valid_email("not-an-email"))
+        for unsafe in (
+            "=IMPORTXML@example.com",
+            "+SUM@example.com",
+            "a..b@example.com",
+            ".ab@example.com",
+            "ab@example..com",
+            "ab@-example.com",
+        ):
+            with self.subTest(email=unsafe):
+                self.assertFalse(valid_email(unsafe))
+
+    def test_order_code_has_a_database_uniqueness_backstop(self):
+        schema_source = Path("bot.py").read_text(encoding="utf-8")
+        self.assertIn("CREATE UNIQUE INDEX IF NOT EXISTS uq_hvhn_members_order_code", schema_source)
+        self.assertIn("WHERE order_code IS NOT NULL", schema_source)
 
 
 class FakeDB:
@@ -73,6 +89,18 @@ class FakeDB:
         self._job_id = 0
 
     async def fetchrow(self, sql, *args):
+        if "SET name=$2, email=$3, granted_at=$4, expires_at=$5" in sql and "RETURNING id" in sql:
+            rid = args[0]
+            for row in self.rows:
+                if row["id"] == rid and row["status"] == "joined":
+                    row["name"] = args[1]
+                    row["email"] = args[2]
+                    row["granted_at"] = args[3]
+                    row["expires_at"] = args[4]
+                    row["status"] = "active"
+                    row["notified_expiry"] = False
+                    return {"id": rid}
+            return None
         if "FROM hvhn_members WHERE order_code=$1" in sql:
             code = args[0]
             cand = [r for r in self.rows if r.get("order_code") == code]
@@ -209,7 +237,7 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         m = Membership.__new__(Membership)  # tránh __init__ (khỏi start loop)
         m.bot = FakeBot(FakeDB())
         async def _noop_grant(member):
-            return None
+            return True
         m._grant_roles = _noop_grant
         async def _fake_member_for_customer(discord_id):
             return FakeMember(discord_id)
@@ -254,6 +282,20 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expires, row["expires_at"])
         self.assertEqual(m.bot.db.jobs[0]["job_type"], "add_client")
         self.assertEqual(m.bot.db.jobs[0]["text_payload"], "An\tan@example.com")
+
+    async def test_activation_does_not_change_state_when_role_grant_fails(self):
+        m = self._cog()
+        async def _failed_grant(_member):
+            return False
+        m._grant_roles = _failed_grant
+        await m._create_pending_invite("abc", 7, 999)
+        await m._mark_invite_joined("abc", 111)
+
+        with self.assertRaisesRegex(RuntimeError, "Không thể cấp đủ role"):
+            await m._activate_customer(111, "An", "an@example.com", 111)
+
+        self.assertEqual(m.bot.db.rows[0]["status"], "joined")
+        self.assertEqual(m.bot.db.jobs, [])
 
     async def test_active_customer_cannot_change_email_or_create_another_job(self):
         m = self._cog()
@@ -317,7 +359,7 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ensure_activation_portal", source)
         self.assertNotIn("member.send", source)
 
-    async def test_active_customer_cannot_use_button_to_backfill_a_job(self):
+    async def test_active_customer_retry_repairs_roles_without_backfilling_a_job(self):
         m = self._cog()
         await m._create_pending_invite("abc", 7, 999)
         await m._mark_invite_joined("abc", 111)
@@ -327,9 +369,53 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         row["email"] = "an@example.com"
         row["granted_at"] = NOW
         row["expires_at"] = NOW + timedelta(days=7)
-        with self.assertRaises(RuntimeError):
-            await m._activate_customer(111, "An", "an@example.com", 111)
+        expires, note, corrected = await m._activate_customer(111, "An", "an@example.com", 111)
+        self.assertTrue(corrected)
+        self.assertEqual(expires, row["expires_at"])
+        self.assertIn("không tạo đơn trùng", note)
         self.assertEqual(m.bot.db.jobs, [])
+
+    def test_activation_uses_cross_process_database_lock_in_production(self):
+        lifecycle_source = inspect.getsource(Membership._lifecycle_store)
+        activation_source = inspect.getsource(Membership._activate_customer)
+        self.assertIn("pg_advisory_xact_lock", lifecycle_source)
+        self.assertIn("conn.transaction", lifecycle_source)
+        self.assertIn("_lifecycle_store", activation_source)
+
+    def test_all_customer_lifecycle_writers_share_one_cross_process_lock(self):
+        expiry_source = inspect.getsource(Membership._run_expiry_tick)
+        cleanup_source = inspect.getsource(Membership._cleanup_stale_onboarding)
+        register_source = inspect.getsource(Membership._register)
+        renew_source = inspect.getsource(Membership.giahankhach.callback)
+        cancel_source = inspect.getsource(Membership.huykhach.callback)
+        for source in (expiry_source, cleanup_source, register_source, renew_source, cancel_source):
+            self.assertIn("_lifecycle_store", source)
+
+    def test_activation_and_admin_grants_fail_before_state_changes(self):
+        activation_source = inspect.getsource(Membership._activate_customer_once)
+        cap_source = inspect.getsource(Membership.capkhach.callback)
+        renew_source = inspect.getsource(Membership.giahankhach.callback)
+        self.assertLess(activation_source.index("_grant_roles"), activation_source.index("UPDATE hvhn_members"))
+        self.assertLess(cap_source.index("_grant_roles"), cap_source.index("_register_with_store"))
+        self.assertLess(renew_source.index("_grant_roles"), renew_source.index("UPDATE hvhn_members"))
+
+    def test_expiry_and_cleanup_lock_rows_and_retry_failed_kicks(self):
+        expiry_source = inspect.getsource(Membership._run_expiry_tick)
+        cleanup_source = inspect.getsource(Membership._cleanup_stale_onboarding)
+        self.assertIn("FOR UPDATE", expiry_source)
+        self.assertIn("AND status='active' AND expires_at <= $2 RETURNING id", expiry_source)
+        self.assertIn("AND status='expired' AND expires_at <= $2 RETURNING id", expiry_source)
+        self.assertLess(
+            expiry_source.index("await member.kick"),
+            expiry_source.index("UPDATE hvhn_members SET status='kicked'"),
+        )
+        self.assertIn("COALESCE(joined_at, created_at)", cleanup_source)
+        self.assertIn("FOR UPDATE", cleanup_source)
+        self.assertIn("AND status=$2 RETURNING id", cleanup_source)
+        self.assertLess(
+            cleanup_source.index("await member.kick"),
+            cleanup_source.index("UPDATE hvhn_members SET status='kicked'"),
+        )
 
     async def test_activation_requires_member_still_in_guild(self):
         m = self._cog()
@@ -422,6 +508,13 @@ class MintInviteTest(unittest.IsolatedAsyncioTestCase):
         m, _ = self._cog()
         with self.assertRaises(ValueError):
             await m.mint_invite_for_order("ORD2", "An", "not-an-email", 30)
+
+    async def test_mint_rejects_unsafe_identity_fields(self):
+        m, _ = self._cog()
+        with self.assertRaises(ValueError):
+            await m.mint_invite_for_order("bad code", "An", "an@example.com", 30)
+        with self.assertRaises(ValueError):
+            await m.mint_invite_for_order("ORD4", "=IMPORTXML", "an@example.com", 30)
 
     async def test_mint_rejects_bad_duration(self):
         m, _ = self._cog()

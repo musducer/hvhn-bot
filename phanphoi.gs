@@ -31,9 +31,8 @@ const THEN_TREN_WEB_FILE_ID = '1I_L8b8U0y7mBx6IW_MGIOAo1lgV8eXr4';
 // bật "Settings → Responses → Collect email addresses". Đơn từ email lạ sẽ bị bỏ qua + ghi log.
 const MANAGER_EMAILS = []; // vd: ['chu@gmail.com', 'quanly2@gmail.com']
 
-// B1 (mitigation): cảnh báo khi có 2+ khách CÙNG TÊN nhưng KHÁC EMAIL — vì folder/tab định danh
-// theo tên nên họ sẽ dùng chung folder (xem tài liệu của nhau). Chỉ GHI LOG (không đụng dữ liệu/định
-// dạng). Giải pháp gốc (định danh theo email/ID) cần refactor riêng có test.
+// B1: cảnh báo registry có 2+ khách CÙNG TÊN nhưng KHÁC EMAIL. mergeRowsIntoClientTabs
+// và phanPhoi còn có cổng cứng: từ chối dòng xung đột và thu quyền email sai khỏi folder.
 let _canhBaoTrungTenLast = '';
 function canhBaoTrungTenKhach() {
   try {
@@ -74,15 +73,23 @@ const XOA_TAILIEU_NAME = '_don_xoa_tai_lieu';
 const SHEET_XOA_KHACH_NAME = '_don_sheet_xoa_khach';
 const SHEET_XOA_TAILIEU_NAME = '_don_sheet_xoa_tai_lieu';
 const SHEET_GIAHAN_KHACH_NAME = '_don_sheet_giahan_khach';
+const DISCORD_RENEW_HISTORY_PROP = 'DISCORD_RENEW_JOB_HISTORY';
 const SHEET_STATUS_NAME = '_sheet_status';
 const SHEET_STATUS_FILE = 'sheet_status.json';
 const BOT_ONLY_DOC_PREFIXES = ['discord'];
 
 // Tab không phải dữ liệu khách -> luôn bỏ qua khi quét
 function isSystemTab(name) {
-  return name === DASHBOARD_NAME || name === STAGING_NAME || name === REGISTRY_NAME
-      || name === DOCS_NAME || name === LOG_NAME
-      || name === PMT_ORDER_TAB || name === PREORDER_TAB;
+  const key = String(name || '').trim().toLowerCase();
+  return [DASHBOARD_NAME, STAGING_NAME, REGISTRY_NAME, DOCS_NAME, LOG_NAME,
+    PMT_ORDER_TAB, PREORDER_TAB].some(tab => String(tab).toLowerCase() === key);
+}
+
+function _isValidClientTabName(name) {
+  const clean = String(name || '').trim();
+  return !!clean && clean.length <= 80 && !isSystemTab(clean)
+    && !/[:\\\/\?\*\[\]]/.test(clean) && !/^'|'$/.test(clean)
+    && !/^[=+\-@]/.test(clean);
 }
 
 // Ghi 1 dòng nhật ký: thời gian | hành động | chi tiết. Không làm hỏng flow nếu lỗi.
@@ -115,6 +122,7 @@ function onOpen() {
     .addItem('⚙️ Cài/kiểm tra tự động hoá', 'damBaoTuDongHoa')
     .addItem('📝 Nhập mới thủ công (tab "Nhập mới") + Phân phối', 'themMoiVaPhanPhoi')
     .addItem('🔁 Phân phối lại (quét toàn bộ)', 'phanPhoi')
+    .addItem('♻️ Gia hạn ngay các khách đã tick', 'xuLyGiaHan')
     .addSeparator()
     .addItem('📄 Cập nhật danh sách Tài liệu', 'capNhatTaiLieu')
     .addItem('🗑️ Xóa TÀI LIỆU đã tích', 'xoaTaiLieuDaTich')
@@ -200,12 +208,26 @@ function tachTheoKhach() {
   const data = master.getDataRange().getValues();
   const header = data[0];
   const groups = {};
+  const groupEmails = {};
 
   for (let i = 1; i < data.length; i++) {
-    const name = data[i][0];
+    const name = String(data[i][0] || '').trim();
+    const email = String(data[i][1] || '').trim().toLowerCase();
     if (!name) continue;
+    if (!_isValidClientTabName(name) || !_isValidEmail(email)) {
+      ghiLog('TỪ CHỐI dòng tách tab không hợp lệ', name + ' - ' + email);
+      continue;
+    }
+    if (groupEmails[name] && groupEmails[name] !== email) {
+      ghiLog('TỪ CHỐI trùng tên khi tách tab', name + ': ' + email + ' != ' + groupEmails[name]);
+      continue;
+    }
+    groupEmails[name] = email;
     if (!groups[name]) groups[name] = [header];
-    groups[name].push(data[i]);
+    const cleanRow = data[i].slice();
+    cleanRow[0] = name;
+    cleanRow[1] = email;
+    groups[name].push(cleanRow);
   }
 
   Object.keys(groups).forEach(name => {
@@ -229,11 +251,25 @@ function mergeRowsIntoClientTabs(ss, rows) {
   rows.forEach(row => {
     const [name, email, fileName] = row;
     if (!name || !email || !fileName || name === 'TenNguoiNhan') return; // bỏ qua header/dòng rỗng
+    const clientName = String(name).trim();
+    const clientEmail = String(email).trim().toLowerCase();
+    if (!_isValidClientTabName(clientName) || !_isValidEmail(clientEmail)) {
+      ghiLog('TỪ CHỐI dòng khách không hợp lệ', clientName + ' - ' + clientEmail);
+      return;
+    }
 
-    let sheet = ss.getSheetByName(name);
+    let sheet = ss.getSheetByName(clientName);
     if (!sheet) {
-      sheet = ss.insertSheet(name);
+      sheet = ss.insertSheet(clientName);
       sheet.getRange(1, 1, 1, 4).setValues([['TenNguoiNhan', 'Email', 'TenFile', 'TrangThai']]);
+    } else if (sheet.getLastRow() > 1) {
+      const storedEmails = sheet.getRange(2, 2, sheet.getLastRow() - 1, 1).getValues()
+        .flat().map(v => String(v || '').trim().toLowerCase()).filter(Boolean);
+      const canonicalEmail = storedEmails[0] || '';
+      if (canonicalEmail && canonicalEmail !== clientEmail) {
+        ghiLog('TỪ CHỐI trùng tên khách khác email', clientName + ': ' + clientEmail + ' != ' + canonicalEmail);
+        return;
+      }
     }
 
     const lastRow = sheet.getLastRow();
@@ -242,7 +278,7 @@ function mergeRowsIntoClientTabs(ss, rows) {
       : [];
     if (existing.includes(fileName)) return; // đã có rồi, khỏi thêm trùng
 
-    sheet.getRange(sheet.getLastRow() + 1, 1, 1, 3).setValues([[name, email, fileName]]);
+    sheet.getRange(sheet.getLastRow() + 1, 1, 1, 3).setValues([[clientName, clientEmail, fileName]]);
     added++;
   });
   return added;
@@ -438,20 +474,62 @@ function phanPhoi(options) {
   let distributed = 0;
   let missing = 0;
   let touchedRows = 0;
+  const registryEmailByName = {};
+  const registry = ensureRegistry();
+  if (registry.getLastRow() > 1) {
+    registry.getRange(2, 1, registry.getLastRow() - 1, 2).getValues().forEach(row => {
+      const key = String(row[0] || '').trim().toLowerCase();
+      const email = String(row[1] || '').trim().toLowerCase();
+      if (key && email && !registryEmailByName[key]) registryEmailByName[key] = email;
+    });
+  }
 
   ss.getSheets().forEach(sheet => {
     if (isSystemTab(sheet.getName())) return;
 
     const data = sheet.getDataRange().getValues();
     if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
+    const firstClientRow = data.slice(1).find(row => row[0] && row[1]);
+    const canonicalEmail = registryEmailByName[sheet.getName().trim().toLowerCase()]
+      || (firstClientRow ? String(firstClientRow[1]).trim().toLowerCase() : '');
 
     const seen = {}; // chống trùng dòng trong cùng 1 tab
     let touchedSheet = false;
     for (let i = 1; i < data.length; i++) {
       const [name, email, fileName, status] = data[i];
       const statusText = String(status || '');
-      if (!name || !email || !fileName || statusText.startsWith('Xong')) continue;
+      if (!name || !email || !fileName) continue;
       if (options.onlyMissing && !statusText.startsWith('Không thấy')) continue;
+      const cleanEmail = String(email).trim().toLowerCase();
+      const cleanName = String(name).trim().toLowerCase();
+      const identityMismatch = cleanName !== sheet.getName().trim().toLowerCase()
+        || (canonicalEmail && cleanEmail !== canonicalEmail);
+      if (identityMismatch) {
+        // Chặn cả dòng cũ từng ghi Xong: không cho tên/email xung đột tiếp tục giữ
+        // quyền trên folder của khách chuẩn.
+        try {
+          const folders = destRoot.getFoldersByName(sheet.getName());
+          while (folders.hasNext()) {
+            const folder = folders.next();
+            _removeAccess(folder, cleanEmail);
+            const files = folder.getFiles();
+            while (files.hasNext()) _removeAccess(files.next(), cleanEmail);
+          }
+        } catch (revokeError) {
+          ghiLog('LỖI gỡ quyền dòng sai định danh', sheet.getName() + ': ' + cleanEmail + ' - '
+            + ((revokeError && revokeError.message) || String(revokeError)));
+          sheet.getRange(i + 1, 4).setValue('Lỗi gỡ quyền định danh - hệ thống sẽ thử lại');
+          touchedSheet = true; touchedRows++;
+          continue;
+        }
+        if (!statusText.startsWith('Lỗi định danh')) {
+          ghiLog('CHẶN dòng khách sai định danh', sheet.getName() + ': ' + email + ' / tên dòng=' + name);
+        }
+        sheet.getRange(i + 1, 4).setValue('Lỗi định danh: tên/email không khớp khách của tab');
+        touchedSheet = true; touchedRows++;
+        continue;
+      }
+      if (statusText.startsWith('Xong')) continue;
       if (_isBotOnlyDocFileName(fileName)) {
         sheet.getRange(i + 1, 4).setValue('Bot-only (không phân phối)');
         touchedSheet = true; touchedRows++;
@@ -466,7 +544,7 @@ function phanPhoi(options) {
 
       try {
         const destFolder = getOrCreateFolder(destRoot, name);
-        _ensureOnlyViewer(destFolder, email);
+        _ensureOnlyViewer(destFolder, cleanEmail);
 
         // IDEMPOTENT: nếu folder đích đã có file cùng tên -> dùng lại, KHÔNG copy thêm bản mới
         let target;
@@ -484,7 +562,7 @@ function phanPhoi(options) {
         }
 
         // Chỉ share nếu email CHƯA có quyền -> tránh gửi lại mail thông báo mỗi lần chạy
-        _ensureOnlyViewer(target, email);
+        _ensureOnlyViewer(target, cleanEmail);
         // Khoá tải/in/copy: nếu Advanced Drive Service chưa bật thì bỏ qua, KHÔNG chặn "Xong"
         try {
           Drive.Files.update({ copyRequiresWriterPermission: true }, target.getId());
@@ -516,7 +594,10 @@ function capNhatDashboard() {
   if (!dash) dash = ss.insertSheet(DASHBOARD_NAME, 0);
 
   const searchTerm = (dash.getRange(SEARCH_CELL).getValue() || '').toString().trim().toLowerCase();
-  dash.getRange('A4:Z999').clearContent();
+  // Xóa toàn bộ thân bảng, kể cả khi danh sách từng vượt quá 996 khách.
+  if (dash.getMaxRows() > 3) {
+    dash.getRange(4, 1, dash.getMaxRows() - 3, dash.getMaxColumns()).clearContent();
+  }
 
   const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
   const rows = [];
@@ -809,7 +890,7 @@ function dongBoKhachHang() {
     const data = sheet.getDataRange().getValues();
     if (!data.length || data[0][0] !== 'TenNguoiNhan') return;
     for (let i = 1; i < data.length; i++) {
-      if (data[i][0] && data[i][1]) clients[data[i][0]] = data[i][1];
+      if (data[i][0] && data[i][1] && !clients[data[i][0]]) clients[data[i][0]] = data[i][1];
     }
   });
 
@@ -875,7 +956,7 @@ function kiemTraHetHan() {
 
     // Quá hạn: xoá toàn bộ file trong folder khách + reset trạng thái các dòng của khách ở tab
     const folders = destRoot.getFoldersByName(name);
-    if (folders.hasNext()) {
+    while (folders.hasNext()) {
       const folder = folders.next();
       _removeAccess(folder, email);
       const files = folder.getFiles();
@@ -893,7 +974,10 @@ function kiemTraHetHan() {
         if (tData[r][0]) tab.getRange(r + 1, 4).setValue('Đã gỡ (hết hạn)');
       }
     }
-    _goQuyenThenTrenWebNeuKhongConHan(email, name);
+    if (!_goQuyenThenTrenWebNeuKhongConHan(email, name)) {
+      ghiLog('Chờ thử lại gỡ quyền Then trên web', name + ' - ' + email);
+      continue;
+    }
     ghiLog('Hết hạn - gỡ quyền + xoá file', name + ' - ' + email);
     revoked++;
     // chi ghi o Trang thai cua dong nay — khong ghi de ca block (nuot tick nguoi dung)
@@ -981,6 +1065,36 @@ function xuLyGiaHanTuDong() {
   }
 }
 
+function _discordRenewJobId(parts) {
+  const marker = String(parts[3] || '').trim();
+  const match = marker.match(/^job:(\d+)$/);
+  return match ? match[1] : '';
+}
+
+function _discordRenewHistory() {
+  try {
+    const raw = PropertiesService.getScriptProperties().getProperty(DISCORD_RENEW_HISTORY_PROP);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch (e) {
+    return [];
+  }
+}
+
+function _discordRenewSeen(jobId) {
+  return !!jobId && _discordRenewHistory().indexOf(String(jobId)) >= 0;
+}
+
+function _discordRenewMark(jobId) {
+  if (!jobId) return;
+  const history = _discordRenewHistory().filter(id => id !== String(jobId));
+  history.push(String(jobId));
+  PropertiesService.getScriptProperties().setProperty(
+    DISCORD_RENEW_HISTORY_PROP,
+    JSON.stringify(history.slice(-300))
+  );
+}
+
 // Discord -> watcher -> _don_sheet_giahan_khach: mỗi file chứa "email<TAB>số_lượng<TAB>đơn_vị".
 // đơn_vị = 'h' (giờ) hoặc 'd' (ngày). Thiếu đơn_vị -> hiểu là NGÀY (tương thích đơn cũ).
 function xuLyLenhGiaHanDiscordTuDong() {
@@ -994,10 +1108,16 @@ function xuLyLenhGiaHanDiscordTuDong() {
       const email = String(parts[0] || '').trim().toLowerCase();
       const amount = Math.max(1, parseInt(parts[1], 10) || 0);
       const unit = String(parts[2] || 'd').trim().toLowerCase();
+      const jobId = _discordRenewJobId(parts);
+      if (_discordRenewSeen(jobId)) {
+        job.file.setTrashed(true);
+        return;
+      }
       const hours = amount > 0 ? (unit === 'h' ? amount : amount * 24) : SUB_HOURS;
       const found = _timKhachTheoEmail(ss, email);
       if (!found) {
         ghiLog('Discord gia hạn - không tìm thấy', email);
+        _discordRenewMark(jobId);
         job.file.setTrashed(true);
         return;
       }
@@ -1025,6 +1145,7 @@ function xuLyLenhGiaHanDiscordTuDong() {
       }
 
       ghiLog('Discord gia hạn +' + hours + ' giờ', found.name + ' - ' + (found.email || email));
+      _discordRenewMark(jobId);
       job.file.setTrashed(true);
       changed++;
     } catch (e) {
@@ -1175,33 +1296,39 @@ function getOrCreateFolder(parent, name) {
 // Cap dung 1 quyen cho khach: viewer tren folder/file, khong editor.
 function _ensureOnlyViewer(item, email) {
   const lower = String(email || '').trim().toLowerCase();
-  if (!lower) return;
+  if (!_isValidEmail(lower)) throw new Error('Email chia sẻ không hợp lệ: ' + lower);
 
-  try {
-    const editors = item.getEditors().map(u => u.getEmail().toLowerCase());
-    if (editors.indexOf(lower) >= 0) item.removeEditor(email);
-  } catch (e) {}
+  let editors = item.getEditors().map(u => String(u.getEmail() || '').toLowerCase());
+  if (editors.indexOf(lower) >= 0) item.removeEditor(lower);
+  editors = item.getEditors().map(u => String(u.getEmail() || '').toLowerCase());
+  if (editors.indexOf(lower) >= 0) {
+    throw new Error('Không thể hạ quyền Editor xuống Viewer cho ' + lower);
+  }
 
-  try {
-    const viewers = item.getViewers().map(u => u.getEmail().toLowerCase());
-    const editors = item.getEditors().map(u => u.getEmail().toLowerCase());
-    if (viewers.indexOf(lower) < 0 && editors.indexOf(lower) < 0) item.addViewer(email);
-  } catch (e) {}
+  let viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
+  if (viewers.indexOf(lower) < 0) item.addViewer(lower);
+  viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
+  if (viewers.indexOf(lower) < 0) {
+    throw new Error('Drive không xác nhận quyền Viewer cho ' + lower);
+  }
+  return true;
 }
 
 function _removeAccess(item, email) {
   const lower = String(email || '').trim().toLowerCase();
-  if (!lower) return;
+  if (!_isValidEmail(lower)) throw new Error('Email gỡ quyền không hợp lệ: ' + lower);
 
-  try {
-    const viewers = item.getViewers().map(u => u.getEmail().toLowerCase());
-    if (viewers.indexOf(lower) >= 0) item.removeViewer(email);
-  } catch (e) {}
+  let viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
+  if (viewers.indexOf(lower) >= 0) item.removeViewer(lower);
+  let editors = item.getEditors().map(u => String(u.getEmail() || '').toLowerCase());
+  if (editors.indexOf(lower) >= 0) item.removeEditor(lower);
 
-  try {
-    const editors = item.getEditors().map(u => u.getEmail().toLowerCase());
-    if (editors.indexOf(lower) >= 0) item.removeEditor(email);
-  } catch (e) {}
+  viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
+  editors = item.getEditors().map(u => String(u.getEmail() || '').toLowerCase());
+  if (viewers.indexOf(lower) >= 0 || editors.indexOf(lower) >= 0) {
+    throw new Error('Drive chưa xác nhận gỡ hết quyền của ' + lower);
+  }
+  return true;
 }
 
 // ============ THEN TRÊN WEB: QUYỀN VIEWER THEO GÓI KHÁCH ============
@@ -1219,19 +1346,9 @@ function capQuyenThenTrenWebChoKhachConHan(conHan) {
 
   try {
     const app = _thenTrenWebFile();
-    const editors = app.getEditors().map(user => String(user.getEmail() || '').toLowerCase());
-    const viewers = app.getViewers().map(user => String(user.getEmail() || '').toLowerCase());
-
     emails.forEach(email => {
       try {
-        if (editors.indexOf(email) >= 0) {
-          app.removeEditor(email);
-          editors.splice(editors.indexOf(email), 1);
-        }
-        if (viewers.indexOf(email) < 0) {
-          app.addViewer(email);
-          viewers.push(email);
-        }
+        _ensureOnlyViewer(app, email);
       } catch (emailError) {
         ghiLog('LỖI cấp quyền Then trên web', email + ' - ' + ((emailError && emailError.message) || String(emailError)));
       }
@@ -1245,7 +1362,7 @@ function capQuyenThenTrenWebChoKhachConHan(conHan) {
 // được dùng khi đang xoá khách nhưng dòng registry của chính khách đó chưa bị xoá.
 function _goQuyenThenTrenWebNeuKhongConHan(email, excludedName) {
   const cleanEmail = String(email || '').trim().toLowerCase();
-  if (!cleanEmail) return;
+  if (!_isValidEmail(cleanEmail)) return false;
 
   try {
     const reg = ensureRegistry();
@@ -1261,11 +1378,12 @@ function _goQuyenThenTrenWebNeuKhongConHan(email, excludedName) {
         return name !== String(excludedName || '') && rowEmail === cleanEmail
           && expiry > now && status !== 'Đã gỡ quyền';
       });
-      if (conGoiKhacConHan) return;
+      if (conGoiKhacConHan) return true;
     }
-    _removeAccess(_thenTrenWebFile(), cleanEmail);
+    return _removeAccess(_thenTrenWebFile(), cleanEmail);
   } catch (e) {
     ghiLog('LỖI gỡ quyền Then trên web', cleanEmail + ' - ' + ((e && e.message) || String(e)));
+    return false;
   }
 }
 
@@ -1298,7 +1416,9 @@ function _xoaFolderKhachTrenDrive(destRoot, name, email) {
 // Xoá hẳn 1 khách: file Drive + folder + tab + dòng registry + báo PC gỡ khỏi clients.csv.
 function _xoaMotKhach(ss, destRoot, name, email) {
   _xoaFolderKhachTrenDrive(destRoot, name, email);
-  _goQuyenThenTrenWebNeuKhongConHan(email, name);
+  if (!_goQuyenThenTrenWebNeuKhongConHan(email, name)) {
+    throw new Error('Chưa gỡ được quyền Then trên web của ' + email + '; hệ thống sẽ thử lại');
+  }
   const tab = ss.getSheetByName(name);
   if (tab) ss.deleteSheet(tab);
   if (email) _ghiDonXoa(XOA_KHACH_NAME, email);
@@ -1463,7 +1583,22 @@ function xoaTatCaKhach() {
   const reg = ensureRegistry();
   const last = reg.getLastRow();
   const vals = last >= 2 ? reg.getRange(2, 1, last - 1, 2).getValues() : [];
+  const emails = {};
+  vals.forEach(row => {
+    const email = String(row[1] || '').trim().toLowerCase();
+    if (email) emails[email] = true;
+  });
   vals.forEach(row => { if (row[0]) _xoaMotKhach(ss, destRoot, row[0], row[1]); });
+  // Thu hồi dứt điểm quyền app cho cả email trước khi xóa registry. Nếu Drive lỗi,
+  // giữ registry để lần chạy sau còn đủ dữ liệu thử lại.
+  try {
+    const thenFile = _thenTrenWebFile();
+    Object.keys(emails).forEach(email => _removeAccess(thenFile, email));
+  } catch (e) {
+    ghiLog('LỖI gỡ quyền Then trên web khi xóa tất cả', (e && e.message) || String(e));
+    ui.alert('Chưa gỡ hết quyền Then trên web. Danh sách khách được giữ lại để bạn chạy lại thao tác.');
+    return;
+  }
   if (last >= 2) reg.deleteRows(2, last - 1);
   decorateRegistry(reg);
   capNhatDashboard();
@@ -1605,7 +1740,7 @@ function _xoaMotTaiLieu(ss, sourceFolder, destRoot, docBase) {
       if (fn && _docBaseFromFileName(String(fn)) === docBase) {
         // xoá file phân phối trong folder khách
         const folders = destRoot.getFoldersByName(sheet.getName());
-        if (folders.hasNext()) {
+        while (folders.hasNext()) {
           const df = folders.next().getFilesByName(String(fn));
           while (df.hasNext()) df.next().setTrashed(true);
         }
@@ -1684,15 +1819,63 @@ function _openFormIfAlive(id) {
   } catch (e) { return null; }
 }
 
+function _emailTextValidation() {
+  return FormApp.createTextValidation()
+    .requireTextIsEmail()
+    .setHelpText('Hãy nhập đúng địa chỉ email.')
+    .build();
+}
+
+function _isValidPersonName(name) {
+  const clean = String(name || '').trim();
+  return !!clean && clean.length <= 120 && !/[\x00-\x1f\x7f]/.test(clean)
+    && !/^[=+\-@]/.test(clean);
+}
+
+function _isValidEmail(email) {
+  const clean = String(email || '').trim();
+  if (!clean || clean.length > 254 || /^[=+\-@]/.test(clean)) return false;
+  const parts = clean.split('@');
+  if (parts.length !== 2) return false;
+  const local = parts[0];
+  const labels = parts[1].toLowerCase().split('.');
+  if (!local || local.length > 64 || local.startsWith('.') || local.endsWith('.')
+      || local.indexOf('..') >= 0 || !/^[A-Za-z0-9.!#$%&'*+\/=?^_`{|}~-]+$/.test(local)
+      || labels.length < 2) return false;
+  return labels.every(label => !!label && label.length <= 63
+    && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
+}
+
+function _ensureFormEmailValidation(form) {
+  form.getItems(FormApp.ItemType.TEXT).forEach(item => {
+    const textItem = item.asTextItem();
+    if (textItem.getTitle().toLowerCase().indexOf('email') >= 0) {
+      textItem.setValidation(_emailTextValidation());
+    }
+  });
+}
+
+function _ensureSingleFormTrigger(handler, form) {
+  let kept = false;
+  ScriptApp.getProjectTriggers().forEach(trigger => {
+    if (trigger.getHandlerFunction() !== handler) return;
+    let sameForm = false;
+    try { sameForm = trigger.getTriggerSourceId() === form.getId(); } catch (e) {}
+    if (sameForm && !kept) kept = true;
+    else ScriptApp.deleteTrigger(trigger);
+  });
+  if (!kept) ScriptApp.newTrigger(handler).forForm(form).onFormSubmit().create();
+}
+
 // Tạo mới form THÊM KHÁCH + gắn trigger + lưu ID. Trả về form.
 function _taoFormKhach(props) {
   const form = FormApp.create('HVHN — Thêm khách mới');
   form.setDescription('Nhập họ tên và email học viên để cấp tài liệu (gói 1 tháng). Hệ thống tự đóng dấu + gửi tài liệu.');
   form.addTextItem().setTitle('Họ và tên học viên').setRequired(true);
-  form.addTextItem().setTitle('Email (Gmail) học viên').setRequired(true);
+  form.addTextItem().setTitle('Email (Gmail) học viên').setRequired(true).setValidation(_emailTextValidation());
   form.setConfirmationMessage('Đã nhận! Tài liệu sẽ được gửi sau khi hệ thống xử lý.');
   form.setAcceptingResponses(true);
-  ScriptApp.newTrigger('xuLyFormKhach').forForm(form).onFormSubmit().create();
+  _ensureSingleFormTrigger('xuLyFormKhach', form);
   props.setProperty('FORM_KHACH_ID', form.getId());
   return form;
 }
@@ -1704,7 +1887,7 @@ function _taoFormBot(props) {
   // Apps Script không tạo được câu hỏi upload file bằng code -> thêm tay 1 lần trong link sửa form.
   form.setConfirmationMessage('Đã nhận file. Bot sẽ đọc sau khi watcher trên PC xử lý.');
   form.setAcceptingResponses(true);
-  ScriptApp.newTrigger('xuLyFormTaiLieuBot').forForm(form).onFormSubmit().create();
+  _ensureSingleFormTrigger('xuLyFormTaiLieuBot', form);
   props.setProperty('FORM_BOT_TL_ID', form.getId());
   return form;
 }
@@ -1712,6 +1895,8 @@ function _taoFormBot(props) {
 // Menu: tạo lại RIÊNG form thêm khách (khi lỡ xoá/hỏng), không đụng form tài liệu.
 function taoLaiFormKhach() {
   const props = PropertiesService.getScriptProperties();
+  const oldForm = _openFormIfAlive(props.getProperty('FORM_KHACH_ID'));
+  if (oldForm) oldForm.setAcceptingResponses(false);
   const form = _taoFormKhach(props);
   const msg = 'Đã tạo lại Form THÊM KHÁCH. Gửi link này cho quản lý:\n\n' + form.getPublishedUrl();
   Logger.log(msg);
@@ -1720,6 +1905,8 @@ function taoLaiFormKhach() {
 
 function taoLaiFormBot() {
   const props = PropertiesService.getScriptProperties();
+  const oldForm = _openFormIfAlive(props.getProperty('FORM_BOT_TL_ID'));
+  if (oldForm) oldForm.setAcceptingResponses(false);
   const form = _taoFormBot(props);
   const msg = 'Đã tạo lại Form NẠP TÀI LIỆU CHO BOT.\n\n'
     + 'Cần mở link SỬA rồi thêm tay 1 câu "Tải tệp lên" bắt buộc.\n\n'
@@ -1743,7 +1930,7 @@ function _taoFormMd(props) {
   // Apps Script không tạo được câu hỏi upload file bằng code -> thêm tay 1 lần trong link sửa form.
   form.setConfirmationMessage('Đã nhận file. Bot sẽ đọc sau khi watcher trên PC xử lý.');
   form.setAcceptingResponses(true);
-  ScriptApp.newTrigger('xuLyFormMd').forForm(form).onFormSubmit().create();
+  _ensureSingleFormTrigger('xuLyFormMd', form);
   props.setProperty('FORM_MD_ID', form.getId());
   return form;
 }
@@ -1751,6 +1938,8 @@ function _taoFormMd(props) {
 // Menu: tạo lại RIÊNG form nạp .md cho bot (khi lỡ xoá/hỏng), không đụng các form khác.
 function taoLaiFormMd() {
   const props = PropertiesService.getScriptProperties();
+  const oldForm = _openFormIfAlive(props.getProperty('FORM_MD_ID'));
+  if (oldForm) oldForm.setAcceptingResponses(false);
   const form = _taoFormMd(props);
   const msg = 'Đã tạo lại Form NẠP .MD CHO BOT.\n\n'
     + 'Cần mở link SỬA rồi thêm tay 1 câu "Tải tệp lên" bắt buộc (chỉ nhận .md).\n\n'
@@ -1772,6 +1961,8 @@ function caiDatForm() {
   // --- Form 1: THÊM KHÁCH ---
   let formKhach = _openFormIfAlive(props.getProperty('FORM_KHACH_ID'));
   if (!formKhach) formKhach = _taoFormKhach(props);
+  _ensureFormEmailValidation(formKhach);
+  _ensureSingleFormTrigger('xuLyFormKhach', formKhach);
 
   // --- Form 2: THÊM TÀI LIỆU ---
   let formTL = _openFormIfAlive(props.getProperty('FORM_TL_ID'));
@@ -1782,13 +1973,15 @@ function caiDatForm() {
     // LƯU Ý: Apps Script KHÔNG tạo được câu hỏi upload file bằng code -> phải thêm tay 1 lần.
     formTL.setConfirmationMessage('Đã nhận file! Hệ thống sẽ đóng dấu và phân phối.');
     formTL.setAcceptingResponses(true);
-    ScriptApp.newTrigger('xuLyFormTaiLieu').forForm(formTL).onFormSubmit().create();
+    _ensureSingleFormTrigger('xuLyFormTaiLieu', formTL);
     props.setProperty('FORM_TL_ID', formTL.getId());
   }
+  _ensureSingleFormTrigger('xuLyFormTaiLieu', formTL);
 
   // --- Form 3: NẠP TÀI LIỆU CHO BOT AI ---
   let formBotTL = _openFormIfAlive(props.getProperty('FORM_BOT_TL_ID'));
   if (!formBotTL) formBotTL = _taoFormBot(props);
+  _ensureSingleFormTrigger('xuLyFormTaiLieuBot', formBotTL);
 
   props.setProperty('JOBS_KHACH_ID', jobsFolder.getId());
   props.setProperty('INCOMING_DOCS_ID', incomingFolder.getId());
@@ -1822,7 +2015,10 @@ function xuLyFormKhach(e) {
     if (t.indexOf('tên') >= 0) name = String(it.getResponse()).trim();
     else if (t.indexOf('email') >= 0) email = String(it.getResponse()).trim();
   });
-  if (!name || !email) return;
+  if (!_isValidPersonName(name) || !_isValidEmail(email)) {
+    ghiLog('Từ chối Form thêm khách (tên/email không hợp lệ)', name + ' - ' + email);
+    return;
+  }
   jobsFolder.createFile('khach_' + Date.now() + '.txt', name + '\t' + email, MimeType.PLAIN_TEXT);
 }
 
@@ -2118,10 +2314,10 @@ function _taoFormDatMua(props) {
   const form = FormApp.create('HVHN — Đăng ký học liệu');
   form.setDescription(_pmtFormDatMuaDescription());
   form.addTextItem().setTitle('Họ và tên').setRequired(true);
-  form.addTextItem().setTitle('Email nhận link Discord').setRequired(true);
+  form.addTextItem().setTitle('Email nhận link Discord').setRequired(true).setValidation(_emailTextValidation());
   form.setConfirmationMessage('HVHN đã tiếp nhận. Vui lòng kiểm tra email (cả Spam) để mở mã QR thanh toán riêng của bạn.');
   form.setAcceptingResponses(true);
-  ScriptApp.newTrigger('xuLyFormDatMua').forForm(form).onFormSubmit().create();
+  _ensureSingleFormTrigger('xuLyFormDatMua', form);
   props.setProperty('FORM_DATMUA_ID', form.getId());
   return form;
 }
@@ -2138,8 +2334,13 @@ function _capNhatMoTaFormDatMua() {
 }
 
 function taoLaiFormDatMua() {
-  const form = _taoFormDatMua(PropertiesService.getScriptProperties());
-  const msg = 'Đã tạo Form ĐĂNG KÝ HỌC LIỆU. Đăng/gửi link này cho khách:\n\n' + form.getPublishedUrl();
+  const props = PropertiesService.getScriptProperties();
+  let form = _openFormIfAlive(props.getProperty('FORM_DATMUA_ID'));
+  if (!form) form = _taoFormDatMua(props);
+  form.setDescription(_pmtFormDatMuaDescription());
+  _ensureFormEmailValidation(form);
+  _ensureSingleFormTrigger('xuLyFormDatMua', form);
+  const msg = 'Form ĐĂNG KÝ HỌC LIỆU đang dùng. Đăng/gửi link này cho khách:\n\n' + form.getPublishedUrl();
   Logger.log(msg); SpreadsheetApp.getUi().alert(msg);
 }
 
@@ -2201,27 +2402,68 @@ function xuLyFormDatMua(e) {
     if (t.indexOf('tên') >= 0) name = String(it.getResponse()).trim();
     else if (t.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
   });
-  if (!name || !email) return;
-  const sheet = _pmtOrderSheet();
-  const amount = _pmtAmount();
-  const shortCode = _pmtShortOrderCode(sheet);
-  const orderCode = _pmtNumericOrderCode(sheet);
-  const expiry = new Date(Date.now() + PMT_LINK_MINUTES * 60 * 1000);
-  const row = sheet.getLastRow() + 1;
-  sheet.getRange(row, 1, 1, 15).setValues([[new Date(), shortCode, name, email, amount, 'dang_tao_qr', '', '', '', '', orderCode, '', '', '', expiry]]);
+  if (!_isValidPersonName(name) || !_isValidEmail(email)) {
+    ghiLog('Từ chối Form đặt mua (tên/email không hợp lệ)', name + ' - ' + email);
+    return;
+  }
+  let sheet, amount, shortCode, orderCode, expiry, row;
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
   try {
-    const payment = _pmtCreatePayosLink(orderCode, shortCode, name, email, amount, expiry);
-    sheet.getRange(row, 6).setValue('cho_thanh_toan');
-    sheet.getRange(row, 12, 1, 3).setValues([[payment.paymentLinkId || '', payment.checkoutUrl || '', payment.qrCode || '']]);
-    _pmtSendPaymentEmail(email, name, shortCode, amount, payment.checkoutUrl, payment.qrCode, expiry);
-    sheet.getRange(row, 9).setValue(new Date());
-    ghiLog('Đơn PayOS QR mới', shortCode + ' / ' + orderCode + ' - ' + name + ' - ' + email);
+    // Giữ lock chỉ trong lúc cấp mã + đặt chỗ dòng. Hai Form submit đồng
+    // thời không thể chọn cùng một dòng hay sinh trùng orderCode.
+    sheet = _pmtOrderSheet();
+    amount = _pmtAmount();
+    shortCode = _pmtShortOrderCode(sheet);
+    orderCode = _pmtNumericOrderCode(sheet);
+    expiry = new Date(Date.now() + PMT_LINK_MINUTES * 60 * 1000);
+    row = sheet.getLastRow() + 1;
+    sheet.getRange(row, 1, 1, 15).setValues([[new Date(), shortCode, name, email, amount, 'dang_tao_qr', '', '', '', '', orderCode, '', '', '', expiry]]);
+  } finally {
+    lock.releaseLock();
+  }
+  let payment;
+  try {
+    payment = _pmtCreatePayosLink(orderCode, shortCode, name, email, amount, expiry);
   } catch (err) {
-    sheet.getRange(row, 6).setValue('loi_tao_qr');
-    sheet.getRange(row, 10).setValue((err && err.message) || String(err));
+    const errorLock = LockService.getScriptLock();
+    errorLock.waitLock(30000);
+    try {
+      if (String(sheet.getRange(row, 6).getValue() || '') !== 'da_xu_ly') {
+        sheet.getRange(row, 6).setValue('loi_tao_qr');
+        sheet.getRange(row, 10).setValue((err && err.message) || String(err));
+      }
+    } finally {
+      errorLock.releaseLock();
+    }
     ghiLog('LỖI tạo QR PayOS', shortCode + ' - ' + ((err && err.message) || String(err)));
     throw err;
   }
+
+  // PayOS có thể gọi webhook ngay sau khi link được tạo. Khóa lần hai để Form
+  // không bao giờ hạ trạng thái da_xu_ly về cho_thanh_toan.
+  const finalizeLock = LockService.getScriptLock();
+  finalizeLock.waitLock(30000);
+  try {
+    const currentStatus = String(sheet.getRange(row, 6).getValue() || '');
+    sheet.getRange(row, 12, 1, 3).setValues([[
+      payment.paymentLinkId || '', payment.checkoutUrl || '', payment.qrCode || ''
+    ]]);
+    if (currentStatus !== 'da_xu_ly') {
+      sheet.getRange(row, 6).setValue('cho_thanh_toan');
+      try {
+        _pmtSendPaymentEmail(email, name, shortCode, amount, payment.checkoutUrl, payment.qrCode, expiry);
+        sheet.getRange(row, 9).setValue(new Date());
+      } catch (mailError) {
+        sheet.getRange(row, 6).setValue('loi_gui_email_qr');
+        sheet.getRange(row, 10).setValue((mailError && mailError.message) || String(mailError));
+        throw mailError;
+      }
+    }
+  } finally {
+    finalizeLock.releaseLock();
+  }
+  ghiLog('Đơn PayOS QR mới', shortCode + ' / ' + orderCode + ' - ' + name + ' - ' + email);
 }
 
 function _pmtMintInvite(maDon, name, email) {
@@ -2256,7 +2498,9 @@ function _pmtMintAndSendForRow(sheet, rowNumber, opts) {
   opts = opts || {};
   const row = sheet.getRange(rowNumber, 1, 1, 15).getValues()[0];
   const maDon = String(row[1] || '').trim(), name = String(row[2] || '').trim(), email = String(row[3] || '').trim().toLowerCase();
-  if (!maDon || !name || !email) throw new Error('Dòng đơn thiếu mã/tên/email');
+  if (!maDon || !_isValidPersonName(name) || !_isValidEmail(email)) {
+    throw new Error('Dòng đơn có mã/tên/email không hợp lệ');
+  }
   const out = _pmtMintInvite(maDon, name, email);
   if (!out.invite_url) return out.error || 'mint_loi';
   _pmtSendInviteEmail(email, name, out.invite_url);
@@ -2274,7 +2518,17 @@ function guiLaiLinkDiscordChoDonDangChon() {
   if (sheet.getName() !== PMT_ORDER_TAB || sheet.getActiveRange().getRow() <= 1) {
     SpreadsheetApp.getUi().alert('Hãy chọn một dòng đơn (không phải header) trong tab ' + PMT_ORDER_TAB + '.'); return;
   }
-  const status = _pmtMintAndSendForRow(sheet, sheet.getActiveRange().getRow(), { note: 'gui_lai_thu_cong' });
+  const row = sheet.getActiveRange().getRow();
+  const lock = LockService.getScriptLock();
+  let locked = false;
+  let status;
+  try {
+    lock.waitLock(30000);
+    locked = true;
+    status = _pmtMintAndSendForRow(sheet, row, { note: 'gui_lai_thu_cong' });
+  } finally {
+    if (locked) lock.releaseLock();
+  }
   SpreadsheetApp.getUi().alert(status === 'ok' ? 'Đã gửi lại link Discord cho khách.' : ('Không gửi được: ' + status));
 }
 
@@ -2298,7 +2552,13 @@ function testWebhookThanhToanChoDonDangChon() {
 
 // PayOS webhook: xác thực HMAC trước, sau đó khớp orderCode + số tiền cố định.
 function doPost(e) {
+  const lock = LockService.getScriptLock();
+  let locked = false;
   try {
+    // PayOS có thể gửi trùng webhook. Tuần tự hóa toàn bộ đoạn
+    // check -> mint -> email -> đánh dấu để một đơn chỉ gửi mail một lần.
+    lock.waitLock(30000);
+    locked = true;
     const payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     const data = payload.data || {};
     if (!payload.success || payload.code !== '00' || data.code !== '00') return _pmtOut('bo_qua');
@@ -2326,6 +2586,8 @@ function doPost(e) {
   } catch (err) {
     ghiLog('LỖI doPost PayOS', (err && err.message) || String(err));
     return _pmtOut('loi');
+  } finally {
+    if (locked) lock.releaseLock();
   }
 }
 
@@ -2403,7 +2665,10 @@ function _preorderEmailColumnIndex(headers, configuredHeader) {
 }
 
 function _preorderEmailsFromSourceSheet() {
-  const cfg = _preorderSourceConfig();
+  return _preorderEmailsFromConfig(_preorderSourceConfig());
+}
+
+function _preorderEmailsFromConfig(cfg) {
   if (!cfg.spreadsheetId) return [];
   const src = SpreadsheetApp.openById(cfg.spreadsheetId);
   const sh = _preorderSheetByGid(src, cfg.gid) || (cfg.sheetName ? src.getSheetByName(cfg.sheetName) : src.getSheets()[0]);
@@ -2418,7 +2683,7 @@ function _preorderEmailsFromSourceSheet() {
   const emails = [];
   for (let r = 1; r < values.length; r++) {
     const email = String(values[r][col] || '').trim().toLowerCase();
-    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) || seen[email]) continue;
+    if (!_isValidEmail(email) || seen[email]) continue;
     seen[email] = true;
     emails.push(email);
   }
@@ -2479,12 +2744,25 @@ function caiDatEmailPreorder() {
   );
   if (headerResp.getSelectedButton() !== ui.Button.OK) return;
 
-  props.setProperty(PREORDER_SOURCE_SPREADSHEET_ID_PROP, parsedSource.spreadsheetId);
-  props.setProperty(PREORDER_SOURCE_GID_PROP, parsedSource.gid || current.gid || '');
-  props.setProperty(PREORDER_SOURCE_SHEET_NAME_PROP, String(sheetResp.getResponseText() || '').trim());
-  props.setProperty(PREORDER_SOURCE_EMAIL_HEADER_PROP, String(headerResp.getResponseText() || '').trim() || PREORDER_DEFAULT_EMAIL_HEADER);
-
-  const emails = _preorderEmailsFromSourceSheet();
+  const candidate = {
+    spreadsheetId: parsedSource.spreadsheetId,
+    gid: parsedSource.gid || current.gid || '',
+    sheetName: String(sheetResp.getResponseText() || '').trim(),
+    emailHeader: String(headerResp.getResponseText() || '').trim() || PREORDER_DEFAULT_EMAIL_HEADER,
+  };
+  let emails;
+  try {
+    // Kiểm tra quyền truy cập/tab/header trước khi ghi Properties; cấu hình
+    // sai không còn làm hỏng allowlist đang chạy.
+    emails = _preorderEmailsFromConfig(candidate);
+  } catch (e) {
+    ui.alert('Không thể kết nối sheet responses: ' + ((e && e.message) || String(e)));
+    return;
+  }
+  props.setProperty(PREORDER_SOURCE_SPREADSHEET_ID_PROP, candidate.spreadsheetId);
+  props.setProperty(PREORDER_SOURCE_GID_PROP, candidate.gid);
+  props.setProperty(PREORDER_SOURCE_SHEET_NAME_PROP, candidate.sheetName);
+  props.setProperty(PREORDER_SOURCE_EMAIL_HEADER_PROP, candidate.emailHeader);
   ghiLog('Kết nối allowlist pre-order từ sheet responses cũ', emails.length + ' email');
   ui.alert('Đã kết nối sheet responses cũ. Hiện đọc được ' + emails.length + ' email hợp lệ. Từ giờ allowlist tự cập nhật khi sheet responses có dòng mới.');
 }
@@ -2493,10 +2771,10 @@ function _taoFormPreorder(props) {
   const form = FormApp.create('HVHN — Xác nhận slot nhóm học tập');
   form.setDescription('Form dành cho khách đã được HVHN xác nhận slot trước đó. Điền đúng họ tên và email đã đăng ký để nhận link tham gia Discord riêng qua email.');
   form.addTextItem().setTitle('Họ và tên').setRequired(true);
-  form.addTextItem().setTitle('Email nhận link Discord').setRequired(true);
+  form.addTextItem().setTitle('Email nhận link Discord').setRequired(true).setValidation(_emailTextValidation());
   form.setConfirmationMessage('HVHN đã nhận thông tin. Nếu email của bạn nằm trong danh sách pre-order đã xác nhận, link Discord riêng sẽ được gửi vào email này trong ít phút. Vui lòng kiểm tra cả mục Spam.');
   form.setAcceptingResponses(true);
-  ScriptApp.newTrigger('xuLyFormPreorder').forForm(form).onFormSubmit().create();
+  _ensureSingleFormTrigger('xuLyFormPreorder', form);
   props.setProperty(PREORDER_FORM_ID_PROP, form.getId());
   return form;
 }
@@ -2505,6 +2783,8 @@ function taoLaiFormPreorder() {
   const props = PropertiesService.getScriptProperties();
   let form = _openFormIfAlive(props.getProperty(PREORDER_FORM_ID_PROP));
   if (!form) form = _taoFormPreorder(props);
+  _ensureFormEmailValidation(form);
+  _ensureSingleFormTrigger('xuLyFormPreorder', form);
   const cfg = _preorderSourceConfig();
   let sourceStatus = cfg.spreadsheetId ? 'đã kết nối sheet responses cũ' : 'chưa kết nối sheet responses cũ';
   let count = 0;
@@ -2550,7 +2830,10 @@ function xuLyFormPreorder(e) {
       if (title.indexOf('tên') >= 0) name = String(it.getResponse()).trim();
       else if (title.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
     });
-    if (!name || !email) return;
+    if (!_isValidPersonName(name) || !_isValidEmail(email)) {
+      ghiLog('Từ chối Form pre-order (tên/email không hợp lệ)', name + ' - ' + email);
+      return;
+    }
     const allowed = _preorderAllowedEmails();
     if (!allowed[email]) {
       ghiLog('Từ chối Form pre-order (email không có trong sheet responses cũ)', email);
@@ -2590,8 +2873,15 @@ function guiLaiLinkDiscordChoPreorderDangChon() {
   const values = sheet.getRange(row, 1, 1, 8).getValues()[0];
   const name = String(values[1] || '').trim(), email = String(values[2] || '').trim().toLowerCase();
   const code = String(values[3] || _preorderCode(email)).trim();
-  if (!name || !email) { SpreadsheetApp.getUi().alert('Dòng này thiếu tên hoặc email.'); return; }
+  if (!_isValidPersonName(name) || !_isValidEmail(email)) {
+    SpreadsheetApp.getUi().alert('Dòng này có tên hoặc email không hợp lệ.'); return;
+  }
+  const lock = LockService.getScriptLock();
+  let locked = false;
+  let resultMessage = '';
   try {
+    lock.waitLock(30000);
+    locked = true;
     const out = _pmtMintInvite(code, name, email);
     if (!out.invite_url) throw new Error(out.error || 'Không tạo được invite Discord.');
     _preorderSendInviteEmail(email, name, out.invite_url);
@@ -2601,9 +2891,12 @@ function guiLaiLinkDiscordChoPreorderDangChon() {
     sheet.getRange(row, 7).setValue(new Date());
     sheet.getRange(row, 8).setValue(out.reused ? 'gui_lai_invite_cu' : 'gui_lai_invite_moi');
     ghiLog('Gửi lại link Discord pre-order', code + ' - ' + email);
-    SpreadsheetApp.getUi().alert('Đã gửi lại link Discord cho khách.');
+    resultMessage = 'Đã gửi lại link Discord cho khách.';
   } catch (err) {
     ghiLog('LỖI gửi lại link Discord pre-order', (err && err.message) || String(err));
-    SpreadsheetApp.getUi().alert('Không gửi được: ' + ((err && err.message) || String(err)));
+    resultMessage = 'Không gửi được: ' + ((err && err.message) || String(err));
+  } finally {
+    if (locked) lock.releaseLock();
   }
+  SpreadsheetApp.getUi().alert(resultMessage);
 }

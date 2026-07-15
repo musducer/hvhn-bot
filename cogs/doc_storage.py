@@ -7,6 +7,7 @@ from pathlib import Path
 import discord
 from discord import app_commands
 from discord.ext import commands
+from download_policy import is_allowed_pdf_url
 try:
     from hvhn_batch import MIRROR_SOURCE
 except Exception:
@@ -16,14 +17,35 @@ except Exception:
 DEFAULT_MIRROR_PARENT = Path(MIRROR_SOURCE).parent
 ADMIN_ROLE_ENV = "HVHN_ADMIN_ROLE"
 MIRROR_PARENT_ENV = "HVHN_MIRROR_PARENT"
-MAX_PDF_BYTES = int(os.getenv("HVHN_MAX_PDF_MB", "300")) * 1024 * 1024
-PDF_URL_PATTERN = re.compile(r"^https?://", re.I)
+
+
+def _max_pdf_bytes() -> int:
+    try:
+        megabytes = int(os.getenv("HVHN_MAX_PDF_MB", "300"))
+    except ValueError:
+        megabytes = 300
+    return max(1, min(megabytes, 1024)) * 1024 * 1024
+
+
+MAX_PDF_BYTES = _max_pdf_bytes()
 
 
 def _safe_stem(value: str, fallback: str = "don") -> str:
     value = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", value).strip(" ._")
     value = re.sub(r"\s+", " ", value)
     return value[:120] or fallback
+
+
+def _safe_doc_base(value: str) -> str | None:
+    raw = str(value or "").strip()
+    if (not raw or raw in {".", ".."} or len(raw) > 200
+            or re.search(r'[<>:"/\\|?*\x00-\x1f]', raw)):
+        return None
+    if raw.lower().endswith(".pdf"):
+        raw = raw[:-4].rstrip()
+    if not raw or raw in {".", ".."} or raw.endswith((".", " ")):
+        return None
+    return raw
 
 
 def _job_name(prefix: str, label: str, suffix: str) -> str:
@@ -35,9 +57,17 @@ def _job_name(prefix: str, label: str, suffix: str) -> str:
 def _write_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_name(path.name + ".part")
-    with open(tmp_path, "wb") as f:
-        f.write(data)
-    os.replace(tmp_path, path)
+    try:
+        with open(tmp_path, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    finally:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
 
 
 class DocumentStorage(commands.Cog):
@@ -135,7 +165,7 @@ class DocumentStorage(commands.Cog):
         requested_by: int,
     ) -> int | None:
         url = url.strip()
-        if not PDF_URL_PATTERN.match(url):
+        if not is_allowed_pdf_url(url):
             return None
         safe_file_name = _safe_stem(Path(file_name).stem or "tai_lieu") + ".pdf"
         return await self._enqueue(
@@ -183,7 +213,10 @@ class DocumentStorage(commands.Cog):
             return
         job_id = await self._enqueue_pdf_url(url, ten_file, interaction.user.id)
         if not job_id:
-            await interaction.response.send_message("Link không hợp lệ. Cần link bắt đầu bằng http/https.", ephemeral=True)
+            await interaction.response.send_message(
+                "Link không hợp lệ. Hãy dùng link Google Drive HTTPS công khai.",
+                ephemeral=True,
+            )
             return
         await interaction.response.send_message(
             f"Đã xếp hàng đơn #{job_id}: watcher sẽ tải `{ten_file}.pdf`, watermark và phân phối cho khách.",
@@ -209,7 +242,7 @@ class DocumentStorage(commands.Cog):
     async def remove_document(self, interaction: discord.Interaction, ten_tai_lieu: str):
         if not await self._require_admin(interaction):
             return
-        doc_base = Path(ten_tai_lieu.strip()).stem
+        doc_base = _safe_doc_base(ten_tai_lieu)
         if not doc_base:
             await interaction.response.send_message("Tên tài liệu không hợp lệ.", ephemeral=True)
             return
@@ -309,7 +342,8 @@ class DocumentStorage(commands.Cog):
             await self.bot.db.execute(
                 """
                 UPDATE hvhn_doc_jobs
-                SET status = 'pending', error = NULL, processed_at = NULL
+                SET status = 'pending', error = NULL, processed_at = NULL,
+                    processing_started_at = NULL
                 WHERE id = ANY($1::int[])
                 """,
                 ids,

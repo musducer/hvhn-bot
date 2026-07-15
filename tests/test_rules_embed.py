@@ -4,7 +4,7 @@ import unittest
 
 os.environ.setdefault("GROQ_API_KEYS", "x")
 
-from cogs.setup import DEFAULT_RULES, build_rules_embed, _link_channels, _roman
+from cogs.setup import DEFAULT_RULES, build_rules_embed, build_rules_embeds, _link_channels, _roman
 
 
 class FakeChannel:
@@ -75,6 +75,17 @@ class RulesEmbedTest(unittest.TestCase):
     def test_build_embed_without_guild_keeps_tokens(self):
         embed = build_rules_embed(DEFAULT_RULES, None)
         self.assertIn("#hỏi-đáp-bài-tập", embed.fields[1].value)  # không có guild -> giữ token
+
+    def test_large_rule_set_is_paginated_with_continuous_numbering(self):
+        chapters = [(f"Mục {i}", "x" * 1024) for i in range(1, 31)]
+        embeds = build_rules_embeds(chapters, None)
+        self.assertGreater(len(embeds), 1)
+        self.assertEqual(sum(len(embed.fields) for embed in embeds), len(chapters))
+        self.assertTrue(embeds[0].fields[0].name.startswith("Chương I."))
+        self.assertTrue(embeds[-1].fields[-1].name.startswith(f"Chương {_roman(30)}."))
+        for embed in embeds:
+            self.assertLessEqual(len(embed.fields), 25)
+            self.assertLessEqual(len(embed), 6000)
 
 
 if __name__ == "__main__":

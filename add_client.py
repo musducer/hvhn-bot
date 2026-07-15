@@ -3,7 +3,14 @@ Dùng: python add_client.py "Họ Tên" email@gmail.com
 """
 import sys
 
-from hvhn_batch import append_client, list_docs, render_batch, write_new_rows_csv
+from hvhn_batch import (
+    DuplicateClientEmailError,
+    append_client,
+    find_client,
+    list_docs,
+    render_batch,
+    write_new_rows_csv,
+)
 
 
 def main():
@@ -12,8 +19,14 @@ def main():
         sys.exit(1)
 
     name, email = sys.argv[1], sys.argv[2]
-    append_client(name, email)
-    print(f"Đã thêm khách vào clients.csv: {name} - {email}")
+    try:
+        append_client(name, email)
+        print(f"Đã thêm khách vào clients.csv: {name} - {email}")
+    except DuplicateClientEmailError:
+        existing = find_client(email)
+        name = existing["name"]
+        email = existing["email"]
+        print(f"Khách đã có; render lại theo dữ liệu đã lưu: {name} - {email}")
 
     docs = list_docs()
     rows = render_batch(docs, [{"name": name, "email": email}])

@@ -11,16 +11,24 @@ class Fun(commands.Cog):
 
     @app_commands.command(name="coinflip", description="Tung đồng xu ngẫu nhiên")
     async def coinflip(self, interaction: discord.Interaction):
-        result = random.choice(["Ngửa 🌕", "Sấp 🌑"])
+        # This randomness is cosmetic and does not protect a security decision.
+        result = random.choice(["Ngửa 🌕", "Sấp 🌑"])  # nosec B311
         await interaction.response.send_message(f"🪙 Kết quả: **{result}**")
 
     @app_commands.command(name="8ball", description="Hỏi quả cầu tiên tri một câu hỏi Yes/No")
     async def eight_ball(self, interaction: discord.Interaction, question: str):
+        question = question.strip()
+        if not question or len(question) > 1700:
+            await interaction.response.send_message(
+                "❌ Câu hỏi phải có nội dung và không quá 1.700 ký tự.", ephemeral=True,
+            )
+            return
         answers = [
             "Chắc chắn rồi.", "Có thể lắm.", "Không nên đâu.", "Hỏi lại sau nhé.",
             "Tôi không chắc.", "Hoàn toàn không.", "Xu hướng là có.", "Đừng trông đợi vào điều đó."
         ]
-        await interaction.response.send_message(f"🎱 **Câu hỏi:** {question}\n**Trả lời:** {random.choice(answers)}")
+        answer = random.choice(answers)  # nosec B311
+        await interaction.response.send_message(f"🎱 **Câu hỏi:** {question}\n**Trả lời:** {answer}")
 
 
 async def setup(bot: commands.Bot):

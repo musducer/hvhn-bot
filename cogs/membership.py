@@ -11,25 +11,31 @@ Pha 2 (onboarding invite-1-lần + modal) và Pha 3 (tự nhận chuyển khoả
 import os
 import re
 import asyncio
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 
 import discord
 from discord import app_commands
 from discord.ext import commands, tasks
+from env_utils import env_int
 
 # Role cấp cho khách khi kích hoạt / gia hạn, và GỠ khi hết hạn (khách hết quyền dùng Then + kho).
 GRANT_ROLES = [r.strip() for r in os.getenv("HVHN_KHACH_ROLES", "Dân làng Hua Tát").split(",") if r.strip()]
-GRACE_DAYS = int(os.getenv("HVHN_KHACH_GRACE_DAYS", "3"))          # số ngày ân hạn trước khi kick
-DEFAULT_DURATION_DAYS = int(os.getenv("HVHN_KHACH_DURATION_DAYS", "30"))
-GUILD_ID = int(os.getenv("HVHN_GUILD_ID", "0"))                    # 0 = dùng guild đầu tiên bot ở
-INVITE_HOURS = int(os.getenv("HVHN_KHACH_INVITE_HOURS", "72"))
-ONBOARDING_CLEANUP_HOURS = int(os.getenv("HVHN_KHACH_ONBOARDING_CLEANUP_HOURS", str(INVITE_HOURS)))
-INVITE_CHANNEL_ID = int(os.getenv("HVHN_KHACH_INVITE_CHANNEL_ID", "0"))
-ACTIVATE_CHANNEL_ID = int(os.getenv("HVHN_KHACH_ACTIVATE_CHANNEL_ID", "0"))
+GRACE_DAYS = env_int("HVHN_KHACH_GRACE_DAYS", 3, minimum=0, maximum=365)
+DEFAULT_DURATION_DAYS = env_int("HVHN_KHACH_DURATION_DAYS", 30, minimum=1, maximum=3650)
+GUILD_ID = env_int("HVHN_GUILD_ID", 0, minimum=0, maximum=2**63 - 1)
+INVITE_HOURS = env_int("HVHN_KHACH_INVITE_HOURS", 72, minimum=1, maximum=8760)
+ONBOARDING_CLEANUP_HOURS = env_int(
+    "HVHN_KHACH_ONBOARDING_CLEANUP_HOURS", INVITE_HOURS, minimum=1, maximum=8760,
+)
+INVITE_CHANNEL_ID = env_int("HVHN_KHACH_INVITE_CHANNEL_ID", 0, minimum=0, maximum=2**63 - 1)
+ACTIVATE_CHANNEL_ID = env_int("HVHN_KHACH_ACTIVATE_CHANNEL_ID", 0, minimum=0, maximum=2**63 - 1)
 ACTIVATE_CUSTOM_ID = "hvhn_customer_activate:v1"
 ACTIVATE_CHANNEL_NAME = "truy-cập-tài-liệu"
 ACTIVATE_PANEL_TITLE = "📚 KÍCH HOẠT QUYỀN TRUY CẬP TÀI LIỆU"
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+EMAIL_LOCAL_RE = re.compile(r"^[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+$")
+EMAIL_DOMAIN_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+ORDER_CODE_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 # ==== LOGIC THUẦN (không phụ thuộc Discord/DB) — dễ test ====
@@ -48,7 +54,23 @@ def kick_due(expires_at, now: datetime, grace_days: int) -> bool:
 
 
 def valid_email(email: str) -> bool:
-    return bool(EMAIL_RE.match((email or "").strip().lower()))
+    clean = (email or "").strip().lower()
+    if not clean or len(clean) > 254 or clean[0] in "=+-@" or clean.count("@") != 1:
+        return False
+    local, domain = clean.rsplit("@", 1)
+    if not local or len(local) > 64 or local.startswith(".") or local.endswith(".") or ".." in local:
+        return False
+    labels = domain.split(".")
+    return (
+        bool(EMAIL_LOCAL_RE.fullmatch(local))
+        and len(labels) >= 2
+        and all(EMAIL_DOMAIN_LABEL_RE.fullmatch(label) for label in labels)
+    )
+
+
+def valid_person_name(name: str) -> bool:
+    clean = (name or "").strip()
+    return 2 <= len(clean) <= 120 and clean[0] not in "=+-@"
 
 
 def _invite_code_uses(invite) -> tuple[str | None, int]:
@@ -316,8 +338,9 @@ class Membership(commands.Cog):
             print(f"[debug] khach_activation_portal_post_failed guild={guild.id} err={exc}", flush=True)
         return channel
 
-    async def _enqueue(self, job_type: str, text_payload: str, requested_by: int | None = None) -> int:
-        return await self.bot.db.fetchval(
+    async def _enqueue(self, job_type: str, text_payload: str, requested_by: int | None = None, db=None) -> int:
+        store = db or self.bot.db
+        return await store.fetchval(
             "INSERT INTO hvhn_doc_jobs (job_type, text_payload, requested_by) VALUES ($1,$2,$3) RETURNING id",
             job_type, text_payload, requested_by,
         )
@@ -338,9 +361,10 @@ class Membership(commands.Cog):
         )
 
     async def _create_pending_order(self, invite_code: str, days: int, order_code: str,
-                                    name: str | None, email: str | None) -> int:
+                                    name: str | None, email: str | None, db=None) -> int:
         """Phase 3: dòng pending có sẵn tên/email từ form đặt mua (modal Phase 2 chỉ cần xác nhận)."""
-        return await self.bot.db.fetchval(
+        store = db or self.bot.db
+        return await store.fetchval(
             "INSERT INTO hvhn_members(invite_code,duration_days,status,order_code,name,email) "
             "VALUES($1,$2,'pending',$3,$4,$5) RETURNING id",
             invite_code, days, order_code, name, email,
@@ -364,14 +388,34 @@ class Membership(commands.Cog):
         order_code = (order_code or "").strip()
         name = (name or "").strip()
         email = (email or "").strip().lower()
-        if not order_code:
-            raise ValueError("Thiếu order_code")
+        if not ORDER_CODE_RE.fullmatch(order_code):
+            raise ValueError("order_code không hợp lệ")
+        if not valid_person_name(name):
+            raise ValueError("Họ tên không hợp lệ")
         if not valid_email(email):
             raise ValueError("Email không hợp lệ")
         if days <= 0 or days > 3650:
             raise ValueError("duration_days phải trong khoảng 1–3650")
 
-        existing = await self.bot.db.fetchrow(
+        store = self.bot.db
+        acquire = getattr(store, "acquire", None)
+        if callable(acquire):
+            # asyncio.Lock chỉ bảo vệ một process. Advisory lock trong Postgres còn
+            # chặn hai bot instance/deploy cùng mint một order_code.
+            async with acquire() as conn:
+                async with conn.transaction():
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(1213614158, hashtext($1))",
+                        order_code,
+                    )
+                    return await self._mint_invite_for_order_with_store(
+                        conn, order_code, name, email, days,
+                    )
+        return await self._mint_invite_for_order_with_store(store, order_code, name, email, days)
+
+    async def _mint_invite_for_order_with_store(self, store, order_code: str,
+                                                 name: str, email: str, days: int) -> dict:
+        existing = await store.fetchrow(
             "SELECT invite_code, status FROM hvhn_members WHERE order_code=$1 ORDER BY id DESC LIMIT 1",
             order_code,
         )
@@ -394,7 +438,16 @@ class Membership(commands.Cog):
         invite = await channel.create_invite(
             max_uses=1, max_age=max_age, unique=True, reason=f"HVHN order {order_code}",
         )
-        rid = await self._create_pending_order(invite.code, days, order_code, name, email)
+        try:
+            rid = await self._create_pending_order(invite.code, days, order_code, name, email, db=store)
+        except Exception:
+            # Nếu DB từ chối insert sau khi Discord đã tạo invite, thu hồi link
+            # mồ côi. Lần retry sau sẽ tạo một link sạch.
+            try:
+                await invite.delete(reason=f"HVHN order {order_code} database rollback")
+            except (AttributeError, discord.HTTPException):
+                pass
+            raise
         print(f"[debug] mint_invite_ok order={order_code} member_row={rid} days={days}", flush=True)
         return {
             "order_code": order_code,
@@ -407,21 +460,22 @@ class Membership(commands.Cog):
 
     async def _mark_invite_joined(self, invite_code: str, discord_id: int) -> dict | None:
         return await self.bot.db.fetchrow(
-            "UPDATE hvhn_members SET discord_id=$2, status='joined' "
+            "UPDATE hvhn_members SET discord_id=$2, status='joined', joined_at=now() "
             "WHERE id=(SELECT id FROM hvhn_members WHERE invite_code=$1 AND status='pending' ORDER BY id DESC LIMIT 1) "
             "RETURNING id, duration_days",
             invite_code, discord_id,
         )
 
-    async def _recover_pending_order_by_email(self, discord_id: int, email: str) -> dict | None:
+    async def _recover_pending_order_by_email(self, discord_id: int, email: str, db=None) -> dict | None:
         """Tự chữa trường hợp bot bỏ lỡ event invite lúc khách vừa vào server.
 
         Chỉ áp dụng cho invite PayOS/pre-order đã có order_code và email đã chốt. UPDATE
         có điều kiện + RETURNING là thao tác claim nguyên tử: một email pending chỉ có thể
         gắn với một Discord account, kể cả hai người cùng bấm form.
         """
-        return await self.bot.db.fetchrow(
-            "UPDATE hvhn_members SET discord_id=$2, status='joined' "
+        store = db or self.bot.db
+        return await store.fetchrow(
+            "UPDATE hvhn_members SET discord_id=$2, status='joined', joined_at=now() "
             "WHERE id=(SELECT id FROM hvhn_members "
             "WHERE lower(email)=lower($1) AND status='pending' AND order_code IS NOT NULL "
             "ORDER BY id DESC LIMIT 1) "
@@ -452,6 +506,19 @@ class Membership(commands.Cog):
         except discord.HTTPException:
             return None
 
+    @staticmethod
+    async def _member_for_lifecycle(guild: discord.Guild, discord_id: int | None) -> discord.Member | None:
+        """Resolve a member without treating a transient Discord error as absence."""
+        if not discord_id:
+            return None
+        member = guild.get_member(discord_id)
+        if member is not None:
+            return member
+        try:
+            return await guild.fetch_member(discord_id)
+        except discord.NotFound:
+            return None
+
     def _activation_lock_for(self, discord_id: int) -> asyncio.Lock:
         locks = getattr(self, "_activation_locks", None)
         if locks is None:  # hỗ trợ object tối giản trong test/maintenance tools
@@ -461,56 +528,44 @@ class Membership(commands.Cog):
             lock = locks[discord_id] = asyncio.Lock()
         return lock
 
+    @asynccontextmanager
+    async def _lifecycle_store(self, discord_id: int):
+        """Serialize every state transition for one Discord customer.
+
+        The in-process lock keeps local tasks ordered. PostgreSQL's advisory
+        transaction lock extends that guarantee across overlapping deploys.
+        Callers may safely keep the context open while applying Discord side
+        effects; a concurrent renewal cannot overtake an older expiry action.
+        """
+        async with self._activation_lock_for(discord_id):
+            store = self.bot.db
+            acquire = getattr(store, "acquire", None)
+            if callable(acquire):
+                async with acquire() as conn:
+                    async with conn.transaction():
+                        await conn.execute(
+                            "SELECT pg_advisory_xact_lock(1213614159, hashtext($1))",
+                            str(discord_id),
+                        )
+                        yield conn
+                return
+            yield store
+
     async def _activate_customer(self, member_or_id, name: str, email: str, requested_by: int | None = None):
         """Cho mỗi Discord account kích hoạt đúng một lần, gắn với đúng một email."""
         discord_id = member_or_id if isinstance(member_or_id, int) else member_or_id.id
-        async with self._activation_lock_for(discord_id):
-            return await self._activate_customer_once(member_or_id, name, email, requested_by)
+        async with self._lifecycle_store(discord_id) as store:
+            return await self._activate_customer_once(
+                member_or_id, name, email, requested_by, db=store,
+            )
 
-    async def _activate_customer_once(self, member_or_id, name: str, email: str, requested_by: int | None = None):
+    async def _activate_customer_once(self, member_or_id, name: str, email: str,
+                                      requested_by: int | None = None, db=None):
         discord_id = member_or_id if isinstance(member_or_id, int) else member_or_id.id
-        now = datetime.now(timezone.utc)
-        # Không chỉ kiểm tra dòng mới nhất: một người có thể vào lại bằng invite khác
-        # sau khi đã active. Chỉ cần tồn tại MỘT dòng active là tuyệt đối không đổi
-        # email, không tạo thêm job cấp tài liệu.
-        already_active = await self.bot.db.fetchrow(
-            "SELECT id, email, expires_at FROM hvhn_members "
-            "WHERE discord_id=$1 AND status='active' ORDER BY id DESC LIMIT 1",
-            discord_id,
-        )
-        if already_active is not None:
-            raise RuntimeError(
-                "Tài khoản Discord này đã kích hoạt quyền truy cập tài liệu rồi. "
-                "Để bảo vệ quyền học liệu, mỗi tài khoản chỉ được liên kết với một email; "
-                "nếu cần sửa thông tin, hãy liên hệ quản trị viên."
-            )
-        row = await self.bot.db.fetchrow(
-            "SELECT id, email, duration_days, expires_at, status FROM hvhn_members "
-            "WHERE discord_id=$1 AND status='joined' ORDER BY id DESC LIMIT 1",
-            discord_id,
-        )
-        if row is None:
-            recovered = await self._recover_pending_order_by_email(discord_id, email)
-            if recovered is None:
-                raise LookupError("no joined/active customer")
-            print(
-                f"[debug] khach_activation_recovered_pending discord_id={discord_id} "
-                f"order={recovered.get('order_code') if hasattr(recovered, 'get') else 'unknown'}",
-                flush=True,
-            )
-            row = await self.bot.db.fetchrow(
-                "SELECT id, email, duration_days, expires_at, status FROM hvhn_members "
-                "WHERE discord_id=$1 AND status='joined' ORDER BY id DESC LIMIT 1",
-                discord_id,
-            )
-            if row is None:
-                raise LookupError("pending claim did not produce joined customer")
-        bound_email = (row["email"] or "").strip().lower()
-        if bound_email and email != bound_email:
-            raise RuntimeError(
-                "Lượt mời này đã được gắn với một email khác. Để bảo vệ quyền học liệu, "
-                "bạn hãy dùng đúng email đã đăng ký hoặc liên hệ quản trị viên."
-            )
+        name = (name or "").strip()
+        email = (email or "").strip().lower()
+        if not valid_person_name(name) or not valid_email(email):
+            raise RuntimeError("Họ tên hoặc email chưa hợp lệ.")
         member = member_or_id if isinstance(member_or_id, discord.Member) else await self._member_for_customer(discord_id)
         if member is None:
             raise RuntimeError(
@@ -518,27 +573,98 @@ class Membership(commands.Cog):
                 "Bạn vào lại server bằng invite rồi bấm kích hoạt lại nhé."
             )
 
-        expires = compute_new_expiry(now, None, row["duration_days"])
-        await self.bot.db.execute(
-            "UPDATE hvhn_members SET name=$2, email=$3, granted_at=$4, expires_at=$5, status='active', "
-            "notified_expiry=FALSE WHERE id=$1 AND status='joined'",
-            row["id"], name, email, now, expires,
-        )
+        async def activate_with_store(store):
+            now = datetime.now(timezone.utc)
+            # The active check and provisioning enqueue run in one database
+            # transaction in production, guarded across bot processes.
+            already_active = await store.fetchrow(
+                "SELECT id, email, expires_at FROM hvhn_members "
+                "WHERE discord_id=$1 AND status='active' ORDER BY id DESC LIMIT 1",
+                discord_id,
+            )
+            if already_active is not None:
+                active_email = str(already_active["email"] or "").strip().lower()
+                if active_email and active_email == email:
+                    if not await self._grant_roles(member):
+                        raise RuntimeError(
+                            "Không thể cấp đủ role khách HVHN. Hãy kiểm tra cấu hình role/quyền bot rồi thử lại."
+                        )
+                    return already_active["expires_at"], None, True
+                raise RuntimeError(
+                    "Tài khoản Discord này đã kích hoạt quyền truy cập tài liệu rồi. "
+                    "Để bảo vệ quyền học liệu, mỗi tài khoản chỉ được liên kết với một email; "
+                    "nếu cần sửa thông tin, hãy liên hệ quản trị viên."
+                )
 
-        await self._grant_roles(member)
-        jid_add = await self._enqueue("add_client", f"{name}\t{email}", requested_by)
+            row = await store.fetchrow(
+                "SELECT id, email, duration_days, expires_at, status FROM hvhn_members "
+                "WHERE discord_id=$1 AND status='joined' ORDER BY id DESC LIMIT 1",
+                discord_id,
+            )
+            if row is None:
+                recovered = await self._recover_pending_order_by_email(discord_id, email, db=store)
+                if recovered is None:
+                    raise LookupError("no joined/active customer")
+                print(
+                    f"[debug] khach_activation_recovered_pending discord_id={discord_id} "
+                    f"order={recovered.get('order_code') if hasattr(recovered, 'get') else 'unknown'}",
+                    flush=True,
+                )
+                row = await store.fetchrow(
+                    "SELECT id, email, duration_days, expires_at, status FROM hvhn_members "
+                    "WHERE discord_id=$1 AND status='joined' ORDER BY id DESC LIMIT 1",
+                    discord_id,
+                )
+                if row is None:
+                    raise LookupError("pending claim did not produce joined customer")
+            bound_email = (row["email"] or "").strip().lower()
+            if bound_email and email != bound_email:
+                raise RuntimeError(
+                    "Lượt mời này đã được gắn với một email khác. Để bảo vệ quyền học liệu, "
+                    "bạn hãy dùng đúng email đã đăng ký hoặc liên hệ quản trị viên."
+                )
+
+            if not await self._grant_roles(member):
+                raise RuntimeError(
+                    "Không thể cấp đủ role khách HVHN. Hãy kiểm tra cấu hình role/quyền bot rồi thử lại."
+                )
+
+            expires = compute_new_expiry(now, None, row["duration_days"])
+            activated = await store.fetchrow(
+                "UPDATE hvhn_members SET name=$2, email=$3, granted_at=$4, expires_at=$5, status='active', "
+                "notified_expiry=FALSE WHERE id=$1 AND status='joined' RETURNING id",
+                row["id"], name, email, now, expires,
+            )
+            if activated is None:
+                raise RuntimeError("Lượt kích hoạt vừa thay đổi trạng thái; vui lòng bấm lại để kiểm tra.")
+            jid_add = await self._enqueue("add_client", f"{name}\t{email}", requested_by, db=store)
+            return expires, jid_add, False
+
+        expires, jid_add, already_active = await activate_with_store(db or self.bot.db)
+
+        if already_active:
+            return expires, " Quyền hiện có đã được kiểm tra lại; hệ thống không tạo đơn trùng.", True
         return expires, f" Đã xếp cấp tài liệu #{jid_add}.", False
 
-    async def _grant_roles(self, member: discord.Member) -> None:
-        roles = [discord.utils.get(member.guild.roles, name=r) for r in GRANT_ROLES]
-        roles = [r for r in roles if r and r not in member.roles]
+    async def _grant_roles(self, member: discord.Member) -> bool:
+        resolved = [(name, discord.utils.get(member.guild.roles, name=name)) for name in GRANT_ROLES]
+        missing = [name for name, role in resolved if role is None]
+        if missing:
+            print(
+                f"[debug] khach_grant_roles_missing id={member.id} roles={','.join(missing)}",
+                flush=True,
+            )
+            return False
+        roles = [role for _, role in resolved if role not in member.roles]
         if roles:
             try:
                 await member.add_roles(*roles, reason="Khách HVHN kích hoạt/gia hạn")
             except discord.HTTPException as exc:
                 print(f"[debug] khach_grant_roles_failed id={member.id} err={exc}", flush=True)
+                return False
+        return True
 
-    async def _revoke_roles(self, member: discord.Member) -> None:
+    async def _revoke_roles(self, member: discord.Member) -> bool:
         roles = [discord.utils.get(member.guild.roles, name=r) for r in GRANT_ROLES]
         roles = [r for r in roles if r and r in member.roles]
         if roles:
@@ -546,21 +672,28 @@ class Membership(commands.Cog):
                 await member.remove_roles(*roles, reason="Khách HVHN hết hạn")
             except discord.HTTPException as exc:
                 print(f"[debug] khach_revoke_roles_failed id={member.id} err={exc}", flush=True)
+                return False
+        return True
 
     # ---- lớp DB vòng đời ----
     async def _register(self, discord_id: int, name, email, days: int, created_by: int) -> tuple[int, datetime]:
+        async with self._lifecycle_store(discord_id) as store:
+            return await self._register_with_store(store, discord_id, name, email, days, created_by)
+
+    async def _register_with_store(self, store, discord_id: int, name, email,
+                                   days: int, created_by: int) -> tuple[int, datetime]:
         now = datetime.now(timezone.utc)
-        row = await self.bot.db.fetchrow(
+        row = await store.fetchrow(
             "SELECT id, expires_at FROM hvhn_members WHERE discord_id=$1 AND status IN ('active','expired') "
             "ORDER BY id DESC LIMIT 1", discord_id)
         expires = compute_new_expiry(now, row["expires_at"] if row else None, days)
         if row:
-            await self.bot.db.execute(
+            await store.execute(
                 "UPDATE hvhn_members SET name=COALESCE($2,name), email=COALESCE($3,email), duration_days=$4, "
                 "granted_at=COALESCE(granted_at,$5), expires_at=$6, status='active', notified_expiry=FALSE WHERE id=$1",
                 row["id"], name, email, days, now, expires)
             return row["id"], expires
-        rid = await self.bot.db.fetchval(
+        rid = await store.fetchval(
             "INSERT INTO hvhn_members(discord_id,name,email,duration_days,granted_at,expires_at,status,created_by) "
             "VALUES($1,$2,$3,$4,$5,$6,'active',$7) RETURNING id",
             discord_id, name, email, days, now, expires, created_by)
@@ -659,12 +792,32 @@ class Membership(commands.Cog):
             return
         email_clean = email.strip().lower() if email else None
         name = (ten or thanh_vien.display_name).strip()
-        rid, expires = await self._register(thanh_vien.id, name, email_clean, so_ngay, interaction.user.id)
-        await self._grant_roles(thanh_vien)
+        if email_clean and not valid_email(email_clean):
+            await interaction.response.send_message("Email không hợp lệ.", ephemeral=True)
+            return
+        if not valid_person_name(name):
+            await interaction.response.send_message("Họ tên phải dài từ 2 đến 120 ký tự.", ephemeral=True)
+            return
         note = ""
-        if email_clean:
-            jid = await self._enqueue("add_client", f"{name}\t{email_clean}", interaction.user.id)
-            note = f" · đã xếp đơn cấp tài liệu #{jid} (watcher xử lý khi PC bật)"
+        grant_failed = False
+        async with self._lifecycle_store(thanh_vien.id) as store:
+            grant_failed = not await self._grant_roles(thanh_vien)
+            if not grant_failed:
+                _, expires = await self._register_with_store(
+                    store, thanh_vien.id, name, email_clean, so_ngay, interaction.user.id,
+                )
+                if email_clean:
+                    jid = await self._enqueue(
+                        "add_client", f"{name}\t{email_clean}", interaction.user.id, db=store,
+                    )
+                    note = f" · đã xếp đơn cấp tài liệu #{jid} (watcher xử lý khi PC bật)"
+        if grant_failed:
+            await interaction.response.send_message(
+                "Không cấp được đủ role khách. Hệ thống chưa ghi nhận hay xếp đơn tài liệu; "
+                "hãy kiểm tra tên role và quyền bot rồi thử lại.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
             f"✅ Đã ghi nhận khách **{name}** ({thanh_vien.mention}). Hết hạn {_fmt_ts(expires)}. "
             f"Hết hạn sẽ tự gỡ quyền + nhắc; sau {GRACE_DAYS} ngày ân hạn tự kick.{note}",
@@ -678,21 +831,39 @@ class Membership(commands.Cog):
         if so_ngay <= 0 or so_ngay > 3650:
             await interaction.response.send_message("`so_ngay` phải trong khoảng 1–3650.", ephemeral=True)
             return
-        row = await self.bot.db.fetchrow(
-            "SELECT id, email, expires_at FROM hvhn_members WHERE discord_id=$1 AND status IN ('active','expired') "
-            "ORDER BY id DESC LIMIT 1", thanh_vien.id)
+        note = ""
+        grant_failed = False
+        async with self._lifecycle_store(thanh_vien.id) as store:
+            row = await store.fetchrow(
+                "SELECT id, email, expires_at FROM hvhn_members WHERE discord_id=$1 "
+                "AND status IN ('active','expired') ORDER BY id DESC LIMIT 1",
+                thanh_vien.id,
+            )
+            if row is not None:
+                grant_failed = not await self._grant_roles(thanh_vien)
+                if not grant_failed:
+                    now = datetime.now(timezone.utc)
+                    expires = compute_new_expiry(now, row["expires_at"], so_ngay)
+                    await store.execute(
+                        "UPDATE hvhn_members SET expires_at=$2, status='active', notified_expiry=FALSE WHERE id=$1",
+                        row["id"], expires,
+                    )
+                    if row["email"]:
+                        jid = await self._enqueue(
+                            "renew_client", f"{row['email']}\t{so_ngay}\tngay",
+                            interaction.user.id, db=store,
+                        )
+                        note = f" · đã xếp đơn gia hạn tài liệu #{jid}"
         if row is None:
             await interaction.response.send_message("Khách này chưa có trong hệ thống. Dùng /hvhn_capkhach trước.", ephemeral=True)
             return
-        now = datetime.now(timezone.utc)
-        expires = compute_new_expiry(now, row["expires_at"], so_ngay)
-        await self.bot.db.execute(
-            "UPDATE hvhn_members SET expires_at=$2, status='active', notified_expiry=FALSE WHERE id=$1", row["id"], expires)
-        await self._grant_roles(thanh_vien)
-        note = ""
-        if row["email"]:
-            jid = await self._enqueue("renew_client", f"{row['email']}\t{so_ngay}\tngay", interaction.user.id)
-            note = f" · đã xếp đơn gia hạn tài liệu #{jid}"
+        if grant_failed:
+            await interaction.response.send_message(
+                "Không cấp được đủ role khách nên hệ thống chưa gia hạn hay xếp đơn tài liệu. "
+                "Hãy kiểm tra tên role và quyền bot rồi thử lại.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(
             f"✅ Đã gia hạn {thanh_vien.mention} thêm {so_ngay} ngày. Hết hạn mới {_fmt_ts(expires)}.{note}", ephemeral=True)
 
@@ -701,23 +872,37 @@ class Membership(commands.Cog):
     async def huykhach(self, interaction: discord.Interaction, thanh_vien: discord.Member, kick: bool = False):
         if not await self._require_admin(interaction):
             return
-        row = await self.bot.db.fetchrow(
-            "SELECT id, email FROM hvhn_members WHERE discord_id=$1 ORDER BY id DESC LIMIT 1", thanh_vien.id)
+        note = ""
+        revoke_failed = False
+        async with self._lifecycle_store(thanh_vien.id) as store:
+            row = await store.fetchrow(
+                "SELECT id, email FROM hvhn_members WHERE discord_id=$1 ORDER BY id DESC LIMIT 1",
+                thanh_vien.id,
+            )
+            if row is not None:
+                revoke_failed = not await self._revoke_roles(thanh_vien)
+                if not revoke_failed:
+                    await store.execute("UPDATE hvhn_members SET status='kicked' WHERE id=$1", row["id"])
+                    if row["email"]:
+                        jid = await self._enqueue(
+                            "remove_client", row["email"], interaction.user.id, db=store,
+                        )
+                        note = f" · đã xếp đơn thu hồi tài liệu #{jid}"
+                    if kick:
+                        try:
+                            await thanh_vien.kick(reason="Khách HVHN bị thu hồi quyền")
+                            note += " · đã kick khỏi server"
+                        except discord.HTTPException as exc:
+                            note += f" · kick lỗi: {exc}"
         if row is None:
             await interaction.response.send_message("Khách này không có trong hệ thống.", ephemeral=True)
             return
-        await self.bot.db.execute("UPDATE hvhn_members SET status='kicked' WHERE id=$1", row["id"])
-        await self._revoke_roles(thanh_vien)
-        note = ""
-        if row["email"]:
-            jid = await self._enqueue("remove_client", row["email"], interaction.user.id)
-            note = f" · đã xếp đơn thu hồi tài liệu #{jid}"
-        if kick:
-            try:
-                await thanh_vien.kick(reason="Khách HVHN bị thu hồi quyền")
-                note += " · đã kick khỏi server"
-            except discord.HTTPException as exc:
-                note += f" · kick lỗi: {exc}"
+        if revoke_failed:
+            await interaction.response.send_message(
+                "Không gỡ được role khách nên hệ thống chưa đổi trạng thái hay thu hồi tài liệu. Hãy kiểm tra quyền bot rồi thử lại.",
+                ephemeral=True,
+            )
+            return
         await interaction.response.send_message(f"🗑️ Đã thu hồi quyền {thanh_vien.mention}.{note}", ephemeral=True)
 
     @app_commands.command(name="hvhn_khach_ds", description="(Admin) Danh sách khách và hạn sử dụng")
@@ -772,38 +957,82 @@ class Membership(commands.Cog):
         # 1) Vừa hết hạn: gỡ quyền + DM + thu hồi tài liệu.
         for r in await db.fetch("SELECT id, discord_id, name, email, expires_at FROM hvhn_members "
                                 "WHERE status='active' AND expires_at IS NOT NULL AND expires_at <= $1", now):
-            await db.execute("UPDATE hvhn_members SET status='expired', notified_expiry=TRUE WHERE id=$1", r["id"])
+            member = None
+            current = None
+            lock_id = r["discord_id"] or -int(r["id"])
+            try:
+                async with self._lifecycle_store(lock_id) as store:
+                    current = await store.fetchrow(
+                        "SELECT id, discord_id, name, email, expires_at FROM hvhn_members "
+                        "WHERE id=$1 AND status='active' AND expires_at <= $2 FOR UPDATE",
+                        r["id"], now,
+                    )
+                    if current is None:
+                        continue
+                    member = await self._member_for_lifecycle(guild, current["discord_id"])
+                    if member is not None and not await self._revoke_roles(member):
+                        continue
+                    claimed = await store.fetchrow(
+                        "UPDATE hvhn_members SET status='expired', notified_expiry=TRUE "
+                        "WHERE id=$1 AND status='active' AND expires_at <= $2 RETURNING id",
+                        current["id"], now,
+                    )
+                    if claimed is None:
+                        continue
+                    if current["email"]:
+                        await self._enqueue("remove_client", current["email"], db=store)
+                    if member is not None:
+                        try:
+                            await member.send(
+                                f"Xin chào {current['name'] or member.display_name}, gói trải nghiệm/tài liệu HVHN của bạn đã hết hạn. "
+                                f"Bạn sẽ được giữ lại trong server thêm {GRACE_DAYS} ngày; gia hạn để tiếp tục dùng Then và nhận tài liệu nhé. "
+                                "Liên hệ quản trị viên để gia hạn."
+                            )
+                        except discord.HTTPException:
+                            pass
+            except discord.HTTPException as exc:
+                print(f"[debug] khach_expiry_member_lookup_failed id={r['discord_id']} err={exc}", flush=True)
+                continue
             expired_n += 1
-            member = guild.get_member(r["discord_id"]) if r["discord_id"] else None
-            if member:
-                await self._revoke_roles(member)
-                try:
-                    await member.send(
-                        f"Xin chào {r['name'] or member.display_name}, gói trải nghiệm/tài liệu HVHN của bạn đã hết hạn. "
-                        f"Bạn sẽ được giữ lại trong server thêm {GRACE_DAYS} ngày; gia hạn để tiếp tục dùng Then và nhận tài liệu nhé. "
-                        "Liên hệ quản trị viên để gia hạn.")
-                except discord.HTTPException:
-                    pass
-            if r["email"]:
-                await self._enqueue("remove_client", r["email"])
 
         # 2) Quá ân hạn: kick.
-        grace_cutoff = now
         for r in await db.fetch("SELECT id, discord_id, name, expires_at FROM hvhn_members WHERE status='expired'"):
             if not kick_due(r["expires_at"], now, GRACE_DAYS):
                 continue
-            member = guild.get_member(r["discord_id"]) if r["discord_id"] else None
-            if member:
+            member = None
+            lock_id = r["discord_id"] or -int(r["id"])
+            try:
+                async with self._lifecycle_store(lock_id) as store:
+                    current = await store.fetchrow(
+                        "SELECT id, discord_id FROM hvhn_members WHERE id=$1 AND status='expired' "
+                        "AND expires_at <= $2 FOR UPDATE",
+                        r["id"], now - timedelta(days=GRACE_DAYS),
+                    )
+                    if current is None:
+                        continue
+                    member = await self._member_for_lifecycle(guild, current["discord_id"])
+                    if member is not None:
+                        try:
+                            await member.kick(reason="Khách HVHN hết hạn quá ân hạn")
+                        except discord.HTTPException as exc:
+                            print(f"[debug] khach_kick_failed id={r['discord_id']} err={exc}", flush=True)
+                            continue
+                    claimed = await store.fetchrow(
+                        "UPDATE hvhn_members SET status='kicked' "
+                        "WHERE id=$1 AND status='expired' AND expires_at <= $2 RETURNING id",
+                        current["id"], now - timedelta(days=GRACE_DAYS),
+                    )
+                    if claimed is None:
+                        continue
+            except discord.HTTPException as exc:
+                print(f"[debug] khach_kick_member_lookup_failed id={r['discord_id']} err={exc}", flush=True)
+                continue
+            if member is not None:
                 try:
                     await member.send("Gói HVHN đã hết hạn quá thời gian ân hạn nên bạn được đưa ra khỏi server. "
                                       "Cảm ơn bạn đã trải nghiệm — quay lại bất cứ lúc nào khi muốn gia hạn nhé!")
                 except discord.HTTPException:
                     pass
-                try:
-                    await member.kick(reason="Khách HVHN hết hạn quá ân hạn")
-                except discord.HTTPException as exc:
-                    print(f"[debug] khach_kick_failed id={r['discord_id']} err={exc}", flush=True)
-            await db.execute("UPDATE hvhn_members SET status='kicked' WHERE id=$1", r["id"])
             kicked_n += 1
         return expired_n, kicked_n
 
@@ -811,13 +1040,48 @@ class Membership(commands.Cog):
         cutoff = now - timedelta(hours=ONBOARDING_CLEANUP_HOURS)
         rows = await self.bot.db.fetch(
             "SELECT id, discord_id, status FROM hvhn_members "
-            "WHERE status IN ('pending','joined') AND created_at <= $1",
+            "WHERE (status='pending' AND created_at <= $1) "
+            "OR (status='joined' AND COALESCE(joined_at, created_at) <= $1)",
             cutoff,
         )
         cleaned = 0
         for r in rows:
-            member = guild.get_member(r["discord_id"]) if r["discord_id"] else None
-            if member and r["status"] == "joined":
+            member = None
+            lock_id = r["discord_id"] or -int(r["id"])
+            try:
+                async with self._lifecycle_store(lock_id) as store:
+                    current = await store.fetchrow(
+                        "SELECT id, discord_id, status FROM hvhn_members WHERE id=$1 AND status=$2 "
+                        "AND ((status='pending' AND created_at <= $3) OR "
+                        "(status='joined' AND COALESCE(joined_at, created_at) <= $3)) FOR UPDATE",
+                        r["id"], r["status"], cutoff,
+                    )
+                    if current is None:
+                        continue
+                    if current["status"] == "joined":
+                        member = await self._member_for_lifecycle(guild, current["discord_id"])
+                        if member is not None:
+                            try:
+                                await member.kick(
+                                    reason="Khách HVHN không kích hoạt sau khi vào bằng invite trải nghiệm",
+                                )
+                            except discord.HTTPException as exc:
+                                print(
+                                    f"[debug] khach_stale_join_kick_failed id={r['discord_id']} err={exc}",
+                                    flush=True,
+                                )
+                                continue
+                    claimed = await store.fetchrow(
+                        "UPDATE hvhn_members SET status='kicked' "
+                        "WHERE id=$1 AND status=$2 RETURNING id",
+                        current["id"], current["status"],
+                    )
+                    if claimed is None:
+                        continue
+            except discord.HTTPException as exc:
+                print(f"[debug] khach_stale_member_lookup_failed id={r['discord_id']} err={exc}", flush=True)
+                continue
+            if member is not None:
                 try:
                     await member.send(
                         "Invite trải nghiệm HVHN của bạn đã quá thời gian kích hoạt nên lượt này được huỷ. "
@@ -825,11 +1089,6 @@ class Membership(commands.Cog):
                     )
                 except discord.HTTPException:
                     pass
-                try:
-                    await member.kick(reason="Khách HVHN không kích hoạt sau khi vào bằng invite trải nghiệm")
-                except discord.HTTPException as exc:
-                    print(f"[debug] khach_stale_join_kick_failed id={r['discord_id']} err={exc}", flush=True)
-            await self.bot.db.execute("UPDATE hvhn_members SET status='kicked' WHERE id=$1", r["id"])
             cleaned += 1
         if cleaned:
             print(f"[debug] khach_onboarding_cleanup cleaned={cleaned}", flush=True)

@@ -17,7 +17,15 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install ruff==0.15.21 bandit==1.9.4 pip-audit==2.10.1
+      - name: Static and dependency checks
+        run: |
+          ruff check .
+          bandit -q -r . -x ./tests
+          pip-audit -r requirements.txt
       - name: Import check
         run: python -c "import bot, cogs.ai, cogs.help, md_knowledge, md_embeddings"
+      - name: Apps Script syntax check
+        run: node --check - < phanphoi.gs
       - name: Run tests
         run: python -m unittest discover -s tests -v
