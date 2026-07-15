@@ -1641,6 +1641,102 @@ class AI(commands.Cog):
         filtered["context"] = build_md_context(kept)
         return filtered
 
+    # Các từ dùng để mở đầu/yêu cầu bài làm xuất hiện trong gần như mọi câu hỏi Ngữ văn.
+    # Chúng không được phép trở thành lý do duy nhất để đưa một đoạn tài liệu vào prompt.
+    # Ví dụ: "Trình bày hiểu biết về phong trào văn học hiện sinh" từng bị kéo sang
+    # một truyện chỉ tình cờ có từ "sinh". Cụm neo còn lại phải là "hiện sinh".
+    _TOPIC_NOISE_TERMS = {
+        "trinh", "bay", "hieu", "biet", "hay", "cho", "viet", "noi", "neu", "lam",
+        "phan", "tich", "cam", "nhan", "binh", "luan", "trinh", "bac", "y", "kien",
+        "ve", "cua", "trong", "voi", "va", "la", "gi", "nhung", "cac", "mot", "nhieu",
+        "phong", "trao", "van", "hoc", "tac", "pham", "tacgia", "tacgia", "nha", "tho",
+        "nha", "van", "chu", "nghia", "noi", "dung", "dac", "diem", "gia", "tri",
+        "the", "nghe", "thuat", "doan", "trich", "bai", "cau", "van", "tho",
+    }
+
+    @classmethod
+    def _query_topic_anchors(cls, query: str) -> list[str]:
+        """Trả các cụm chủ đề đủ riêng để loại evidence chỉ trùng từ chung.
+
+        Không ép mọi truy vấn phải có anchor: câu rất ngắn như "Sóng là gì?" vẫn đi
+        qua các cổng cũ. Nhưng khi đề có một cụm 2+ từ đặc thù, một đoạn RAG phải chứa
+        cả cụm đó mới được quyền dẫn dắt câu trả lời.
+        """
+        tokens = re.findall(r"[a-z0-9]{2,}", cls._plain_text(query))
+        runs: list[list[str]] = []
+        run: list[str] = []
+        for token in tokens:
+            if token in cls._TOPIC_NOISE_TERMS:
+                if run:
+                    runs.append(run)
+                    run = []
+                continue
+            run.append(token)
+        if run:
+            runs.append(run)
+
+        anchors: list[str] = []
+        for words in runs:
+            # Giữ tối đa 4 từ để vẫn khớp được title/excerpt, ưu tiên cụm dài trước.
+            for size in range(min(4, len(words)), 1, -1):
+                for start in range(0, len(words) - size + 1):
+                    phrase = " ".join(words[start:start + size])
+                    if phrase not in anchors:
+                        anchors.append(phrase)
+        return anchors[:8]
+
+    @classmethod
+    def _text_matches_topic_anchor(cls, query: str, text: str) -> bool:
+        anchors = cls._query_topic_anchors(query)
+        if not anchors:
+            return True
+        haystack = cls._plain_text(text)
+        return any(anchor in haystack for anchor in anchors)
+
+    @classmethod
+    def _filter_pdf_meta_to_topic(cls, query: str, pdf_meta: dict) -> dict:
+        """Chỉ giữ các đoạn có cụm chủ đề đặc thù của truy vấn.
+
+        Đây là cổng độc lập với điểm vector: embedding có thể thấy hai văn bản "gần
+        nghĩa", nhưng không được biến một truyện lạc đề thành tư liệu cho một câu hỏi
+        lịch sử/lý luận văn học. Không có anchor thì giữ nguyên để không làm nghèo các
+        câu hỏi cực ngắn.
+        """
+        if not cls._query_topic_anchors(query):
+            return pdf_meta
+        chunks = list(pdf_meta.get("chunks") or [])
+        if not chunks:
+            return pdf_meta
+        kept = [
+            chunk for chunk in chunks
+            if cls._text_matches_topic_anchor(
+                query,
+                " ".join(str(chunk.get(key) or "") for key in (
+                    "title", "doc_title", "author", "first_500", "excerpt", "content",
+                )),
+            )
+        ]
+        if not kept:
+            filtered = dict(pdf_meta)
+            filtered.update({"context": "", "chunks": [], "quotes": [], "selected_count": 0})
+            return filtered
+        if len(kept) == len(chunks):
+            return pdf_meta
+        filtered = dict(pdf_meta)
+        filtered["chunks"] = kept
+        filtered["selected_count"] = len(kept)
+        filtered["context"] = build_md_context(kept)
+        return filtered
+
+    @classmethod
+    def _filter_context_to_topic(cls, query: str, context: str) -> str:
+        """Lọc từng block manual/feedback/web theo cùng bất biến chủ đề của RAG."""
+        if not context or not cls._query_topic_anchors(query):
+            return context
+        blocks = re.split(r"\n\s*\n", context)
+        kept = [block for block in blocks if cls._text_matches_topic_anchor(query, block)]
+        return "\n\n".join(kept).strip()
+
     @classmethod
     def _retrieval_hit(cls, query: str, pdf_meta: dict) -> bool:
         terms = cls._query_terms(query)
@@ -2786,10 +2882,16 @@ class AI(commands.Cog):
                     answer = self._drop_sentences_with_unverified_quotes(regen or repaired or answer, "")
                     print("[debug] fabricated_quotes=stripped_sentences", flush=True)
             elif librarian_dump:
-                # Repair van con che do thu thu (hoac khong chay duoc): lot cac dong meta,
-                # con hon gui nguyen ban liet ke tai lieu.
-                answer = self._strip_internal_markers(repaired or answer)
-                print("[debug] repair_still_librarian=stripped", flush=True)
+                # Không được "lọc vài dòng" rồi gửi phần thân của một tài liệu lạc đề.
+                # Tái tạo hoàn toàn không dùng retrieval; nếu lần này vẫn lỗi, trả về thông
+                # báo an toàn thay vì để một câu chuyện/tác phẩm khác lọt đến người học.
+                recovered = await self._recover_direct_answer(prompt)
+                if recovered:
+                    answer = recovered
+                    print("[debug] repair_still_librarian=recovered_without_retrieval", flush=True)
+                else:
+                    answer = self._retrieval_guard_message()
+                    print("[debug] repair_still_librarian=blocked", flush=True)
             elif repeated_defects:
                 # Repair LLM khong chay duoc (het quota/429): it nhat cat co hoc cau lap.
                 answer = self._strip_repeated_sentences(answer)
@@ -2800,6 +2902,16 @@ class AI(commands.Cog):
             if not mode.startswith("outline"):
                 answer = await self._verify_answer(answer, prompt, knowledge, web_context, mode, retrieval_hit=retrieval_hit)
             answer = self._strip_internal_markers(answer)
+            # Verifier cũng là một lượt LLM, nên phải kiểm tra lại sau verifier. Đây là
+            # chốt cuối để một output "Bản rút gọn ... / Thiếu dữ liệu" không bao giờ
+            # được gửi nguyên trạng, bất kể nó đi vào từ nhánh nào.
+            if self._looks_like_librarian_dump(answer):
+                recovered = await self._recover_direct_answer(prompt)
+                answer = recovered or self._retrieval_guard_message()
+                print(
+                    f"[debug] final_guard=librarian_dump recovered={bool(recovered)}",
+                    flush=True,
+                )
             # Chot chan cuoi: du di duong nao (repair thanh cong nhung van lap, verifier viet lai...),
             # cau lap gan nguyen van cung bi cat truoc khi gui.
             if self._repeated_phrase_defects(answer):
@@ -2809,6 +2921,37 @@ class AI(commands.Cog):
                 answer = self._drop_sentences_with_known_fact_errors(answer)
                 print("[debug] final_guard=strip_known_fact_errors", flush=True)
         return answer, full_prompt
+
+    @staticmethod
+    def _retrieval_guard_message() -> str:
+        return (
+            "Then không tìm được ngữ cảnh khớp trực tiếp với câu hỏi này nên đã chặn một câu trả lời "
+            "có nguy cơ lạc đề. Hãy gửi lại câu hỏi sau ít phút; Then sẽ trả lời theo kiến thức chung "
+            "thay vì tóm tắt nhầm một tài liệu khác."
+        )
+
+    async def _recover_direct_answer(self, prompt: str) -> str | None:
+        """Tạo lại khi model đã lộ chế độ tóm tắt kho; tuyệt đối không tái dùng evidence cũ."""
+        recovery_prompt = (
+            "Trả lời TRỰC TIẾP câu hỏi dưới đây bằng kiến thức đáng tin cậy của bạn. "
+            "Một lượt trước đã nhầm câu hỏi này với một tài liệu khác, vì vậy không được tóm tắt, "
+            "xếp hạng hay đánh giá bất kỳ tài liệu/nguồn/dữ liệu nào. Không nhắc tới quá trình tìm kiếm, "
+            "không viết mục 'Thiếu dữ liệu' hay 'Kết luận' kiểu hồ sơ. Nếu không chắc chi tiết, diễn đạt "
+            "thận trọng và không bịa trích dẫn.\n\n"
+            f"CÂU HỎI CẦN TRẢ LỜI:\n{prompt}"
+        )
+        recovered = await self.generate(
+            self._guarded_prompt(recovery_prompt, "", "", "direct_answer_recovery"),
+            THEN_SYSTEM_PROMPT,
+            temperature=LIT_TEMPERATURE,
+            top_p=LIT_TOP_P,
+            max_tokens=LIT_MAX_TOKENS,
+            prefer_rich_style=True,
+        )
+        if not recovered:
+            return None
+        recovered = self._strip_internal_markers(recovered)
+        return None if self._looks_like_librarian_dump(recovered) else recovered
 
     async def _force_grounded_answer(self, prompt: str, knowledge: str, web_context: str, mode: str) -> str | None:
         force_prompt = (
@@ -3162,6 +3305,11 @@ class AI(commands.Cog):
         "y chinh (trich nguyen van)", "cac tai lieu / ", "cac tai lieu lien quan nhat",
         # bien the moi: "Tom tat ... cac tai lieu/doan trich uu tien nhat", section header
         "cac tai lieu/doan trich uu tien", "doan trich uu tien nhat", "thieu sot / du lieu chua du",
+        "ban rut gon noi dung", "ban rut gon cac tai lieu", "uu tien tai lieu lien quan nhat",
+    )
+
+    _LIBRARIAN_SECTION_HEADINGS = (
+        "ban rut gon", "tom tat noi dung", "thieu du lieu", "can lam ro", "ket luan",
     )
 
     @classmethod
@@ -3170,6 +3318,12 @@ class AI(commands.Cog):
         tra loi cau hoi (P1,P2 tran hoac cac cum meta ve 'tai lieu uu tien/day du')."""
         plain = cls._plain_text(answer or "")
         if any(p in plain for p in cls._LIBRARIAN_PHRASES):
+            return True
+        # Một heading "Kết luận" hay "Thiếu dữ liệu" riêng lẻ vẫn có thể hợp lệ. Nhưng
+        # từ hai heading kiểu hồ sơ/tóm tắt trở lên là dấu hiệu chắc chắn model đang mô tả
+        # kho tài liệu thay vì trả lời người học.
+        section_hits = sum(1 for heading in cls._LIBRARIAN_SECTION_HEADINGS if heading in plain)
+        if section_hits >= 2:
             return True
         return bool(
             re.search(r"(?<![a-z])p\d+\s*,\s*p\d+", plain)
@@ -3209,6 +3363,8 @@ class AI(commands.Cog):
         r"|.*(?:nên được|nen duoc)\s+ưu tiên\s+sử dụng"
         # bien the tom tat/xep hang/danh gia do day du cua kho tai lieu
         r"|(?:tóm tắt|tom tat)\b[^\n]*\b(?:tài liệu|tai lieu|trích dẫn|trich dan)\b[^\n]*\b(?:liên quan|lien quan|ưu tiên|uu tien)"
+        r"|(?:bản rút gọn|ban rut gon)\b[^\n]*\b(?:nội dung|noi dung|tài liệu|tai lieu)\b"
+        r"|(?:thiếu dữ liệu|thieu du lieu|cần làm rõ|can lam ro)\b"
         r"|(?:đánh giá|danh gia)\s+mức độ\s+(?:đầy đủ|day du)\s+(?:dữ liệu|du lieu)"
         r"|.*\b(?:là|la)\s+(?:tài liệu|tai lieu)\s+ưu tiên\s+nhất"
         r"|.*(?:các|cac)\s+(?:trích dẫn|trich dan)\s+trên\s+(?:là|la|đều|deu)\b"
@@ -3376,6 +3532,14 @@ class AI(commands.Cog):
                     flush=True,
                 )
             pdf_meta = filtered_pdf_meta
+        topic_filtered_pdf_meta = self._filter_pdf_meta_to_topic(user_prompt, pdf_meta)
+        if len(topic_filtered_pdf_meta.get("chunks") or []) != len(pdf_meta.get("chunks") or []):
+            print(
+                f"[debug] md_filtered reason=topic_anchor anchors={self._query_topic_anchors(user_prompt)!r} "
+                f"before={len(pdf_meta.get('chunks') or [])} after={len(topic_filtered_pdf_meta.get('chunks') or [])}",
+                flush=True,
+            )
+        pdf_meta = topic_filtered_pdf_meta
         if pdf_meta.get("chunks") and (
             float(pdf_meta.get("top_score") or 0) < MD_MIN_RELEVANCE
             and not (profile["quote"] or profile["aggregate"])
@@ -3388,6 +3552,8 @@ class AI(commands.Cog):
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
+        manual_knowledge = self._filter_context_to_topic(user_prompt, manual_knowledge)
+        feedback_knowledge = self._filter_context_to_topic(user_prompt, feedback_knowledge)
         if is_standard_nlxh_outline:
             # Dàn ý NLXH phổ thông/HSG phải bám trực tiếp vào đề và khung lập luận.
             # Kho thủ công thường là nhận định văn học rời, dễ kéo model sang chế độ
@@ -3420,6 +3586,7 @@ class AI(commands.Cog):
             web_context = ""
         else:
             web_context = "" if plan.document_only and has_local_context else await self._web_context(user_prompt, mode, has_local_context)
+        web_context = self._filter_context_to_topic(user_prompt, web_context)
         manual_count = self._retrieval_count(manual_knowledge, "S")
         feedback_count = self._retrieval_count(feedback_knowledge, "F")
         web_count = self._retrieval_count(web_context, "W")
