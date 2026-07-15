@@ -120,6 +120,7 @@ function onOpen() {
   ui.createMenu('HVHN')
     .addItem('🚀 Chạy tất cả NGAY (phân phối + gia hạn + hết hạn + dashboard)', 'hvhnTuDongHoa')
     .addItem('⚙️ Cài/kiểm tra tự động hoá', 'damBaoTuDongHoa')
+    .addItem('🛠️ Sửa quyền Drive + trigger', 'suaLoiQuyenDriveVaTrigger')
     .addItem('📝 Nhập mới thủ công (tab "Nhập mới") + Phân phối', 'themMoiVaPhanPhoi')
     .addItem('🔁 Phân phối lại (quét toàn bộ)', 'phanPhoi')
     .addItem('♻️ Gia hạn ngay các khách đã tick', 'xuLyGiaHan')
@@ -155,12 +156,13 @@ function onOpen() {
     .addToUi();
 }
 
-// Tự chạy khi người dùng sửa ô: tìm kiếm Dashboard, hoặc tick ô Gia hạn ở tab Khách hàng.
+// Simple trigger: chỉ dùng SpreadsheetApp. DriveApp bị Google chặn ở onEdit/onOpen,
+// nên mọi việc Drive chạy ở trigger thời gian đã được cấp quyền hoặc qua menu.
 function onEdit(e) {
   const sheet = e.range.getSheet();
   const name = sheet.getName();
   if (name === DASHBOARD_NAME && e.range.getA1Notation() === SEARCH_CELL) {
-    capNhatDashboard();
+    capNhatDashboard({ skipDrive: true });
   } else if (name === REGISTRY_NAME && e.range.getColumn() === RENEW_COL
              && e.range.getRow() > 1 && e.value === 'TRUE') {
     // KHONG gia han ngay khi tick nua (truoc day chay lien -> nguoi dung chua kip dien
@@ -171,6 +173,12 @@ function onEdit(e) {
       'Hệ thống xử lý trong tối đa 5 phút, hoặc chạy menu HVHN > ♻️ Gia hạn ngay.',
       'HVHN', 8
     );
+  } else if (name === REGISTRY_NAME && e.range.getColumn() === DEL_COL
+             && e.range.getRow() > 1 && e.value === 'TRUE') {
+    sheet.getParent().toast(
+      'Đã đánh dấu xóa khách. Hệ thống sẽ xử lý bằng trigger đã cấp quyền trong tối đa 5 phút.',
+      'HVHN', 8
+    );
   }
 }
 
@@ -179,7 +187,7 @@ function ensureDashboard() {
   let dash = ss.getSheetByName(DASHBOARD_NAME);
   if (!dash) {
     dash = ss.insertSheet(DASHBOARD_NAME, 0);
-    capNhatDashboard();
+    capNhatDashboard({ skipDrive: true });
   }
   if (ss.getSheets()[0].getName() !== DASHBOARD_NAME) {
     ss.setActiveSheet(dash);
@@ -371,6 +379,17 @@ function _triggerHandlers() {
   };
 }
 
+// Các trigger edit cũ từng gọi thẳng vào luồng xóa/gia hạn có thể đụng DriveApp
+// trong ngữ cảnh chưa được cấp quyền. Chỉ trigger thời gian bên trên được phép làm việc Drive.
+function _legacyDriveTriggerHandlers() {
+  return {
+    onEdit: true,
+    xoaKhachDaTichTuDong: true,
+    xoaTaiLieuDaTichTuDong: true,
+    xuLyGiaHanTuDong: true,
+  };
+}
+
 function _demTriggerTheoHandler() {
   const counts = {};
   ScriptApp.getProjectTriggers().forEach(t => {
@@ -385,6 +404,11 @@ function _coTrigger(handler) {
   return (counts[handler] || 0) > 0;
 }
 
+function _demTriggerLegacyDrive() {
+  const legacy = _legacyDriveTriggerHandlers();
+  return ScriptApp.getProjectTriggers().filter(t => legacy[t.getHandlerFunction()]).length;
+}
+
 function kiemTraTuDongHoa() {
   const counts = _demTriggerTheoHandler();
   const ok = (counts.hvhnTuDongHoa || 0) > 0;
@@ -395,6 +419,7 @@ function kiemTraTuDongHoa() {
     '- hvhnTuDongHoa: ' + (counts.hvhnTuDongHoa || 0),
     '- hvhnXuLyNhanh: ' + (counts.hvhnXuLyNhanh || 0),
     '- kiemTraHetHan: ' + (counts.kiemTraHetHan || 0),
+    '- Trigger edit cũ cần dọn: ' + _demTriggerLegacyDrive(),
     '',
     ok
       ? 'Nếu dữ liệu vẫn không tự lên, mở Apps Script > Executions để xem lỗi trigger gần nhất.'
@@ -405,7 +430,7 @@ function kiemTraTuDongHoa() {
 
 function damBaoTuDongHoa() {
   if (!_coTrigger('hvhnTuDongHoa') || !_coTrigger('hvhnXuLyNhanh')
-      || !_coTrigger('kiemTraHetHan')) {
+      || !_coTrigger('kiemTraHetHan') || _demTriggerLegacyDrive()) {
     caiDatTuDongHoa();
     return;
   }
@@ -415,9 +440,14 @@ function damBaoTuDongHoa() {
 function caiDatTuDongHoa() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const keepHandlers = _triggerHandlers();
+  const legacyHandlers = _legacyDriveTriggerHandlers();
+  let removedLegacy = 0;
   ScriptApp.getProjectTriggers().forEach(t => {
     const handler = t.getHandlerFunction();
-    if (keepHandlers[handler]) ScriptApp.deleteTrigger(t);
+    if (keepHandlers[handler] || legacyHandlers[handler]) {
+      if (legacyHandlers[handler]) removedLegacy++;
+      ScriptApp.deleteTrigger(t);
+    }
   });
 
   ScriptApp.newTrigger('hvhnTuDongHoa')
@@ -441,8 +471,44 @@ function caiDatTuDongHoa() {
   ensureRegistry();
   capNhatTaiLieu();
   capNhatDashboard();
-  ghiLog('Cài tự động hoá', 'làn nhanh new_rows mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h');
+  ghiLog('Cài tự động hoá', 'làn nhanh new_rows mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h; đã dọn ' + removedLegacy + ' trigger edit cũ');
   ss.toast('Đã cài tự động hoá. Làn nhanh xử lý file mới mỗi 1 phút; không cần bấm menu để cập nhật sheet.');
+}
+
+function _kiemTraQuyenDrive() {
+  const targets = [
+    ['Folder Source', SOURCE_FOLDER_ID, true],
+    ['Folder phân phối khách', DEST_ROOT_FOLDER_ID, true],
+    ['Folder cha HVHN', HVHN_PARENT_FOLDER_ID_EARLY, true],
+    ['Then trên web', THEN_TREN_WEB_FILE_ID, false],
+  ];
+  const failures = [];
+  targets.forEach(target => {
+    try {
+      const item = target[2] ? DriveApp.getFolderById(target[1]) : DriveApp.getFileById(target[1]);
+      item.getName(); // buộc Drive xác nhận quyền đọc ngay tại đây
+    } catch (e) {
+      failures.push(target[0] + ': ' + ((e && e.message) || String(e)));
+    }
+  });
+  return failures;
+}
+
+// Chạy từ menu bằng chính tài khoản quản lý để cấp lại quyền Drive và thay trigger cũ.
+function suaLoiQuyenDriveVaTrigger() {
+  const ui = SpreadsheetApp.getUi();
+  const failures = _kiemTraQuyenDrive();
+  if (failures.length) {
+    const account = Session.getEffectiveUser().getEmail() || '(không xác định được email)';
+    ui.alert(
+      'Chưa thể dùng Drive với tài khoản chạy script: ' + account + '.\n\n'
+      + failures.join('\n')
+      + '\n\nHãy chia sẻ các folder/file trên cho tài khoản này với quyền Editor, rồi chạy lại mục này.'
+    );
+    return;
+  }
+  caiDatTuDongHoa();
+  ui.alert('Đã xác nhận quyền Drive và cài lại trigger. Từ giờ tick cột "Xóa khách" sẽ được xử lý an toàn trong tối đa 5 phút.');
 }
 
 // Gộp các dòng đang nằm ở tab "Nhập mới" (đường tay dự phòng, khi không dùng new_rows.csv)
@@ -588,7 +654,8 @@ function phanPhoi(options) {
 
 // ============ DASHBOARD (tổng quan + tìm kiếm) ============
 
-function capNhatDashboard() {
+function capNhatDashboard(options) {
+  options = options || {};
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   let dash = ss.getSheetByName(DASHBOARD_NAME);
   if (!dash) dash = ss.insertSheet(DASHBOARD_NAME, 0);
@@ -599,7 +666,7 @@ function capNhatDashboard() {
     dash.getRange(4, 1, dash.getMaxRows() - 3, dash.getMaxColumns()).clearContent();
   }
 
-  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+  const destRoot = options.skipDrive ? null : DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
   const rows = [];
 
   ss.getSheets().forEach(sheet => {
@@ -621,8 +688,10 @@ function capNhatDashboard() {
     const pending = total - done - error;
 
     let folderUrl = '';
-    const foundFolders = destRoot.getFoldersByName(name);
-    if (foundFolders.hasNext()) folderUrl = foundFolders.next().getUrl();
+    if (destRoot) {
+      const foundFolders = destRoot.getFoldersByName(name);
+      if (foundFolders.hasNext()) folderUrl = foundFolders.next().getUrl();
+    }
 
     rows.push({ name, email, total, done, error, pending, sheetId: sheet.getSheetId(), folderUrl });
   });
@@ -651,7 +720,7 @@ function capNhatDashboard() {
   }
 
   decorateDashboard(dash, header.length);
-  xuatTrangThaiSheet();
+  if (!options.skipDrive) xuatTrangThaiSheet();
 }
 
 function _fmtDate(value) {

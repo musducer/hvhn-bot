@@ -24,6 +24,17 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("retryMissingWhenIdle: true", self.src)
         self.assertIn("skipPostSync: true", self.src)
 
+    def test_simple_sheet_triggers_never_call_drive_and_repair_removes_legacy_edit_triggers(self):
+        on_edit = self.src[self.src.index("function onEdit(e)"):self.src.index("function ensureDashboard")]
+        on_open = self.src[self.src.index("function onOpen()"):self.src.index("function onEdit(e)")]
+        installer = self.src[self.src.index("function caiDatTuDongHoa()"):self.src.index("function _kiemTraQuyenDrive()")]
+        self.assertIn("capNhatDashboard({ skipDrive: true })", on_edit)
+        self.assertNotIn("DriveApp.", on_edit)
+        self.assertNotIn("DriveApp.", on_open)
+        self.assertIn("function suaLoiQuyenDriveVaTrigger()", self.src)
+        self.assertIn("onEdit: true", self.src)
+        self.assertIn("legacyHandlers[handler]", installer)
+
     def test_fast_lane_retries_missing_files_without_full_post_sync(self):
         self.assertIn("phanPhoi({ onlyMissing: true, skipPostSync: true", self.src)
         self.assertIn("options.onlyMissing", self.src)
