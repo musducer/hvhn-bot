@@ -1,23 +1,81 @@
 import os
 import secrets
 import tempfile
+from functools import lru_cache
+from io import BytesIO
 
 import fitz  # PyMuPDF
 import img2pdf
 import pikepdf
+from PIL import Image, ImageChops, ImageStat
 
 
 FONT_ALIAS = "vnfont"
 # Font Windows hỗ trợ tiếng Việt có dấu. Đổi sang r"C:\Windows\Fonts\times.ttf" nếu muốn serif.
 FONT_PATH = r"C:\Windows\Fonts\arial.ttf"
 
-BRAND_WATERMARK_TEXT = "HỒN VĂN - HỒN NGƯỜI"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LOGO_WATERMARK_PATH = os.path.join(BASE_DIR, "hvn.jpg")
+# Nền giấy trắng/chữ đen cần ưu tiên khả năng đọc. Logo được tách nền, chỉ còn nét
+# xanh-xám với alpha 16%, đủ nhận diện nhưng không tạo một ô xanh mờ che nội dung ở giữa trang.
+LOGO_WATERMARK_COLOR = (42, 67, 95)
+LOGO_WATERMARK_OPACITY = 0.16
+LOGO_WATERMARK_WIDTH_RATIO = 0.34
+
+
+@lru_cache(maxsize=1)
+def _logo_watermark_image():
+    """Tách logo sáng khỏi nền navy JPG thành PNG RGBA trong suốt.
+
+    File logo gốc là JPEG nền xanh đặc. Giữ nguyên cả khung vuông rồi giảm opacity
+    sẽ làm nền trang bị nhuộm xanh; vì vậy alpha được tạo theo độ khác biệt so với
+    màu ở bốn góc ảnh. Nét logo/text sáng được giữ lại, nền navy trở thành trong suốt.
+    """
+    if not os.path.isfile(LOGO_WATERMARK_PATH):
+        raise FileNotFoundError(f"Không tìm thấy logo watermark: {LOGO_WATERMARK_PATH}")
+
+    with Image.open(LOGO_WATERMARK_PATH) as source:
+        image = source.convert("RGB")
+    w, h = image.size
+    sample = max(2, min(w, h) // 20)
+    corners = (
+        image.crop((0, 0, sample, sample)),
+        image.crop((w - sample, 0, w, sample)),
+        image.crop((0, h - sample, sample, h)),
+        image.crop((w - sample, h - sample, w, h)),
+    )
+    background = tuple(
+        round(sum(ImageStat.Stat(corner).mean[channel] for corner in corners) / len(corners))
+        for channel in range(3)
+    )
+    difference = ImageChops.difference(image, Image.new("RGB", image.size, background)).convert("L")
+    # Bỏ nhiễu JPEG sát màu nền nhưng vẫn giữ mép anti-alias của nét/logo.
+    alpha = difference.point(
+        lambda value: round(255 * LOGO_WATERMARK_OPACITY * max(0.0, min(1.0, (value - 12) / 160)))
+    )
+    watermark = Image.new("RGBA", image.size, LOGO_WATERMARK_COLOR + (0,))
+    watermark.putalpha(alpha)
+    return watermark
+
+
+def _logo_watermark_png(page_width: int, page_height: int) -> bytes:
+    """Trả logo PNG đã resize, trong suốt, dùng được trực tiếp với PyMuPDF."""
+    logo = _logo_watermark_image()
+    side = max(96, round(min(page_width, page_height) * LOGO_WATERMARK_WIDTH_RATIO))
+    resized = logo.resize((side, side), Image.Resampling.LANCZOS)
+    # LANCZOS có thể overshoot alpha ở mép nét vài đơn vị; kẹp lại để độ mờ thực tế
+    # không bao giờ vượt mức thiết kế, dù trang có kích thước nào.
+    max_alpha = round(255 * LOGO_WATERMARK_OPACITY)
+    resized.putalpha(resized.getchannel("A").point(lambda value: min(value, max_alpha)))
+    data = BytesIO()
+    resized.save(data, format="PNG", optimize=True)
+    return data.getvalue()
 
 
 def _add_watermark_to_page(pix, recipient_name, recipient_email, warning_text,
-                            brand_text=BRAND_WATERMARK_TEXT, font_path=FONT_PATH):
+                            font_path=FONT_PATH):
     """Nhận pixmap 1 trang; chèn:
-    - watermark LỚN (thương hiệu) chéo giữa trang
+    - logo HVHN bán trong suốt ở giữa trang (không có nền ảnh)
     - watermark NHỎ (tên+email người nhận) chéo, đặt lệch trên/dưới watermark lớn
     - header/footer cảnh báo bản quyền
     - header/footer ghi rõ người được phân phối
@@ -42,8 +100,16 @@ def _add_watermark_to_page(pix, recipient_name, recipient_email, warning_text,
             fill_opacity=opacity, morph=morph,
         )
 
-    # --- Watermark LỚN: thương hiệu, chéo giữa trang thật ---
-    _diagonal_text(brand_text, fontsize=70, color=(0.5, 0.5, 0.5), opacity=0.13, center_y=h / 2)
+    # --- Watermark LỚN: logo HVHN. PNG đã tách nền + alpha nên không che chữ trên giấy trắng. ---
+    logo_side = max(96, round(min(w, h) * LOGO_WATERMARK_WIDTH_RATIO))
+    logo_left = (w - logo_side) / 2
+    logo_top = (h - logo_side) / 2
+    img_page.insert_image(
+        fitz.Rect(logo_left, logo_top, logo_left + logo_side, logo_top + logo_side),
+        stream=_logo_watermark_png(w, h),
+        keep_proportion=True,
+        overlay=True,
+    )
 
     # --- Watermark NHỎ: tên + email người nhận, chéo, lệch lên trên & xuống dưới ---
     # tránh trùng vùng watermark lớn ở giữa và vùng header/footer chữ
