@@ -140,6 +140,62 @@ class IndexMdPathTest(unittest.TestCase):
         self.assertIn("connect", src)
 
 
+class RetrievalCandidateOrderingTest(unittest.TestCase):
+    def test_retrieval_uses_document_titles_before_limiting_candidates(self):
+        from md_knowledge import retrieve_md_knowledge
+
+        source = inspect.getsource(retrieve_md_knowledge)
+        self.assertIn("coalesce(d.title,'')", source)
+        self.assertIn("ORDER BY doc_title_hits DESC", source)
+        self.assertIn("LIMIT 900", source)
+
+    def test_exact_document_title_outranks_noisy_body_match(self):
+        from md_knowledge import _passage_keyword_score
+
+        terms = ["dgnl", "hsa", "doc", "hieu"]
+        weights = {term: 1.0 for term in terms}
+        guide = {
+            "doc_title": "Kĩ năng đọc hiểu ĐGNL",
+            "title": "Nhận diện câu hỏi",
+            "content": "Hướng dẫn xác định yêu cầu.",
+        }
+        noise = {
+            "doc_title": "Tài liệu khác",
+            "title": "Nội dung",
+            "content": "HSA HSA HSA đọc hiểu đọc hiểu đọc hiểu.",
+        }
+
+        self.assertGreater(
+            _passage_keyword_score(terms, guide, weights),
+            _passage_keyword_score(terms, noise, weights),
+        )
+
+    def test_selection_keeps_room_for_more_than_one_document(self):
+        from md_knowledge import _select_diverse_passages
+
+        ranked = [
+            {"doc_key": "one", "passage_index": index}
+            for index in range(6)
+        ] + [
+            {"doc_key": "two", "passage_index": 0},
+            {"doc_key": "three", "passage_index": 0},
+        ]
+
+        selected = _select_diverse_passages(ranked, limit=5)
+        self.assertLessEqual(sum(row["doc_key"] == "one" for row in selected), 3)
+        self.assertIn("two", {row["doc_key"] for row in selected})
+
+    def test_query_terms_drop_ascii_prompt_noise(self):
+        from md_knowledge import query_terms
+
+        terms = query_terms("Giải câu ĐGNL này: chọn đáp án đúng nhất theo phương pháp đọc hiểu HSA")
+        self.assertIn("đgnl", terms)
+        self.assertIn("hsa", terms)
+        self.assertIn("đọc", terms)
+        self.assertNotIn("giai", terms)
+        self.assertNotIn("dap", terms)
+
+
 class IndexMdBytesTest(unittest.IsolatedAsyncioTestCase):
     async def test_unchanged_document_returns_existing_counts(self):
         data = b"# Title\n\nBody"

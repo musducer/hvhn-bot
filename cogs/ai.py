@@ -421,6 +421,75 @@ def _rag_plain(value: str) -> str:
     return value.replace("đ", "d")
 
 
+class ReadingExamGuidance:
+    """Detect and constrain document-based reading / ĐGNL answers.
+
+    This is deliberately separate from the literary-essay planner.  The source
+    passage and answer choices are the authority for a reading question; the
+    knowledge base supplies method, never invented facts about that passage.
+    """
+
+    EXAM_MARKERS = (
+        "danh gia nang luc", "dgnl", "hsa", "vnu", "thi nang luc",
+        "trac nghiem doc hieu",
+    )
+    READING_MARKERS = (
+        "doc hieu", "van ban doc hieu", "cau hoi doc hieu", "doan van sau",
+        "doan trich sau", "dua vao van ban", "theo van ban", "theo doan trich",
+    )
+    OPTION_MARKERS = (
+        "phuong an", "dap an", "a.", "b.", "c.", "d.", "khong dung",
+        "khong de cap", "sai voi", "dung nhat", "chu yeu",
+    )
+
+    @classmethod
+    def is_active(cls, message: str) -> bool:
+        text = _rag_plain(message)
+        if any(marker in text for marker in cls.EXAM_MARKERS + cls.READING_MARKERS):
+            return True
+        return "cau" in text and any(marker in text for marker in cls.OPTION_MARKERS)
+
+    @classmethod
+    def retrieval_query(cls, message: str) -> str:
+        if not cls.is_active(message):
+            return message
+        # HSA is the label used by much of the stored ĐGNL material.  These
+        # aliases improve recall without replacing the learner's real prompt.
+        return (
+            "DGNL HSA doc hieu trac nghiem phuong an loai tru.\n"
+            f"{message}"
+        )
+
+    @classmethod
+    def for_question(cls, message: str) -> str:
+        if not cls.is_active(message):
+            return ""
+        return (
+            "CHUYEN DE DOC HIEU VA DGNL (BAT BUOC):\n"
+            "- Day la cau hoi doc van ban/thi danh gia nang luc. Van ban va cac phuong an nguoi dung gui "
+            "la can cu duy nhat de chot dap an; kho HVHN chi dung de chon cach lam, khong duoc bien thanh "
+            "su kien cua van ban dang hoi.\n"
+            "- Xac dinh dung lenh hoi truoc khi tra loi: chi tiet truc tiep, noi dung/chu de, suy luan, "
+            "tac dung bieu dat, thao tac lap luan, muc dich, thai do, hay van dung. Neu de hoi "
+            "KHONG dung/KHONG de cap, dao chieu tieu chi truoc khi chon.\n"
+            "- Voi trac nghiem, chot theo dang: 'Dap an: ... Can cu: ...'. Can cu phai chi ro tu ngu, cau, "
+            "quan he lap luan hoac pham vi trong van ban; khong ke lai tai lieu ky nang va khong giai thich "
+            "lan man cac phuong an khong lien quan.\n"
+            "- Kiem tung phuong an theo nghia den, pham vi, muc do va quan he logic. Loai phuong an them y "
+            "ngoai van ban, dao quan he nguyen nhan-ket qua, dung tu tuyet doi hoa, hoac dung mot chi tiet "
+            "dung de suy ra ket luan qua rong. Khong suy dien vuot qua van ban.\n"
+            "- Voi cau hoi tu luan: tra loi dung don vi ma de hoi. Goi ten bien phap/thao tac phai kem dau "
+            "hieu ngon ngu cu the; neu hoi tac dung, phan tach tac dung hinh thuc va y nghia trong ngu canh. "
+            "Neu hoi noi dung/chu de, tong hop chu the, y then chot va pham vi van ban, khong chi lap lai tieu de.\n"
+            "- Voi cau van dung, neu ro quan diem, dua ra 2-3 li do bam sat van ban, roi rut ra nhan thuc/hanh dong "
+            "cu the; tranh khuyen ran chung chung.\n"
+            "- Neu nguoi dung chua gui van ban hoac phuong an can thiet, noi ro phan nao can gui them de chot dap an; "
+            "khong tu tao doan trich, chi tiet hay phuong an A/B/C/D.\n"
+            "- Tuyet doi khong tra loi bang 'Ban rut gon noi dung', 'Thieu du lieu' kieu bao cao, hay tom tat mot tai lieu "
+            "khac trong kho."
+        )
+
+
 CONCEPT_CLUSTERS = [
     ["mo bai", "gioi thieu", "dan dat", "vao bai", "dat van de", "mo doan", "cau mo dau"],
     ["ket bai", "ket luan", "khep lai", "tong ket", "chot van de", "ket doan"],
@@ -434,6 +503,8 @@ CONCEPT_CLUSTERS = [
     ["nhan vat", "hinh tuong", "nhan vat van hoc"],
     ["van phong", "giong van", "loi van", "hanh van"],
     ["nhan dinh", "y kien", "trich dan", "cau noi"],
+    ["doc hieu", "doc hieu van ban", "cau hoi doc hieu", "van ban doc hieu"],
+    ["danh gia nang luc", "dgnl", "hsa", "thi danh gia nang luc", "vnu"],
 ]
 
 
@@ -1859,16 +1930,18 @@ class AI(commands.Cog):
 
     async def _pdf_knowledge_context(self, query: str) -> str:
         try:
-            qvec = await self._embed_query(query)
-            result = await retrieve_md_knowledge(self.bot.db, query, limit=5, query_vector=qvec)
+            retrieval_query = ReadingExamGuidance.retrieval_query(query)
+            qvec = await self._embed_query(retrieval_query)
+            result = await retrieve_md_knowledge(self.bot.db, retrieval_query, limit=5, query_vector=qvec)
             return result.get("context", "")
         except Exception:
             return ""
 
     async def _pdf_retrieval(self, query: str, *, limit: int = PDF_DEFAULT_LIMIT) -> dict:
         try:
-            qvec = await self._embed_query(query)
-            return await retrieve_md_knowledge(self.bot.db, query, limit=limit, query_vector=qvec)
+            retrieval_query = ReadingExamGuidance.retrieval_query(query)
+            qvec = await self._embed_query(retrieval_query)
+            return await retrieve_md_knowledge(self.bot.db, retrieval_query, limit=limit, query_vector=qvec)
         except Exception as exc:
             print(f"[ai] md_retrieval_error {exc}", flush=True)
             return {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
@@ -2681,6 +2754,13 @@ class AI(commands.Cog):
     ) -> str:
         if not answer:
             return answer
+        reading_exam_rule = ""
+        if ReadingExamGuidance.is_active(prompt):
+            reading_exam_rule = (
+                " Day la cau hoi doc hieu/DGNL: kiem dap an co bam dung lenh hoi va chi tiet cua van ban nguoi dung gui; "
+                "khong duoc dua mot tai lieu ky nang hay vi du khac thanh noi dung cua van ban. Voi trac nghiem, "
+                "giu dap an ngan gon kem can cu; neu thieu van ban/phuong an, khong tu tao chung."
+            )
         compact_evidence = build_context_budget(
             prompt,
             knowledge,
@@ -2691,7 +2771,8 @@ class AI(commands.Cog):
         compact_answer = _clip_text(answer, 4000)
         verifier_prompt = (
             "Kiem chung cau tra loi sau bang dung context duoc cung cap. "
-            "Hay giu cau dung, xoa hoac viet lai moi khang dinh khong du can cu thanh 'chua du du lieu de khang dinh'. "
+            + reading_exam_rule
+            + "Hay giu cau dung, xoa hoac viet lai moi khang dinh khong du can cu thanh 'chua du du lieu de khang dinh'. "
             "Neu BANG CHUNG RUT GON co thong tin lien quan, khong duoc bien cau tra loi thanh tu choi chung chung; hay sua de tra loi bang evidence. "
             "Tuyet doi khong them tac gia/tac pham/nam/trich dan/nhan dinh moi. "
             "Kiem ca loi dinh danh van hoc co ban: nhan vat phai dung tac pham, tac pham phai dung the loai, ten tac pham phai dung. "
@@ -3015,14 +3096,18 @@ class AI(commands.Cog):
         recovered = self._strip_internal_markers(recovered)
         return None if self._looks_like_librarian_dump(recovered) else recovered
 
-    async def _force_grounded_answer(self, prompt: str, knowledge: str, web_context: str, mode: str) -> str | None:
+    async def _force_grounded_answer(
+        self, prompt: str, knowledge: str, web_context: str, mode: str, guidance: str = ""
+    ) -> str | None:
         force_prompt = (
             "BAT BUOC TRA LOI BANG CHUNG DA TRUY XUAT NEU CO. "
             "Khong duoc noi 'khong du du lieu de khang dinh' khi KHO TRI THUC ben duoi co doan lien quan. "
             "Hay trich y tu evidence, noi ro can cu tu tai lieu nao, va chi tu choi nhung chi tiet khong nam trong evidence.\n\n"
             f"{prompt}"
         )
-        full_prompt = self._guarded_prompt(force_prompt, knowledge, web_context, mode + "_force_grounded")
+        full_prompt = self._guarded_prompt(
+            force_prompt, knowledge, web_context, mode + "_force_grounded", guidance
+        )
         if RETRIEVAL_DEBUG:
             print(f"[debug] forced_prompt\n{full_prompt}", flush=True)
         answer = await self.generate(full_prompt, THEN_SYSTEM_PROMPT, temperature=0.0)
@@ -3568,6 +3653,9 @@ class AI(commands.Cog):
         await interaction.response.defer(thinking=True)
         print(f"[debug] before_retrieval query={user_prompt[:220]!r} mode={mode}", flush=True)
         plan = Planner.build(user_prompt)
+        reading_exam_guidance = ReadingExamGuidance.for_question(user_prompt)
+        is_reading_exam = bool(reading_exam_guidance)
+        guidance = "\n\n".join(part for part in (Scaffold.for_plan(plan), reading_exam_guidance) if part)
         profile = self._request_profile(user_prompt)
         is_standard_nlxh_outline = (
             plan.intent == "OUTLINE" and plan.genre == "NLXH" and not plan.document_only
@@ -3576,7 +3664,12 @@ class AI(commands.Cog):
         retrieval_limit = max(plan.retrieval_limit, PDF_AGGREGATE_LIMIT if profile["aggregate"] or profile["quote"] else PDF_DEFAULT_LIMIT)
         pdf_meta = await self._pdf_retrieval(user_prompt, limit=retrieval_limit)
         _empty_meta = {"context": "", "chunks": [], "quotes": [], "selected_count": 0, "candidate_count": 0, "top_score": 0}
-        if plan.genre == "NLXH":
+        if is_reading_exam:
+            # Skills documents deliberately do not repeat the learner's unseen
+            # passage.  Their relevance is methodological, so subject/topic
+            # gates designed for author-and-work retrieval must not discard them.
+            print("[debug] topic_gate_bypassed reason=reading_exam", flush=True)
+        elif plan.genre == "NLXH":
             # NLXH khong dung dan chung/ly luan van hoc -> khong nhoi kho phe binh (vd Ba dinh cao Tho Moi).
             print("[debug] md_suppressed reason=NLXH", flush=True)
             pdf_meta = dict(_empty_meta)
@@ -3594,28 +3687,35 @@ class AI(commands.Cog):
                     flush=True,
                 )
             pdf_meta = filtered_pdf_meta
-        topic_filtered_pdf_meta = self._filter_pdf_meta_to_topic(user_prompt, pdf_meta)
-        if len(topic_filtered_pdf_meta.get("chunks") or []) != len(pdf_meta.get("chunks") or []):
-            print(
-                f"[debug] md_filtered reason=topic_anchor anchors={self._query_topic_anchors(user_prompt)!r} "
-                f"before={len(pdf_meta.get('chunks') or [])} after={len(topic_filtered_pdf_meta.get('chunks') or [])}",
-                flush=True,
-            )
-        pdf_meta = topic_filtered_pdf_meta
-        if pdf_meta.get("chunks") and (
-            float(pdf_meta.get("top_score") or 0) < MD_MIN_RELEVANCE
-            and not (profile["quote"] or profile["aggregate"])
-            and not plan.author_filter
-            and not self._query_subjects(user_prompt, plan)
-        ):
-            # Truy xuat yeu/lac de -> bo, tranh lap noi dung tai lieu khong lien quan vao bai.
-            print(f"[debug] md_suppressed reason=low_relevance top_score={pdf_meta.get('top_score')}", flush=True)
-            pdf_meta = dict(_empty_meta)
+        if not is_reading_exam:
+            topic_filtered_pdf_meta = self._filter_pdf_meta_to_topic(user_prompt, pdf_meta)
+            if len(topic_filtered_pdf_meta.get("chunks") or []) != len(pdf_meta.get("chunks") or []):
+                print(
+                    f"[debug] md_filtered reason=topic_anchor anchors={self._query_topic_anchors(user_prompt)!r} "
+                    f"before={len(pdf_meta.get('chunks') or [])} after={len(topic_filtered_pdf_meta.get('chunks') or [])}",
+                    flush=True,
+                )
+            pdf_meta = topic_filtered_pdf_meta
+            if pdf_meta.get("chunks") and (
+                float(pdf_meta.get("top_score") or 0) < MD_MIN_RELEVANCE
+                and not (profile["quote"] or profile["aggregate"])
+                and not plan.author_filter
+                and not self._query_subjects(user_prompt, plan)
+            ):
+                # Truy xuat yeu/lac de -> bo, tranh lap noi dung tai lieu khong lien quan vao bai.
+                print(f"[debug] md_suppressed reason=low_relevance top_score={pdf_meta.get('top_score')}", flush=True)
+                pdf_meta = dict(_empty_meta)
         pdf_knowledge = pdf_meta.get("context", "")
         manual_knowledge = await self._knowledge_context(user_prompt)
         feedback_knowledge = await self._feedback_context(user_prompt)
-        manual_knowledge = self._filter_context_to_topic(user_prompt, manual_knowledge)
-        feedback_knowledge = self._filter_context_to_topic(user_prompt, feedback_knowledge)
+        if is_reading_exam:
+            # Prevent unrelated manually-entered knowledge from posing as
+            # evidence for the current unseen reading passage.
+            manual_knowledge = ""
+            feedback_knowledge = ""
+        else:
+            manual_knowledge = self._filter_context_to_topic(user_prompt, manual_knowledge)
+            feedback_knowledge = self._filter_context_to_topic(user_prompt, feedback_knowledge)
         if is_standard_nlxh_outline:
             # Dàn ý NLXH phổ thông/HSG phải bám trực tiếp vào đề và khung lập luận.
             # Kho thủ công thường là nhận định văn học rời, dễ kéo model sang chế độ
@@ -3633,7 +3733,7 @@ class AI(commands.Cog):
             print("[debug] feedback_suppressed reason=off_subject", flush=True)
             feedback_knowledge = ""
         retrieval_hit = self._retrieval_hit(user_prompt, pdf_meta)
-        quote_evidence = QuoteExtractor.extract(pdf_meta, plan, user_prompt)
+        quote_evidence = [] if is_reading_exam else QuoteExtractor.extract(pdf_meta, plan, user_prompt)
         self._log_top_pdf_chunks(pdf_meta)
         print(
             f"[debug] after_retrieval pdf_candidates={pdf_meta.get('candidate_count', 0)} "
@@ -3666,7 +3766,7 @@ class AI(commands.Cog):
             teacher_feedback=feedback_knowledge,
         )
         stats = _context_part_stats(pdf_knowledge, manual_knowledge, feedback_knowledge, web_context, knowledge)
-        full_prompt_preview = self._guarded_prompt(prompt, knowledge, web_context, generation_mode)
+        full_prompt_preview = self._guarded_prompt(prompt, knowledge, web_context, generation_mode, guidance)
         print(
             "[debug] prompt_build_done "
             f"prompt_chars={len(full_prompt_preview)} est_tokens={self._estimated_tokens(full_prompt_preview)} "
@@ -3685,12 +3785,13 @@ class AI(commands.Cog):
             flush=True,
         )
         deterministic = None
-        if plan.intent == "QUOTE_SINGLE":
-            deterministic = Formatter.quote_single(quote_evidence, plan)
-        elif plan.intent == "QUOTE_COLLECTION":
-            deterministic = Formatter.quote_collection(quote_evidence, plan)
-        elif profile["quote"] or profile["aggregate"]:
-            deterministic = self._deterministic_document_answer(user_prompt, pdf_meta, profile)
+        if not is_reading_exam:
+            if plan.intent == "QUOTE_SINGLE":
+                deterministic = Formatter.quote_single(quote_evidence, plan)
+            elif plan.intent == "QUOTE_COLLECTION":
+                deterministic = Formatter.quote_collection(quote_evidence, plan)
+            elif profile["quote"] or profile["aggregate"]:
+                deterministic = self._deterministic_document_answer(user_prompt, pdf_meta, profile)
         if deterministic and (retrieval_hit or quote_evidence or plan.intent.startswith("QUOTE")):
             answer = deterministic
             full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode + "_deterministic_extract")
@@ -3716,7 +3817,6 @@ class AI(commands.Cog):
                 CONTEXT_MAX_CHARS,
                 teacher_feedback=feedback_knowledge,
             )
-        guidance = Scaffold.for_plan(plan)
         full_prompt = self._guarded_prompt(prompt, knowledge, web_context, mode, guidance)
         # Không cắt câu trả lời sau một mốc thời gian tùy ý. Với câu hỏi văn học,
         # nhất là khi cần đi qua Gemini Pro + verifier, fallback evidence thô có thể
@@ -3745,7 +3845,7 @@ class AI(commands.Cog):
             if self._has_strong_evidence(pdf_meta, manual_count, feedback_count, web_count):
                 if reason == "UNKNOWN":
                     reason = "PROMPT_FILTERED"
-                forced = await self._force_grounded_answer(prompt, knowledge, web_context, mode)
+                forced = await self._force_grounded_answer(prompt, knowledge, web_context, mode, guidance)
                 if forced and not self._insufficient_answer(forced):
                     print(f"[debug] refusal_suppressed_by=force_grounded original_reason={reason}", flush=True)
                     answer = forced

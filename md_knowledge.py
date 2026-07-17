@@ -501,13 +501,18 @@ _STOP_TERMS = {
     "của", "cho", "với", "trong", "những", "một", "các", "hay", "không", "nào",
     "gì", "mình", "bạn", "tôi", "và", "là", "có", "để", "về", "này",
 }
+_STOP_TERMS_PLAIN = {
+    "cua", "cho", "voi", "trong", "nhung", "mot", "cac", "hay", "khong", "nao",
+    "gi", "minh", "ban", "toi", "va", "la", "co", "de", "ve", "nay",
+    "giai", "cau", "dap", "an", "dung", "nhat", "tu", "khoa", "phuong", "phap",
+}
 
 
 def query_terms(query: str) -> list[str]:
     # giu nguyen dau (khop LIKE voi text co dau trong DB); cham diem thi bo dau
     terms = []
     for token in re.findall(r"[a-z0-9à-ỹđ]{2,}", (query or "").lower()):
-        if token not in _STOP_TERMS and token not in terms:
+        if token not in _STOP_TERMS and _plain(token) not in _STOP_TERMS_PLAIN and token not in terms:
             terms.append(token)
     return terms[:16]
 
@@ -555,6 +560,31 @@ def score_weighted(terms: list[str], text: str, weights: dict) -> float:
     return total
 
 
+def _passage_keyword_score(terms: list[str], row, weights: dict) -> float:
+    """Rank a passage while giving an exact document-title match real weight."""
+    doc_title = str(row["doc_title"] or "")
+    passage_text = f"{row['title']} {row['content']}"
+    # A document's title is curated metadata.  Repeating a broad word inside a
+    # long passage must not beat a guide whose title names the requested skill.
+    return score_weighted(terms, passage_text, weights) + 12.0 * score_weighted(terms, doc_title, weights)
+
+
+def _select_diverse_passages(ranked: list, limit: int) -> list:
+    """Avoid filling the whole context with neighboring chunks from one file."""
+    selected = []
+    per_doc: dict[str, int] = {}
+    max_per_doc = max(3, (limit + 1) // 2)
+    for row in ranked:
+        doc_key = str(row["doc_key"] or "")
+        if per_doc.get(doc_key, 0) >= max_per_doc:
+            continue
+        selected.append(row)
+        per_doc[doc_key] = per_doc.get(doc_key, 0) + 1
+        if len(selected) >= limit:
+            break
+    return selected
+
+
 async def _fetch_like(db, sql_unaccent: str, sql_plain: str, patterns_fold: list[str], patterns_raw: list[str]):
     # Uu tien khop khong dau (unaccent) de go sai/thieu dau van trung; neu unaccent chua co
     # tren DB thi lui ve LIKE thuong.
@@ -583,25 +613,38 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5, query_vector=
     patterns_fold = [f"%{_plain(t)}%" for t in terms] or ["%"]
     patterns_raw = [f"%{t}%" for t in terms] or ["%"]
     # Lay ung vien theo OR (bat ky term nao khop) roi cham diem trong Python.
+    # Document title is part of the evidence: without it, a guide titled
+    # "Đọc hiểu/HSA" can be excluded by an unordered passage-only LIMIT before
+    # scoring even starts.
     rows = await _fetch_like(
         db,
         """
-        SELECT p.doc_key, p.passage_index, p.title, p.content, p.source, d.title AS doc_title, d.author
+        SELECT p.doc_key, p.passage_index, p.title, p.content, p.source, d.title AS doc_title, d.author,
+               (SELECT count(*) FROM unnest($1::text[]) AS q(pattern)
+                WHERE unaccent(lower(coalesce(d.title,''))) LIKE q.pattern) AS doc_title_hits,
+               (SELECT count(*) FROM unnest($1::text[]) AS q(pattern)
+                WHERE unaccent(lower(coalesce(p.title,'') || ' ' || coalesce(p.content,''))) LIKE q.pattern) AS passage_hits
         FROM ai_md_passages p JOIN ai_md_documents d ON d.doc_key = p.doc_key
-        WHERE unaccent(lower(coalesce(p.title,'') || ' ' || coalesce(p.content,''))) LIKE ANY($1::text[])
-        LIMIT 300
+        WHERE unaccent(lower(coalesce(d.title,'') || ' ' || coalesce(d.author,'') || ' ' || coalesce(p.title,'') || ' ' || coalesce(p.content,''))) LIKE ANY($1::text[])
+        ORDER BY doc_title_hits DESC, passage_hits DESC, p.doc_key, p.passage_index
+        LIMIT 900
         """,
         """
-        SELECT p.doc_key, p.passage_index, p.title, p.content, p.source, d.title AS doc_title, d.author
+        SELECT p.doc_key, p.passage_index, p.title, p.content, p.source, d.title AS doc_title, d.author,
+               (SELECT count(*) FROM unnest($1::text[]) AS q(pattern)
+                WHERE lower(coalesce(d.title,'')) LIKE q.pattern) AS doc_title_hits,
+               (SELECT count(*) FROM unnest($1::text[]) AS q(pattern)
+                WHERE lower(coalesce(p.title,'') || ' ' || coalesce(p.content,'')) LIKE q.pattern) AS passage_hits
         FROM ai_md_passages p JOIN ai_md_documents d ON d.doc_key = p.doc_key
-        WHERE lower(coalesce(p.title,'') || ' ' || coalesce(p.content,'')) LIKE ANY($1::text[])
-        LIMIT 300
+        WHERE lower(coalesce(d.title,'') || ' ' || coalesce(d.author,'') || ' ' || coalesce(p.title,'') || ' ' || coalesce(p.content,'')) LIKE ANY($1::text[])
+        ORDER BY doc_title_hits DESC, passage_hits DESC, p.doc_key, p.passage_index
+        LIMIT 900
         """,
         patterns_fold, patterns_raw,
     )
     # IDF tren tap ung vien: ten rieng/tu hiem duoc uu tien, tu pho bien bi ha thap.
-    p_weights = _idf_weights(terms, [f"{r['title']} {r['content']}" for r in rows])
-    kw_ranked = sorted(rows, key=lambda r: score_weighted(terms, f"{r['title']} {r['content']}", p_weights), reverse=True)
+    p_weights = _idf_weights(terms, [f"{r['doc_title']} {r['title']} {r['content']}" for r in rows])
+    kw_ranked = sorted(rows, key=lambda r: _passage_keyword_score(terms, r, p_weights), reverse=True)
 
     # Tra cuu NGU NGHIA (neu co query_vector va passage da nhung) roi hop nhat bang RRF.
     vec_ranked = []
@@ -626,9 +669,13 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5, query_vector=
             vec_ranked = []
 
     if vec_ranked:
-        selected = _rrf_merge(kw_ranked[:40], vec_ranked, limit)
+        # Keep semantic recall, but apply the same document diversity rule as
+        # keyword-only retrieval so a generic vector-neighbor cluster cannot
+        # displace a specifically titled guide.
+        merged = _rrf_merge(kw_ranked[:40], vec_ranked, max(limit * 3, limit))
+        selected = _select_diverse_passages(merged, limit)
     else:
-        selected = kw_ranked[:limit]
+        selected = _select_diverse_passages(kw_ranked, limit)
     chunks = [{"title": r["title"], "doc_title": r["doc_title"], "author": r["author"],
                "content": r["content"], "excerpt": r["content"],
                "source": r["source"], "chunk_index": i, "page": None} for i, r in enumerate(selected)]
@@ -637,14 +684,18 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5, query_vector=
         """
         SELECT q.quote, q.author, q.source, d.title
         FROM ai_md_quotes q JOIN ai_md_documents d ON d.doc_key = q.doc_key
-        WHERE unaccent(lower(coalesce(q.quote,'') || ' ' || coalesce(q.author,''))) LIKE ANY($1::text[])
-        LIMIT 300
+        WHERE unaccent(lower(coalesce(d.title,'') || ' ' || coalesce(q.quote,'') || ' ' || coalesce(q.author,''))) LIKE ANY($1::text[])
+        ORDER BY (SELECT count(*) FROM unnest($1::text[]) AS p(pattern)
+                  WHERE unaccent(lower(coalesce(d.title,''))) LIKE p.pattern) DESC
+        LIMIT 900
         """,
         """
         SELECT q.quote, q.author, q.source, d.title
         FROM ai_md_quotes q JOIN ai_md_documents d ON d.doc_key = q.doc_key
-        WHERE lower(coalesce(q.quote,'') || ' ' || coalesce(q.author,'')) LIKE ANY($1::text[])
-        LIMIT 300
+        WHERE lower(coalesce(d.title,'') || ' ' || coalesce(q.quote,'') || ' ' || coalesce(q.author,'')) LIKE ANY($1::text[])
+        ORDER BY (SELECT count(*) FROM unnest($1::text[]) AS p(pattern)
+                  WHERE lower(coalesce(d.title,'')) LIKE p.pattern) DESC
+        LIMIT 900
         """,
         patterns_fold, patterns_raw,
     )
@@ -658,7 +709,7 @@ async def retrieve_md_knowledge(db, query: str, *, limit: int = 5, query_vector=
     q_selected = sorted(qrows, key=_quote_score, reverse=True)[:max(limit, 8)]
     quotes = [{"quote": r["quote"], "author": r["author"] or "", "source": r["source"], "title": r["title"]}
               for r in q_selected]
-    kw_top = score_weighted(terms, f"{selected[0]['title']} {selected[0]['content']}", p_weights) if selected else 0.0
+    kw_top = _passage_keyword_score(terms, selected[0], p_weights) if selected else 0.0
     # Hit ngu nghia manh (sim cao) cung tinh la co can cu du tu khoa khong khop chu.
     top = max(float(kw_top), best_sim * 3.0)
     return {"context": build_md_context(chunks), "chunks": chunks, "quotes": quotes,

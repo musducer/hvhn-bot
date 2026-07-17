@@ -36,6 +36,30 @@ class WatcherMdTest(unittest.TestCase):
                     patch.object(watcher.time, "sleep"):
                 self.assertTrue(watcher._stable(path, checks=2, gap=0))
 
+    def test_md_move_race_is_not_reported_as_an_indexing_failure(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                incoming = Path(temp_dir) / "incoming"
+                processed = Path(temp_dir) / "processed"
+                incoming.mkdir()
+                path = incoming / "lesson.md"
+                path.write_text("# Lesson\n", encoding="utf-8")
+
+                def claimed_elsewhere(src, _dest):
+                    Path(src).unlink()
+                    raise FileNotFoundError(src)
+
+                with patch.object(watcher, "INCOMING_BOT_MD", str(incoming)), \
+                        patch.object(watcher, "PROCESSED_MD", str(processed)), \
+                        patch.object(watcher, "_stable", return_value=True), \
+                        patch.object(watcher, "_index_md_for_ai", new=AsyncMock(return_value="indexed")), \
+                        patch.object(watcher.os, "replace", side_effect=claimed_elsewhere):
+                    await watcher.xu_ly_don_them_md()
+
+                self.assertFalse(path.exists())
+
+        asyncio.run(scenario())
+
     def test_existing_email_reuses_canonical_client_name(self):
         captured = {}
 

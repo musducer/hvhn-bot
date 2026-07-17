@@ -1141,6 +1141,11 @@ async def xu_ly_don_them_md():
         try:
             dest = _unique_path(PROCESSED_MD, name)
             os.replace(path, dest)
+        except FileNotFoundError:
+            # Drive Desktop or a second watcher can claim the file after this
+            # worker indexes it.  The index is idempotent; leave any file that
+            # reappears for the next pass instead of emitting a false error.
+            print(f"[AI MD] move_deferred file={name} (claimed or syncing)", flush=True)
         except Exception:
             traceback.print_exc()
 
