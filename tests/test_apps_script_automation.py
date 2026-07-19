@@ -179,6 +179,34 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function ketNoiWebhookPayOS", self.src)
         self.assertIn("/confirm-webhook", self.src)
 
+    def test_customer_emails_hide_provider_names_and_attach_onboarding_materials(self):
+        qr_email = self.src[
+            self.src.index("function _pmtSendPaymentEmail"):
+            self.src.index("// onFormSubmit: tạo QR/link PayOS riêng")
+        ]
+        paid_email = self.src[
+            self.src.index("function _pmtSendInviteEmail"):
+            self.src.index("function _pmtMintAndSendForRow")
+        ]
+        preorder_email = self.src[
+            self.src.index("function _preorderSendInviteEmail"):
+            self.src.index("function _preorderFindRowByEmail")
+        ]
+        for customer_email in (qr_email, paid_email, preorder_email):
+            self.assertNotIn("PayOS", customer_email)
+            self.assertNotIn("api-merchant", customer_email)
+        self.assertIn("const CUSTOMER_GUIDE_URL", self.src)
+        self.assertIn("function caiDatTaiLieuHuongDanKhach()", self.src)
+        self.assertIn("CUSTOMER_NOTICE_IMAGE_FILE_ID_PROP", self.src)
+        self.assertIn("function _customerOnboardingMaterials()", self.src)
+        self.assertIn("message.attachments = materials.attachments", self.src)
+        self.assertIn("_customerOnboardingPlainText(materials)", paid_email)
+        self.assertIn("_customerOnboardingHtml(materials)", paid_email)
+        self.assertIn("_sendCustomerAccessEmail", paid_email)
+        self.assertIn("_customerOnboardingPlainText(materials)", preorder_email)
+        self.assertIn("_customerOnboardingHtml(materials)", preorder_email)
+        self.assertIn("_sendCustomerAccessEmail", preorder_email)
+
     def test_preorder_uses_one_reused_form_and_an_email_allowlist(self):
         self.assertIn("🎟️ Khách pre-order", self.src)
         self.assertIn("PREORDER_SOURCE_SPREADSHEET_ID_PROP", self.src)

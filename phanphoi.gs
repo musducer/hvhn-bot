@@ -143,6 +143,7 @@ function onOpen() {
     .addSubMenu(ui.createMenu('💳 Thanh toán tự động')
       .addItem('⚙️ Cài đặt PayOS QR (bot + khóa PayOS)', 'caiDatThanhToanTuDong')
       .addItem('💰 Đổi giá gói học liệu', 'datGiaGoiHocLieu')
+      .addItem('📎 Cài ảnh lưu ý gửi khách', 'caiDatTaiLieuHuongDanKhach')
       .addItem('👀 Xem cài đặt hiện tại', 'xemCaiDatThanhToan')
       .addItem('📱 Tạo/lấy lại Form đặt mua (gửi khách)', 'taoLaiFormDatMua')
       .addItem('🔗 Kết nối/kiểm tra webhook PayOS', 'ketNoiWebhookPayOS')
@@ -2186,6 +2187,9 @@ const PMT_DEFAULT_AMOUNT = 99999;
 const PMT_AMOUNT_PROP = 'PMT_FIXED_AMOUNT';
 const PMT_LINK_MINUTES = 30;
 const PMT_PAYOS_API = 'https://api-merchant.payos.vn';
+const CUSTOMER_GUIDE_FILE_ID = '1DeHcLRGqFWfNVETFRdfx-4dro1-yMsEf';
+const CUSTOMER_GUIDE_URL = 'https://docs.google.com/document/d/1DeHcLRGqFWfNVETFRdfx-4dro1-yMsEf/edit?usp=sharing';
+const CUSTOMER_NOTICE_IMAGE_FILE_ID_PROP = 'CUSTOMER_NOTICE_IMAGE_FILE_ID';
 
 function _pmtProp(key, def) {
   const v = PropertiesService.getScriptProperties().getProperty(key);
@@ -2200,6 +2204,108 @@ function _pmtAmount() {
 
 function _pmtFormatAmount(amount) {
   return Number(amount).toLocaleString('vi-VN') + 'đ';
+}
+
+function _driveFileIdFromUrlOrId(value) {
+  const text = String(value || '').trim();
+  const fromUrl = text.match(/\/d\/([a-zA-Z0-9_-]+)/) || text.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (fromUrl) return fromUrl[1];
+  return /^[a-zA-Z0-9_-]{10,}$/.test(text) ? text : '';
+}
+
+// Cài một lần bằng đúng ảnh "Một số lưu ý" trên Drive. File chỉ được đọc bởi
+// Apps Script để đính kèm riêng trong email, không cần mở quyền công khai.
+function caiDatTaiLieuHuongDanKhach() {
+  const ui = SpreadsheetApp.getUi();
+  const props = PropertiesService.getScriptProperties();
+  const current = props.getProperty(CUSTOMER_NOTICE_IMAGE_FILE_ID_PROP);
+  const response = ui.prompt(
+    'Cài ảnh lưu ý gửi khách',
+    'Tải đúng ảnh "Một số lưu ý" lên Google Drive của tài khoản đang chạy Apps Script, rồi dán link hoặc File ID tại đây.' +
+      (current ? '\n\nHiện đã có ảnh. Bấm Hủy nếu không muốn đổi.' : ''),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+
+  const fileId = _driveFileIdFromUrlOrId(response.getResponseText());
+  if (!fileId) {
+    ui.alert('Link hoặc File ID chưa hợp lệ. Hãy dán link Google Drive của ảnh.');
+    return;
+  }
+
+  try {
+    const file = DriveApp.getFileById(fileId);
+    if (String(file.getMimeType() || '').indexOf('image/') !== 0) {
+      throw new Error('File được chọn không phải ảnh.');
+    }
+    props.setProperty(CUSTOMER_NOTICE_IMAGE_FILE_ID_PROP, fileId);
+    ghiLog('Cài ảnh lưu ý gửi khách', file.getName());
+    ui.alert('Đã lưu ảnh lưu ý. Từ các email xác nhận thanh toán và pre-order tiếp theo, khách sẽ nhận kèm hướng dẫn sử dụng và ảnh này.');
+  } catch (e) {
+    ui.alert('Không đọc được ảnh: ' + ((e && e.message) || String(e)));
+  }
+}
+
+function _customerOnboardingMaterials() {
+  const attachments = [];
+  let guideAttached = false;
+  let noticeAttached = false;
+
+  try {
+    const guide = DriveApp.getFileById(CUSTOMER_GUIDE_FILE_ID);
+    attachments.push(guide.getAs(MimeType.PDF).setName('Huong-dan-su-dung-he-thong-HVHN.pdf'));
+    guideAttached = true;
+  } catch (e) {
+    ghiLog('LỖI đính kèm hướng dẫn khách', (e && e.message) || String(e));
+  }
+
+  const noticeId = _pmtProp(CUSTOMER_NOTICE_IMAGE_FILE_ID_PROP, '');
+  if (noticeId) {
+    try {
+      const notice = DriveApp.getFileById(noticeId);
+      if (String(notice.getMimeType() || '').indexOf('image/') !== 0) {
+        throw new Error('File ảnh lưu ý không còn là ảnh.');
+      }
+      attachments.push(notice.getBlob().setName(notice.getName()));
+      noticeAttached = true;
+    } catch (e) {
+      ghiLog('LỖI đính kèm ảnh lưu ý khách', (e && e.message) || String(e));
+    }
+  }
+
+  return { attachments: attachments, guideAttached: guideAttached, noticeAttached: noticeAttached };
+}
+
+function _customerOnboardingPlainText(materials) {
+  const attached = [];
+  if (materials.guideAttached) attached.push('bản PDF hướng dẫn');
+  if (materials.noticeAttached) attached.push('ảnh "Một số lưu ý"');
+  const attachmentText = attached.length
+    ? ' Email này có đính kèm ' + attached.join(' và ') + '.'
+    : '';
+  return '\n\nTrước khi sử dụng hệ thống, bạn vui lòng đọc kỹ hướng dẫn tại: ' + CUSTOMER_GUIDE_URL +
+    attachmentText +
+    '\n\nViệc đọc đầy đủ hướng dẫn và các tài liệu đính kèm là bắt buộc để tài khoản, học liệu và quyền truy cập hoạt động ổn định. Sau khi đã đọc, bạn mới tiếp tục kích hoạt và sử dụng hệ thống.';
+}
+
+function _customerOnboardingHtml(materials) {
+  const attached = [];
+  if (materials.guideAttached) attached.push('bản PDF hướng dẫn');
+  if (materials.noticeAttached) attached.push('ảnh “Một số lưu ý”');
+  const attachmentText = attached.length
+    ? '<p style="margin:8px 0 0">Email này có đính kèm ' + _pmtEsc(attached.join(' và ')) + '.</p>'
+    : '';
+  return '<div style="margin:22px 0;padding:14px 16px;background:#f1f8f4;border-left:4px solid #0b8043;border-radius:4px">' +
+    '<p style="margin:0 0 8px"><strong>Việc cần làm trước khi sử dụng hệ thống</strong></p>' +
+    '<p style="margin:0">Vui lòng <strong>đọc kỹ</strong> <a href="' + _pmtEsc(CUSTOMER_GUIDE_URL) + '">Hướng dẫn sử dụng hệ thống HVHN</a> và các tài liệu đính kèm trước khi kích hoạt quyền truy cập.</p>' +
+    attachmentText +
+    '<p style="margin:8px 0 0">Đây là bước bắt buộc để tài khoản, học liệu và quyền truy cập của bạn hoạt động ổn định.</p>' +
+    '</div>';
+}
+
+function _sendCustomerAccessEmail(message, materials) {
+  message.attachments = materials.attachments;
+  MailApp.sendEmail(message);
 }
 
 function _pmtOut(s) { return ContentService.createTextOutput(s); }
@@ -2448,7 +2554,7 @@ function _pmtQrImageUrl(qrData) {
 function _pmtSendPaymentEmail(email, name, shortCode, amount, checkoutUrl, qrData, expiry) {
   const formatted = Utilities.formatDate(expiry, Session.getScriptTimeZone(), 'HH:mm, dd/MM/yyyy');
   const qrUrl = _pmtQrImageUrl(qrData);
-  const body = 'Chào ' + name + ',\n\nHVHN đã tạo mã QR thanh toán riêng cho bạn. Vui lòng thanh toán đúng ' + amount.toLocaleString('vi-VN') + 'đ trước ' + formatted + '. Sau khi giao dịch được PayOS xác nhận, link Discord sẽ tự gửi về email này.\n\nMã tham chiếu: ' + shortCode + '\nThanh toán: ' + checkoutUrl;
+  const body = 'Chào ' + name + ',\n\nHVHN đã tạo mã QR thanh toán riêng cho bạn. Vui lòng thanh toán đúng ' + amount.toLocaleString('vi-VN') + 'đ trước ' + formatted + '. Sau khi giao dịch được hệ thống xác nhận, link Discord sẽ tự gửi về email này.\n\nMã tham chiếu: ' + shortCode + '\nThanh toán: ' + checkoutUrl;
   const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
     '<h2 style="margin:0 0 8px;color:#0b8043">HVHN · Mã QR thanh toán của bạn</h2>' +
     '<p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
@@ -2457,7 +2563,7 @@ function _pmtSendPaymentEmail(email, name, shortCode, amount, checkoutUrl, qrDat
     '<div><strong>Số tiền:</strong> ' + amount.toLocaleString('vi-VN') + 'đ</div><div><strong>Mã tham chiếu:</strong> ' + _pmtEsc(shortCode) + '</div></div>' +
     '<p style="text-align:center;margin:22px 0 10px"><img src="' + _pmtEsc(qrUrl) + '" width="260" height="260" alt="Mã QR thanh toán HVHN" style="max-width:260px;border:1px solid #e0e0e0;padding:8px;border-radius:8px"></p>' +
     '<p style="text-align:center"><a href="' + _pmtEsc(checkoutUrl) + '" style="display:inline-block;padding:12px 20px;background:#0b8043;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Mở trang thanh toán an toàn</a></p>' +
-    '<p>Sau khi PayOS xác nhận thanh toán, hệ thống sẽ tự gửi <strong>link tham gia Discord</strong> đến đúng email này. Bạn không cần gửi ảnh giao dịch.</p>' +
+    '<p>Sau khi hệ thống xác nhận thanh toán, hệ thống sẽ tự gửi <strong>link tham gia Discord</strong> đến đúng email này. Bạn không cần gửi ảnh giao dịch.</p>' +
     '<p style="font-size:13px;color:#5f6368">Nếu QR không hiển thị, hãy bấm nút “Mở trang thanh toán an toàn”. Nếu quá thời hạn hoặc cần hỗ trợ, hãy tạo lại đơn bằng Form HVHN.</p>' +
     '<p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
   MailApp.sendEmail({ to: email, subject: '[HVHN] Mã QR thanh toán ' + _pmtFormatAmount(amount), body: body, htmlBody: html, name: 'HVHN' });
@@ -2553,14 +2659,16 @@ function _pmtMintInvite(maDon, name, email) {
 }
 
 function _pmtSendInviteEmail(email, name, inviteUrl) {
-  const body = 'Chào ' + name + ',\n\nThanh toán của bạn đã được xác nhận. Link tham gia Discord HVHN: ' + inviteUrl + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
+  const materials = _customerOnboardingMaterials();
+  const body = 'Chào ' + name + ',\n\nThanh toán của bạn đã được xác nhận. Link tham gia Discord HVHN: ' + inviteUrl + _customerOnboardingPlainText(materials) + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
   const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
     '<h2 style="margin:0 0 8px;color:#0b8043">HVHN · Thanh toán đã được xác nhận</h2><p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
     '<p>Hệ thống đã xác nhận thanh toán của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
     '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
+    _customerOnboardingHtml(materials) +
     '<p>Sau khi vào Discord, hãy vào kênh <strong>#truy-cập-tài-liệu</strong> và bấm <strong>“Kích hoạt quyền truy cập tài liệu”</strong> để điền Họ tên + Email.</p>' +
     '<p style="font-size:13px;color:#5f6368">Link mời có giới hạn sử dụng. Nếu link hết hiệu lực, hãy phản hồi email này để được hỗ trợ.</p><p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
-  MailApp.sendEmail({ to: email, subject: '[HVHN] Thanh toán thành công – link Discord của bạn', body: body, htmlBody: html, name: 'HVHN' });
+  _sendCustomerAccessEmail({ to: email, subject: '[HVHN] Thanh toán thành công – link Discord của bạn', body: body, htmlBody: html, name: 'HVHN' }, materials);
 }
 
 function _pmtMintAndSendForRow(sheet, rowNumber, opts) {
@@ -2863,16 +2971,18 @@ function taoLaiFormPreorder() {
 }
 
 function _preorderSendInviteEmail(email, name, inviteUrl) {
-  const body = 'Chào ' + name + ',\n\nHVHN đã xác nhận slot nhóm học tập của bạn. Bấm link sau để tham gia Discord: ' + inviteUrl + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
+  const materials = _customerOnboardingMaterials();
+  const body = 'Chào ' + name + ',\n\nHVHN đã xác nhận slot nhóm học tập của bạn. Bấm link sau để tham gia Discord: ' + inviteUrl + _customerOnboardingPlainText(materials) + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
   const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
     '<h2 style="margin:0 0 8px;color:#6a1b9a">HVHN · Xác nhận slot nhóm học tập</h2>' +
     '<p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
     '<p>HVHN đã xác nhận slot nhóm học tập của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
     '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
+    _customerOnboardingHtml(materials) +
     '<p>Sau khi vào Discord, hãy vào kênh <strong>#truy-cập-tài-liệu</strong> và bấm <strong>“Kích hoạt quyền truy cập tài liệu”</strong> để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.</p>' +
     '<p style="font-size:13px;color:#5f6368">Link mời là link riêng, có giới hạn sử dụng. Nếu cần hỗ trợ, hãy phản hồi email này.</p>' +
     '<p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
-  MailApp.sendEmail({ to: email, subject: '[HVHN] Link tham gia nhóm học tập của bạn', body: body, htmlBody: html, name: 'HVHN' });
+  _sendCustomerAccessEmail({ to: email, subject: '[HVHN] Link tham gia nhóm học tập của bạn', body: body, htmlBody: html, name: 'HVHN' }, materials);
 }
 
 function _preorderFindRowByEmail(sheet, email) {
