@@ -1,3 +1,4 @@
+import asyncio
 import re
 
 import discord
@@ -5,6 +6,11 @@ from discord.ext import commands
 from discord import app_commands
 
 from bot import DAN_LANG_ROLE
+
+
+INFO_CATEGORY_NAME = "📌 THÔNG TIN CHUNG"
+EXTERNAL_SERVICES_CHANNEL_NAME = "dịch-vụ-ngoài"
+EXTERNAL_SERVICES_EMBED_TITLE = "📌 DỊCH VỤ HỖ TRỢ CHUYÊN SÂU"
 
 
 # ==== BỘ LUẬT: lưu DB (server_rules), sửa bằng lệnh /luat_*; kênh được gắn link động lúc đăng ====
@@ -240,6 +246,110 @@ def build_guide_embed() -> discord.Embed:
     return embed
 
 
+def build_external_services_embed() -> discord.Embed:
+    """Announcement kept in the read-only external-services channel."""
+    embed = discord.Embed(
+        title=EXTERNAL_SERVICES_EMBED_TITLE,
+        description=(
+            "Các dịch vụ dưới đây là lựa chọn **ngoài chương trình học liệu**. "
+            "Đội ngũ sẽ trao đổi phạm vi, thời gian và chi phí trước khi nhận yêu cầu."
+        ),
+        color=0x1F4D78,
+    )
+    embed.add_field(
+        name="1. Chấm chữa bài chi tiết",
+        value=(
+            "Nhận xét lập luận, dẫn chứng, diễn đạt và hướng nâng cấp bài viết; "
+            "phù hợp cho Văn thường hoặc luyện thi học sinh giỏi."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="2. Bài mẫu theo yêu cầu",
+        value=(
+            "Bài viết tham khảo, mở bài hoặc kết bài được biên soạn theo đề, tác phẩm "
+            "và trọng tâm bạn cần luyện."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="3. Thiết kế đề thi độc quyền",
+        value=(
+            "Đề luyện theo cấu trúc bạn cần, từ đề Văn thường đến đề bồi dưỡng học sinh giỏi."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Cách đăng ký",
+        value=(
+            "Nhắn quản trị viên và nêu rõ: **mục tiêu sử dụng**, **yêu cầu cụ thể** "
+            "và **thời hạn cần nhận**."
+        ),
+        inline=False,
+    )
+    embed.set_footer(text="HVHN sẽ xác nhận khả năng hỗ trợ trước khi nhận dịch vụ.")
+    return embed
+
+
+async def ensure_external_services_channel(guild: discord.Guild):
+    """Create and maintain one public, read-only services announcement channel."""
+    try:
+        category = discord.utils.get(guild.categories, name=INFO_CATEGORY_NAME)
+        channel = discord.utils.get(guild.text_channels, name=EXTERNAL_SERVICES_CHANNEL_NAME)
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=False,
+                add_reactions=False,
+            ),
+        }
+        if guild.me is not None:
+            overwrites[guild.me] = discord.PermissionOverwrite(
+                view_channel=True,
+                send_messages=True,
+                embed_links=True,
+                read_message_history=True,
+                manage_messages=True,
+            )
+
+        if channel is None:
+            channel = await guild.create_text_channel(
+                EXTERNAL_SERVICES_CHANNEL_NAME,
+                category=category,
+                overwrites=overwrites,
+                reason="HVHN external services announcement",
+            )
+            print(f"[debug] external_services_channel_created guild={guild.id} channel={channel.id}", flush=True)
+        else:
+            edit_options = {
+                "overwrites": overwrites,
+                "reason": "HVHN external services announcement",
+            }
+            if category is not None:
+                edit_options["category"] = category
+            channel = await channel.edit(**edit_options) or channel
+
+        managed_messages = [
+            message async for message in channel.history(limit=50)
+            if message.author == guild.me
+            and any(embed.title == EXTERNAL_SERVICES_EMBED_TITLE for embed in message.embeds)
+        ]
+        announcement = build_external_services_embed()
+        if managed_messages:
+            await managed_messages[0].edit(embed=announcement)
+            for duplicate in managed_messages[1:]:
+                try:
+                    await duplicate.delete()
+                except discord.HTTPException:
+                    pass
+        else:
+            await channel.send(embed=announcement)
+        return channel
+    except (discord.Forbidden, discord.HTTPException) as exc:
+        print(f"[debug] external_services_channel_failed guild={guild.id} err={exc}", flush=True)
+        return None
+
+
 def build_welcome_embed(
     member_mention: str,
     rules_mention: str,
@@ -324,6 +434,17 @@ class VerifyView(discord.ui.View):
 class Setup(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._external_services_locks: dict[int, asyncio.Lock] = {}
+
+    async def _ensure_external_services_channel(self, guild: discord.Guild):
+        lock = self._external_services_locks.setdefault(guild.id, asyncio.Lock())
+        async with lock:
+            return await ensure_external_services_channel(guild)
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        for guild in self.bot.guilds:
+            await self._ensure_external_services_channel(guild)
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -477,6 +598,7 @@ class Setup(commands.Cog):
             await guide_message.edit(embed=build_guide_embed(), view=BotGuideView())
         else:
             await guide_channel.send(embed=build_guide_embed(), view=BotGuideView())
+        await self._ensure_external_services_channel(guild)
 
         study_cat = await get_or_create_category("📚 GÓC HỌC TẬP - NGỮ VĂN", member_only)
         await get_or_create_forum(study_cat, "hỏi-đáp-bài-tập")

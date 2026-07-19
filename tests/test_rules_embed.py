@@ -1,10 +1,21 @@
 # -*- coding: utf-8 -*-
+import inspect
 import os
 import unittest
 
 os.environ.setdefault("GROQ_API_KEYS", "x")
 
-from cogs.setup import DEFAULT_RULES, build_rules_embed, build_rules_embeds, _link_channels, _roman
+from cogs.setup import (
+    DEFAULT_RULES,
+    EXTERNAL_SERVICES_CHANNEL_NAME,
+    EXTERNAL_SERVICES_EMBED_TITLE,
+    Setup,
+    _link_channels,
+    _roman,
+    build_external_services_embed,
+    build_rules_embed,
+    build_rules_embeds,
+)
 
 
 class FakeChannel:
@@ -86,6 +97,20 @@ class RulesEmbedTest(unittest.TestCase):
         for embed in embeds:
             self.assertLessEqual(len(embed.fields), 25)
             self.assertLessEqual(len(embed), 6000)
+
+    def test_external_services_announcement_is_customer_ready(self):
+        embed = build_external_services_embed()
+        self.assertEqual(embed.title, EXTERNAL_SERVICES_EMBED_TITLE)
+        self.assertLessEqual(len(embed), 6000)
+        self.assertEqual(len(embed.fields), 4)
+        self.assertIn("Chấm chữa", embed.fields[0].name)
+        self.assertIn("mục tiêu sử dụng", embed.fields[-1].value)
+
+    def test_external_services_channel_is_maintained_on_ready(self):
+        source = inspect.getsource(Setup)
+        self.assertIn("async def on_ready", source)
+        self.assertIn("_ensure_external_services_channel", source)
+        self.assertEqual(EXTERNAL_SERVICES_CHANNEL_NAME, "dịch-vụ-ngoài")
 
 
 if __name__ == "__main__":
