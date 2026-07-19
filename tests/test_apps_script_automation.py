@@ -21,6 +21,8 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function hvhnXuLyNhanh()", self.src)
         self.assertIn("ScriptApp.newTrigger('hvhnXuLyNhanh')", self.src)
         self.assertIn("ScriptApp.newTrigger('xuLyDonPreorderTuDong')", self.src)
+        self.assertIn("function _schedulePreorderWorkerSoon(delayMs)", self.src)
+        self.assertIn("PREORDER_FAST_DELAY_MS = 10000", self.src)
         self.assertIn("skipDistributionWhenIdle: true", self.src)
         self.assertIn("retryMissingWhenIdle: true", self.src)
         self.assertIn("skipPostSync: true", self.src)
@@ -241,12 +243,14 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("loi_tao_invite", worker)
         self.assertIn("loi_gui_email", worker)
         self.assertIn("PREORDER_STALE_MINUTES = 2", self.src)
-        self.assertIn("note.replace(/^worker_bat_dau\\s+/, '') || rows[i][0]", worker)
+        self.assertIn("_preorderRetryDue(status, note, rows[i][0])", worker)
+        self.assertIn("_preorderScheduleFailure", worker)
         self.assertIn("function kiemTraEmailPreorder()", self.src)
         self.assertIn("function guiLaiLinkDiscordChoPreorderDangChon()", self.src)
         resend = self.src[self.src.index("function guiLaiLinkDiscordChoPreorderDangChon()") :]
         self.assertIn("'cho_tao_invite'", resend)
         self.assertNotIn("_pmtMintInvite", resend)
+        self.assertIn("_schedulePreorderWorkerSoon(PREORDER_FAST_DELAY_MS)", resend)
         system_tabs = self.src[self.src.index("function isSystemTab"):self.src.index("function _isValidClientTabName")]
         self.assertIn("PMT_ORDER_TAB, PREORDER_TAB", system_tabs)
 

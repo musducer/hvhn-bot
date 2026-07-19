@@ -379,6 +379,7 @@ function _triggerHandlers() {
     tuDongXuLyFileMoi: true,
     kiemTraHetHan: true,
     xuLyDonPreorderTuDong: true,
+    xuLyDonPreorderNhanh: true,
   };
 }
 
@@ -3065,6 +3066,9 @@ function _preorderFindRowByEmail(sheet, email) {
 // hỗ trợ, quản lý dùng nút gửi lại link trong tab _khach_preorder, không mở lại Form.
 // Bot vẫn lưu pending member nên khách bấm invite rồi kích hoạt ở #truy-cập-tài-liệu như luồng thường.
 const PREORDER_STALE_MINUTES = 2;
+const PREORDER_FAST_TRIGGER_HANDLER = 'xuLyDonPreorderNhanh';
+const PREORDER_FAST_DELAY_MS = 10000;
+const PREORDER_MAX_AUTO_RETRIES = 3;
 
 function _preorderIsStale(lastAttemptAt) {
   const created = new Date(lastAttemptAt);
@@ -3074,6 +3078,70 @@ function _preorderIsStale(lastAttemptAt) {
 function _preorderMarkFailure(sheet, row, status, error) {
   sheet.getRange(row, 5).setValue(status);
   sheet.getRange(row, 8).setValue(String((error && error.message) || error || '').slice(0, 500));
+}
+
+function _preorderRetryInfo(note) {
+  const text = String(note || '');
+  const count = Number((text.match(/retry=(\d+)/) || [])[1] || 0);
+  const when = (text.match(/retry_after=([^;\s]+)/) || [])[1] || '';
+  return { count: count, when: when };
+}
+
+function _preorderRetryDue(status, note, createdAt) {
+  if (status === 'cho_tao_invite') return true;
+  if (status === 'dang_tao_invite') {
+    return _preorderIsStale(String(note || '').replace(/^worker_bat_dau\s+/, '') || createdAt);
+  }
+  if (status !== 'loi_tao_invite' && status !== 'loi_gui_email') return false;
+  const retry = _preorderRetryInfo(note);
+  if (!retry.when) return false;
+  const due = new Date(retry.when);
+  return !isNaN(due.getTime()) && due.getTime() <= _now().getTime();
+}
+
+function _ensurePreorderWorkerTrigger() {
+  if (_coTrigger('xuLyDonPreorderTuDong')) return;
+  ScriptApp.newTrigger('xuLyDonPreorderTuDong').timeBased().everyMinutes(1).create();
+  ghiLog('Tự chữa trigger pre-order', 'Đã cài worker mỗi 1 phút');
+}
+
+// after(10 giây) là best-effort của Google Apps Script; trigger 1 phút bên trên
+// vẫn là đường dự phòng đáng tin cậy nếu nền tảng làm tròn lịch chạy.
+function _schedulePreorderWorkerSoon(delayMs) {
+  try {
+    _ensurePreorderWorkerTrigger();
+    const hasFast = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === PREORDER_FAST_TRIGGER_HANDLER);
+    if (!hasFast) {
+      ScriptApp.newTrigger(PREORDER_FAST_TRIGGER_HANDLER)
+        .timeBased()
+        .after(Math.max(1000, Number(delayMs) || PREORDER_FAST_DELAY_MS))
+        .create();
+    }
+  } catch (e) {
+    ghiLog('LỖI lên lịch worker pre-order', (e && e.message) || String(e));
+  }
+}
+
+function xuLyDonPreorderNhanh() {
+  // Đây là trigger một lần; tự dọn trước khi xử lý để không tiêu quota trigger.
+  ScriptApp.getProjectTriggers().forEach(t => {
+    if (t.getHandlerFunction() === PREORDER_FAST_TRIGGER_HANDLER) ScriptApp.deleteTrigger(t);
+  });
+  xuLyDonPreorderTuDong();
+}
+
+function _preorderScheduleFailure(sheet, row, status, error) {
+  const previous = _preorderRetryInfo(sheet.getRange(row, 8).getValue());
+  const retryCount = previous.count + 1;
+  const detail = String((error && error.message) || error || '').slice(0, 420);
+  if (retryCount > PREORDER_MAX_AUTO_RETRIES) {
+    _preorderMarkFailure(sheet, row, 'can_admin_ho_tro', 'retry=' + previous.count + '; ' + detail);
+    return;
+  }
+  const retryAt = new Date(_now().getTime() + PREORDER_FAST_DELAY_MS);
+  _preorderMarkFailure(sheet, row, status,
+    'retry=' + retryCount + '; retry_after=' + retryAt.toISOString() + '; ' + detail);
+  _schedulePreorderWorkerSoon(PREORDER_FAST_DELAY_MS);
 }
 
 function _preorderRecordRejected(name, email, status, note) {
@@ -3106,9 +3174,7 @@ function xuLyDonPreorderTuDong() {
       const code = String(rows[i][3] || _preorderCode(email)).trim();
       const status = String(rows[i][4] || '');
       const note = String(rows[i][7] || '');
-      const lastAttemptAt = note.replace(/^worker_bat_dau\s+/, '') || rows[i][0];
-      const shouldProcess = status === 'cho_tao_invite'
-        || (status === 'dang_tao_invite' && _preorderIsStale(lastAttemptAt));
+      const shouldProcess = _preorderRetryDue(status, note, rows[i][0]);
       if (!shouldProcess) continue;
 
       if (!_isValidPersonName(name) || !_isValidEmail(email)) {
@@ -3132,7 +3198,7 @@ function xuLyDonPreorderTuDong() {
         sheet.getRange(row, 8).setValue(out.reused ? 'gui_lai_invite_cu' : 'invite_moi');
         ghiLog('Đã cấp link Discord pre-order', code + ' - ' + name + ' - ' + email);
       } catch (e) {
-        _preorderMarkFailure(sheet, row, stage === 'gui_email' ? 'loi_gui_email' : 'loi_tao_invite', e);
+        _preorderScheduleFailure(sheet, row, stage === 'gui_email' ? 'loi_gui_email' : 'loi_tao_invite', e);
         ghiLog('LỖI worker pre-order', code + ' - ' + ((e && e.message) || String(e)));
       }
       return; // Mỗi lượt chỉ xử lý 1 đơn để tránh chuỗi request mạng kéo dài.
@@ -3172,6 +3238,7 @@ function xuLyFormPreorder(e) {
     }
     row = sheet.getLastRow() + 1;
     sheet.getRange(row, 1, 1, 8).setValues([[new Date(), name, email, code, 'cho_tao_invite', '', '', '']]);
+    _schedulePreorderWorkerSoon(PREORDER_FAST_DELAY_MS);
     ghiLog('Đã nhận pre-order, chờ tạo invite', code + ' - ' + name + ' - ' + email);
   } catch (err) {
     ghiLog('LỖI Form pre-order', (err && err.message) || String(err));
@@ -3196,6 +3263,7 @@ function guiLaiLinkDiscordChoPreorderDangChon() {
   sheet.getRange(row, 4).setValue(code);
   sheet.getRange(row, 5).setValue('cho_tao_invite');
   sheet.getRange(row, 8).setValue('yeu_cau_gui_lai ' + new Date().toISOString());
+  _schedulePreorderWorkerSoon(PREORDER_FAST_DELAY_MS);
   ghiLog('Xếp hàng gửi lại link Discord pre-order', code + ' - ' + email);
-  SpreadsheetApp.getUi().alert('Đã xếp hàng gửi lại link. Hệ thống sẽ xử lý trong tối đa 1 phút; nếu lỗi, trạng thái và lý do sẽ hiện ngay trên dòng này.');
+  SpreadsheetApp.getUi().alert('Đã xếp hàng gửi lại link. Hệ thống sẽ thử xử lý sau khoảng 10 giây; trigger 1 phút là đường dự phòng. Nếu lỗi, trạng thái và lý do sẽ hiện ngay trên dòng này.');
 }
