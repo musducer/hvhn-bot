@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+
+branch="$(git symbolic-ref --quiet --short HEAD || true)"
+[ "$branch" = "main" ] || exit 0
+
+changed="$(git diff --name-only origin/main...HEAD 2>/dev/null || true)"
+case "$changed" in
+  *phanphoi.gs*|*appsscript.json*) ;;
+  *) exit 0 ;;
+esac
+
+root="$(git rev-parse --show-toplevel)"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$root/tools/deploy_apps_script.ps1"
