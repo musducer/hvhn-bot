@@ -1,4 +1,6 @@
 .env
+.clasp.json
+.apps-script-deployment.json
 xp.db
 __pycache__/
 *.pyc

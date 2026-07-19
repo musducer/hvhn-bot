@@ -27,5 +27,7 @@ jobs:
         run: python -c "import bot, cogs.ai, cogs.help, md_knowledge, md_embeddings"
       - name: Apps Script syntax check
         run: node --check - < phanphoi.gs
+      - name: Verify Apps Script customer email delivery paths
+        run: node tests/test_customer_email_delivery.js
       - name: Run tests
         run: python -m unittest discover -s tests -v

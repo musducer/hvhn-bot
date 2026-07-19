@@ -2200,6 +2200,7 @@ const PMT_PAYOS_API = 'https://api-merchant.payos.vn';
 const CUSTOMER_GUIDE_FILE_ID = '1DeHcLRGqFWfNVETFRdfx-4dro1-yMsEf';
 const CUSTOMER_GUIDE_URL = 'https://docs.google.com/document/d/1DeHcLRGqFWfNVETFRdfx-4dro1-yMsEf/edit?usp=sharing';
 const CUSTOMER_NOTICE_IMAGE_FILE_ID_PROP = 'CUSTOMER_NOTICE_IMAGE_FILE_ID';
+const CUSTOMER_MAIL_RELEASE = '2026-07-19-guide-mail-2';
 
 function _pmtProp(key, def) {
   const v = PropertiesService.getScriptProperties().getProperty(key);
@@ -2257,14 +2258,19 @@ function caiDatTaiLieuHuongDanKhach() {
 }
 
 function _customerOnboardingMaterials() {
-  const attachments = [];
-  let guideAttached = false;
-  let noticeAttached = false;
+  const materials = {
+    attachments: [],
+    guideAttachment: null,
+    noticeAttachment: null,
+    guideAttached: false,
+    noticeAttached: false,
+  };
 
   try {
     const guide = DriveApp.getFileById(CUSTOMER_GUIDE_FILE_ID);
-    attachments.push(guide.getAs(MimeType.PDF).setName('Huong-dan-su-dung-he-thong-HVHN.pdf'));
-    guideAttached = true;
+    materials.guideAttachment = guide.getAs(MimeType.PDF).setName('Huong-dan-su-dung-he-thong-HVHN.pdf');
+    materials.attachments.push(materials.guideAttachment);
+    materials.guideAttached = true;
   } catch (e) {
     ghiLog('LỖI đính kèm hướng dẫn khách', (e && e.message) || String(e));
   }
@@ -2276,14 +2282,15 @@ function _customerOnboardingMaterials() {
       if (String(notice.getMimeType() || '').indexOf('image/') !== 0) {
         throw new Error('File ảnh lưu ý không còn là ảnh.');
       }
-      attachments.push(notice.getBlob().setName(notice.getName()));
-      noticeAttached = true;
+      materials.noticeAttachment = notice.getBlob().setName(notice.getName());
+      materials.attachments.push(materials.noticeAttachment);
+      materials.noticeAttached = true;
     } catch (e) {
       ghiLog('LỖI đính kèm ảnh lưu ý khách', (e && e.message) || String(e));
     }
   }
 
-  return { attachments: attachments, guideAttached: guideAttached, noticeAttached: noticeAttached };
+  return materials;
 }
 
 function _customerOnboardingPlainText(materials) {
@@ -2316,28 +2323,70 @@ function _customerOnboardingHtml(materials) {
 }
 
 function _emptyCustomerOnboardingMaterials() {
-  return { attachments: [], guideAttached: false, noticeAttached: false };
+  return {
+    attachments: [],
+    guideAttachment: null,
+    noticeAttachment: null,
+    guideAttached: false,
+    noticeAttached: false,
+  };
 }
 
-// Gửi mail không được phép thất bại chỉ vì một file đính kèm bị lỗi. Nếu Drive
-// trả file lỗi/quá lớn, gửi lại ngay bản không đính kèm nhưng vẫn có link hướng dẫn.
+function _guideOnlyCustomerOnboardingMaterials(materials) {
+  const guide = materials && materials.guideAttachment;
+  if (!guide) return _emptyCustomerOnboardingMaterials();
+  return {
+    attachments: [guide],
+    guideAttachment: guide,
+    noticeAttachment: null,
+    guideAttached: true,
+    noticeAttached: false,
+  };
+}
+
+function _sendCustomerMail(buildMessage, materials, attachments) {
+  const message = buildMessage(materials);
+  if (attachments && attachments.length) message.attachments = attachments;
+  MailApp.sendEmail(message);
+}
+
+// The guide is a required delivery item. An optional notice image must never
+// cause the guide PDF to disappear: retry with the guide only before falling
+// back to the guide link in the message body.
 function _sendCustomerAccessEmail(buildMessage, materials) {
   const current = materials || _emptyCustomerOnboardingMaterials();
   const attachments = current.attachments || [];
-  const message = buildMessage(current);
-  if (!attachments.length) {
-    MailApp.sendEmail(message);
-    return 'sent_without_attachments';
+  if (attachments.length) {
+    try {
+      _sendCustomerMail(buildMessage, current, attachments);
+      const result = current.guideAttached && current.noticeAttached
+        ? 'sent_with_guide_and_notice'
+        : (current.guideAttached ? 'sent_with_guide_only' : 'sent_with_notice_only');
+      ghiLog('Gửi mail truy cập khách', CUSTOMER_MAIL_RELEASE + ' ' + result);
+      return result;
+    } catch (attachmentError) {
+      ghiLog('LỖI mail khách kèm đủ tệp', (attachmentError && attachmentError.message) || String(attachmentError));
+    }
+  }
+
+  const guideOnly = _guideOnlyCustomerOnboardingMaterials(current);
+  if (guideOnly.attachments.length && attachments.length !== guideOnly.attachments.length) {
+    try {
+      _sendCustomerMail(buildMessage, guideOnly, guideOnly.attachments);
+      ghiLog('Gửi mail truy cập khách', CUSTOMER_MAIL_RELEASE + ' sent_with_guide_only_after_attachment_fallback');
+      return 'sent_with_guide_only';
+    } catch (guideError) {
+      ghiLog('LỖI mail khách kèm PDF hướng dẫn', (guideError && guideError.message) || String(guideError));
+    }
   }
 
   try {
-    message.attachments = attachments;
-    MailApp.sendEmail(message);
-    return 'sent_with_attachments';
-  } catch (attachmentError) {
-    ghiLog('LỖI mail khách kèm tệp - gửi lại không đính kèm', (attachmentError && attachmentError.message) || String(attachmentError));
-    MailApp.sendEmail(buildMessage(_emptyCustomerOnboardingMaterials()));
-    return 'sent_without_attachments';
+    _sendCustomerMail(buildMessage, _emptyCustomerOnboardingMaterials(), []);
+    ghiLog('Gửi mail truy cập khách', CUSTOMER_MAIL_RELEASE + ' sent_with_guide_link_only');
+    return 'sent_with_guide_link_only';
+  } catch (mailError) {
+    ghiLog('LỖI gửi mail truy cập khách', (mailError && mailError.message) || String(mailError));
+    throw mailError;
   }
 }
 
@@ -2715,12 +2764,12 @@ function _pmtMintAndSendForRow(sheet, rowNumber, opts) {
   }
   const out = _pmtMintInvite(maDon, name, email);
   if (!out.invite_url) return out.error || 'mint_loi';
-  _pmtSendInviteEmail(email, name, out.invite_url);
+  const mailResult = _pmtSendInviteEmail(email, name, out.invite_url);
   sheet.getRange(rowNumber, 6).setValue('da_xu_ly');
   sheet.getRange(rowNumber, 7).setValue(out.invite_url);
   if (opts.paidAt) sheet.getRange(rowNumber, 8).setValue(opts.paidAt);
   sheet.getRange(rowNumber, 9).setValue(new Date());
-  sheet.getRange(rowNumber, 10).setValue((opts.note || '') + (out.reused ? ' reused_invite' : ''));
+  sheet.getRange(rowNumber, 10).setValue((opts.note || '') + (out.reused ? ' reused_invite' : '') + ' mail=' + mailResult);
   ghiLog('Đã cấp link Discord', maDon + ' - ' + email + (opts.note ? ' - ' + opts.note : ''));
   return 'ok';
 }
@@ -3191,11 +3240,11 @@ function xuLyDonPreorderTuDong() {
         if (!out.invite_url) throw new Error(out.error || 'Không tạo được invite Discord.');
         sheet.getRange(row, 5).setValue('dang_gui_email');
         stage = 'gui_email';
-        _preorderSendInviteEmail(email, name, out.invite_url);
+        const mailResult = _preorderSendInviteEmail(email, name, out.invite_url);
         sheet.getRange(row, 5).setValue('da_gui_link');
         sheet.getRange(row, 6).setValue(out.invite_url);
         sheet.getRange(row, 7).setValue(new Date());
-        sheet.getRange(row, 8).setValue(out.reused ? 'gui_lai_invite_cu' : 'invite_moi');
+        sheet.getRange(row, 8).setValue((out.reused ? 'gui_lai_invite_cu' : 'invite_moi') + '; mail=' + mailResult);
         ghiLog('Đã cấp link Discord pre-order', code + ' - ' + name + ' - ' + email);
       } catch (e) {
         _preorderScheduleFailure(sheet, row, stage === 'gui_email' ? 'loi_gui_email' : 'loi_tao_invite', e);
