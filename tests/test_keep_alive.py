@@ -1,4 +1,5 @@
 import unittest
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from unittest.mock import patch
 
 import keep_alive
@@ -38,6 +39,51 @@ class KeepAliveWebhookTest(unittest.TestCase):
                 headers={"X-HVHN-Secret": "secret"},
             )
         self.assertEqual(response.status_code, 413)
+
+    def test_mint_timeout_returns_promptly_and_cancels_pending_work(self):
+        class SlowFuture:
+            cancelled = False
+
+            def result(self, timeout):
+                raise FutureTimeoutError()
+
+            def cancel(self):
+                self.cancelled = True
+
+        class Cog:
+            async def mint_invite_for_order(self, *_args):
+                return {}
+
+        class Loop:
+            def is_running(self):
+                return True
+
+        class Bot:
+            loop = Loop()
+
+            def get_cog(self, _name):
+                return Cog()
+
+        future = SlowFuture()
+        payload = {
+            "order_code": "ORDER1",
+            "name": "An",
+            "email": "an@example.com",
+            "duration_days": 30,
+        }
+        def submit(coro, _loop):
+            coro.close()
+            return future
+
+        with patch.object(keep_alive, "MINT_SECRET", "secret"), \
+             patch.object(keep_alive, "_bot", Bot()), \
+             patch("keep_alive.asyncio.run_coroutine_threadsafe", side_effect=submit):
+            response = self.client.post(
+                "/mint-invite", json=payload, headers={"X-HVHN-Secret": "secret"}
+            )
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.get_json()["error"], "mint_timeout")
+        self.assertTrue(future.cancelled)
 
 
 if __name__ == "__main__":

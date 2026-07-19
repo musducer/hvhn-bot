@@ -20,6 +20,7 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn(".everyMinutes(5)", self.src)
         self.assertIn("function hvhnXuLyNhanh()", self.src)
         self.assertIn("ScriptApp.newTrigger('hvhnXuLyNhanh')", self.src)
+        self.assertIn("ScriptApp.newTrigger('xuLyDonPreorderTuDong')", self.src)
         self.assertIn("skipDistributionWhenIdle: true", self.src)
         self.assertIn("retryMissingWhenIdle: true", self.src)
         self.assertIn("skipPostSync: true", self.src)
@@ -199,7 +200,7 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function caiDatTaiLieuHuongDanKhach()", self.src)
         self.assertIn("CUSTOMER_NOTICE_IMAGE_FILE_ID_PROP", self.src)
         self.assertIn("function _customerOnboardingMaterials()", self.src)
-        self.assertIn("message.attachments = materials.attachments", self.src)
+        self.assertIn("message.attachments = attachments", self.src)
         self.assertIn("_customerOnboardingPlainText(materials)", paid_email)
         self.assertIn("_customerOnboardingHtml(materials)", paid_email)
         self.assertIn("_sendCustomerAccessEmail", paid_email)
@@ -222,14 +223,30 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("if (!form) form = _taoFormPreorder(props);", self.src)
         self.assertNotIn("PREORDER_ALLOWED_" + "EMAILS_PROP", self.src)
 
-    def test_preorder_mints_idempotent_invite_and_is_not_client_data_tab(self):
+    def test_preorder_queues_idempotent_invites_and_is_not_client_data_tab(self):
         self.assertIn("function xuLyFormPreorder(e)", self.src)
+        self.assertIn("function xuLyDonPreorderTuDong()", self.src)
         self.assertIn("function _preorderCode(email)", self.src)
-        self.assertIn("const out = _pmtMintInvite(code, name, email);", self.src)
+        worker = self.src[
+            self.src.index("function xuLyDonPreorderTuDong()"):
+            self.src.index("function xuLyFormPreorder(e)")
+        ]
+        form_handler = self.src[
+            self.src.index("function xuLyFormPreorder(e)"):
+            self.src.index("function guiLaiLinkDiscordChoPreorderDangChon()")
+        ]
+        self.assertIn("const out = _pmtMintInvite(code, name, email);", worker)
+        self.assertIn("'cho_tao_invite'", form_handler)
+        self.assertNotIn("_pmtMintInvite", form_handler)
+        self.assertIn("loi_tao_invite", worker)
+        self.assertIn("loi_gui_email", worker)
+        self.assertIn("PREORDER_STALE_MINUTES = 2", self.src)
+        self.assertIn("note.replace(/^worker_bat_dau\\s+/, '') || rows[i][0]", worker)
+        self.assertIn("function kiemTraEmailPreorder()", self.src)
         self.assertIn("function guiLaiLinkDiscordChoPreorderDangChon()", self.src)
         resend = self.src[self.src.index("function guiLaiLinkDiscordChoPreorderDangChon()") :]
-        self.assertIn("LockService.getScriptLock()", resend)
-        self.assertIn("if (locked) lock.releaseLock()", resend)
+        self.assertIn("'cho_tao_invite'", resend)
+        self.assertNotIn("_pmtMintInvite", resend)
         system_tabs = self.src[self.src.index("function isSystemTab"):self.src.index("function _isValidClientTabName")]
         self.assertIn("PMT_ORDER_TAB, PREORDER_TAB", system_tabs)
 

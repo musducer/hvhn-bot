@@ -2,6 +2,7 @@ import os
 import asyncio
 import hmac
 import re
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from threading import Thread
 
 from flask import Flask, request, jsonify
@@ -63,11 +64,17 @@ def mint_invite():
     if cog is None or loop is None or not loop.is_running():
         return jsonify({"error": "bot_not_ready"}), 503
 
+    fut = None
     try:
         fut = asyncio.run_coroutine_threadsafe(
             cog.mint_invite_for_order(order_code, name, email, days), loop
         )
         result = fut.result(timeout=MINT_TIMEOUT)
+    except FutureTimeoutError:
+        if fut is not None:
+            fut.cancel()
+        print(f"[debug] mint_invite_timeout order={order_code} timeout={MINT_TIMEOUT}", flush=True)
+        return jsonify({"error": "mint_timeout"}), 504
     except ValueError as exc:
         return jsonify({"error": "invalid_input", "detail": str(exc)}), 400
     except Exception as exc:  # Trả lỗi gọn cho Apps Script; bot vẫn ghi chi tiết.
@@ -80,7 +87,7 @@ def mint_invite():
 def run():
     port = env_int("PORT", 8080, minimum=1, maximum=65535)
     # Render exposes this process through its own proxy, so binding all interfaces is required.
-    app.run(host='0.0.0.0', port=port)  # nosec B104
+    app.run(host='0.0.0.0', port=port, threaded=True)  # nosec B104
 
 
 def keep_alive(bot=None):

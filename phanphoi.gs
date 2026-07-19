@@ -153,6 +153,7 @@ function onOpen() {
     .addSubMenu(ui.createMenu('🎟️ Khách pre-order')
       .addItem('1. Kết nối sheet responses cũ', 'caiDatEmailPreorder')
       .addItem('2. Tạo/lấy lại Form pre-order', 'taoLaiFormPreorder')
+      .addItem('🔎 Kiểm tra email pre-order', 'kiemTraEmailPreorder')
       .addItem('🔁 Gửi lại link Discord cho khách đang chọn', 'guiLaiLinkDiscordChoPreorderDangChon'))
     .addToUi();
 }
@@ -377,6 +378,7 @@ function _triggerHandlers() {
     hvhnXuLyNhanh: true,
     tuDongXuLyFileMoi: true,
     kiemTraHetHan: true,
+    xuLyDonPreorderTuDong: true,
   };
 }
 
@@ -420,6 +422,7 @@ function kiemTraTuDongHoa() {
     '- hvhnTuDongHoa: ' + (counts.hvhnTuDongHoa || 0),
     '- hvhnXuLyNhanh: ' + (counts.hvhnXuLyNhanh || 0),
     '- kiemTraHetHan: ' + (counts.kiemTraHetHan || 0),
+    '- xuLyDonPreorderTuDong: ' + (counts.xuLyDonPreorderTuDong || 0),
     '- Trigger edit cũ cần dọn: ' + _demTriggerLegacyDrive(),
     '',
     ok
@@ -431,7 +434,8 @@ function kiemTraTuDongHoa() {
 
 function damBaoTuDongHoa() {
   if (!_coTrigger('hvhnTuDongHoa') || !_coTrigger('hvhnXuLyNhanh')
-      || !_coTrigger('kiemTraHetHan') || _demTriggerLegacyDrive()) {
+      || !_coTrigger('kiemTraHetHan') || !_coTrigger('xuLyDonPreorderTuDong')
+      || _demTriggerLegacyDrive()) {
     caiDatTuDongHoa();
     return;
   }
@@ -467,13 +471,18 @@ function caiDatTuDongHoa() {
     .everyDays(1)
     .create();
 
+  ScriptApp.newTrigger('xuLyDonPreorderTuDong')
+    .timeBased()
+    .everyMinutes(1)
+    .create();
+
   ensureDashboard();
   ensureStaging();
   ensureRegistry();
   capNhatTaiLieu();
   capNhatDashboard();
-  ghiLog('Cài tự động hoá', 'làn nhanh new_rows mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h; đã dọn ' + removedLegacy + ' trigger edit cũ');
-  ss.toast('Đã cài tự động hoá. Làn nhanh xử lý file mới mỗi 1 phút; không cần bấm menu để cập nhật sheet.');
+  ghiLog('Cài tự động hoá', 'làn nhanh new_rows và pre-order mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h; đã dọn ' + removedLegacy + ' trigger edit cũ');
+  ss.toast('Đã cài tự động hoá. File mới và pre-order chờ xử lý mỗi 1 phút.');
 }
 
 function _kiemTraQuyenDrive() {
@@ -2283,9 +2292,10 @@ function _customerOnboardingPlainText(materials) {
   const attachmentText = attached.length
     ? ' Email này có đính kèm ' + attached.join(' và ') + '.'
     : '';
+  const requiredMaterials = attached.length ? ' hướng dẫn và các tài liệu đính kèm' : ' hướng dẫn';
   return '\n\nTrước khi sử dụng hệ thống, bạn vui lòng đọc kỹ hướng dẫn tại: ' + CUSTOMER_GUIDE_URL +
     attachmentText +
-    '\n\nViệc đọc đầy đủ hướng dẫn và các tài liệu đính kèm là bắt buộc để tài khoản, học liệu và quyền truy cập hoạt động ổn định. Sau khi đã đọc, bạn mới tiếp tục kích hoạt và sử dụng hệ thống.';
+    '\n\nViệc đọc đầy đủ' + requiredMaterials + ' là bắt buộc để tài khoản, học liệu và quyền truy cập hoạt động ổn định. Sau khi đã đọc, bạn mới tiếp tục kích hoạt và sử dụng hệ thống.';
 }
 
 function _customerOnboardingHtml(materials) {
@@ -2295,17 +2305,39 @@ function _customerOnboardingHtml(materials) {
   const attachmentText = attached.length
     ? '<p style="margin:8px 0 0">Email này có đính kèm ' + _pmtEsc(attached.join(' và ')) + '.</p>'
     : '';
+  const materialText = attached.length ? ' và các tài liệu đính kèm' : '';
   return '<div style="margin:22px 0;padding:14px 16px;background:#f1f8f4;border-left:4px solid #0b8043;border-radius:4px">' +
     '<p style="margin:0 0 8px"><strong>Việc cần làm trước khi sử dụng hệ thống</strong></p>' +
-    '<p style="margin:0">Vui lòng <strong>đọc kỹ</strong> <a href="' + _pmtEsc(CUSTOMER_GUIDE_URL) + '">Hướng dẫn sử dụng hệ thống HVHN</a> và các tài liệu đính kèm trước khi kích hoạt quyền truy cập.</p>' +
+    '<p style="margin:0">Vui lòng <strong>đọc kỹ</strong> <a href="' + _pmtEsc(CUSTOMER_GUIDE_URL) + '">Hướng dẫn sử dụng hệ thống HVHN</a>' + materialText + ' trước khi kích hoạt quyền truy cập.</p>' +
     attachmentText +
     '<p style="margin:8px 0 0">Đây là bước bắt buộc để tài khoản, học liệu và quyền truy cập của bạn hoạt động ổn định.</p>' +
     '</div>';
 }
 
-function _sendCustomerAccessEmail(message, materials) {
-  message.attachments = materials.attachments;
-  MailApp.sendEmail(message);
+function _emptyCustomerOnboardingMaterials() {
+  return { attachments: [], guideAttached: false, noticeAttached: false };
+}
+
+// Gửi mail không được phép thất bại chỉ vì một file đính kèm bị lỗi. Nếu Drive
+// trả file lỗi/quá lớn, gửi lại ngay bản không đính kèm nhưng vẫn có link hướng dẫn.
+function _sendCustomerAccessEmail(buildMessage, materials) {
+  const current = materials || _emptyCustomerOnboardingMaterials();
+  const attachments = current.attachments || [];
+  const message = buildMessage(current);
+  if (!attachments.length) {
+    MailApp.sendEmail(message);
+    return 'sent_without_attachments';
+  }
+
+  try {
+    message.attachments = attachments;
+    MailApp.sendEmail(message);
+    return 'sent_with_attachments';
+  } catch (attachmentError) {
+    ghiLog('LỖI mail khách kèm tệp - gửi lại không đính kèm', (attachmentError && attachmentError.message) || String(attachmentError));
+    MailApp.sendEmail(buildMessage(_emptyCustomerOnboardingMaterials()));
+    return 'sent_without_attachments';
+  }
 }
 
 function _pmtOut(s) { return ContentService.createTextOutput(s); }
@@ -2659,16 +2691,18 @@ function _pmtMintInvite(maDon, name, email) {
 }
 
 function _pmtSendInviteEmail(email, name, inviteUrl) {
-  const materials = _customerOnboardingMaterials();
-  const body = 'Chào ' + name + ',\n\nThanh toán của bạn đã được xác nhận. Link tham gia Discord HVHN: ' + inviteUrl + _customerOnboardingPlainText(materials) + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
-  const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
-    '<h2 style="margin:0 0 8px;color:#0b8043">HVHN · Thanh toán đã được xác nhận</h2><p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
-    '<p>Hệ thống đã xác nhận thanh toán của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
-    '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
-    _customerOnboardingHtml(materials) +
-    '<p>Sau khi vào Discord, hãy vào kênh <strong>#truy-cập-tài-liệu</strong> và bấm <strong>“Kích hoạt quyền truy cập tài liệu”</strong> để điền Họ tên + Email.</p>' +
-    '<p style="font-size:13px;color:#5f6368">Link mời có giới hạn sử dụng. Nếu link hết hiệu lực, hãy phản hồi email này để được hỗ trợ.</p><p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
-  _sendCustomerAccessEmail({ to: email, subject: '[HVHN] Thanh toán thành công – link Discord của bạn', body: body, htmlBody: html, name: 'HVHN' }, materials);
+  const buildMessage = function(materials) {
+    const body = 'Chào ' + name + ',\n\nThanh toán của bạn đã được xác nhận. Link tham gia Discord HVHN: ' + inviteUrl + _customerOnboardingPlainText(materials) + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
+    const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
+      '<h2 style="margin:0 0 8px;color:#0b8043">HVHN · Thanh toán đã được xác nhận</h2><p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
+      '<p>Hệ thống đã xác nhận thanh toán của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
+      '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
+      _customerOnboardingHtml(materials) +
+      '<p>Sau khi vào Discord, hãy vào kênh <strong>#truy-cập-tài-liệu</strong> và bấm <strong>“Kích hoạt quyền truy cập tài liệu”</strong> để điền Họ tên + Email.</p>' +
+      '<p style="font-size:13px;color:#5f6368">Link mời có giới hạn sử dụng. Nếu link hết hiệu lực, hãy phản hồi email này để được hỗ trợ.</p><p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
+    return { to: email, subject: '[HVHN] Thanh toán thành công – link Discord của bạn', body: body, htmlBody: html, name: 'HVHN' };
+  };
+  return _sendCustomerAccessEmail(buildMessage, _customerOnboardingMaterials());
 }
 
 function _pmtMintAndSendForRow(sheet, rowNumber, opts) {
@@ -2944,6 +2978,35 @@ function caiDatEmailPreorder() {
   ui.alert('Đã kết nối sheet responses cũ. Hiện đọc được ' + emails.length + ' email hợp lệ. Từ giờ allowlist tự cập nhật khi sheet responses có dòng mới.');
 }
 
+// Dùng khi cần kiểm tra nhanh một email có thực sự nằm trong allowlist hay đã
+// nhận invite trước đó chưa. Không gửi email và không thay đổi dữ liệu.
+function kiemTraEmailPreorder() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt('Kiểm tra email pre-order', 'Nhập email cần kiểm tra:', ui.ButtonSet.OK_CANCEL);
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  const email = String(response.getResponseText() || '').trim().toLowerCase();
+  if (!_isValidEmail(email)) {
+    ui.alert('Email không hợp lệ.');
+    return;
+  }
+
+  try {
+    const allowed = _preorderAllowedEmails();
+    const sheet = _preorderSheet();
+    const row = _preorderFindRowByEmail(sheet, email);
+    const status = row ? String(sheet.getRange(row, 5).getValue() || '') : '';
+    const note = row ? String(sheet.getRange(row, 8).getValue() || '') : '';
+    const message = allowed[email]
+      ? 'Email có trong allowlist pre-order.'
+      : 'Email KHÔNG có trong allowlist pre-order hiện tại.';
+    ui.alert(message + '\n\n' +
+      (row ? ('Dòng pre-order: ' + row + '\nTrạng thái: ' + (status || '(trống)') + '\nGhi chú: ' + (note || '(trống)')) : 'Chưa có lần gửi nào trong tab pre-order.') +
+      '\n\nHạn mức gửi email còn lại hôm nay: ' + MailApp.getRemainingDailyQuota());
+  } catch (e) {
+    ui.alert('Không kiểm tra được: ' + ((e && e.message) || String(e)));
+  }
+}
+
 function _taoFormPreorder(props) {
   const form = FormApp.create('HVHN — Xác nhận slot nhóm học tập');
   form.setDescription('Form dành cho khách đã được HVHN xác nhận slot trước đó. Điền đúng họ tên và email đã đăng ký để nhận link tham gia Discord riêng qua email.');
@@ -2971,18 +3034,20 @@ function taoLaiFormPreorder() {
 }
 
 function _preorderSendInviteEmail(email, name, inviteUrl) {
-  const materials = _customerOnboardingMaterials();
-  const body = 'Chào ' + name + ',\n\nHVHN đã xác nhận slot nhóm học tập của bạn. Bấm link sau để tham gia Discord: ' + inviteUrl + _customerOnboardingPlainText(materials) + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
-  const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
-    '<h2 style="margin:0 0 8px;color:#6a1b9a">HVHN · Xác nhận slot nhóm học tập</h2>' +
-    '<p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
-    '<p>HVHN đã xác nhận slot nhóm học tập của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
-    '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
-    _customerOnboardingHtml(materials) +
-    '<p>Sau khi vào Discord, hãy vào kênh <strong>#truy-cập-tài-liệu</strong> và bấm <strong>“Kích hoạt quyền truy cập tài liệu”</strong> để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.</p>' +
-    '<p style="font-size:13px;color:#5f6368">Link mời là link riêng, có giới hạn sử dụng. Nếu cần hỗ trợ, hãy phản hồi email này.</p>' +
-    '<p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
-  _sendCustomerAccessEmail({ to: email, subject: '[HVHN] Link tham gia nhóm học tập của bạn', body: body, htmlBody: html, name: 'HVHN' }, materials);
+  const buildMessage = function(materials) {
+    const body = 'Chào ' + name + ',\n\nHVHN đã xác nhận slot nhóm học tập của bạn. Bấm link sau để tham gia Discord: ' + inviteUrl + _customerOnboardingPlainText(materials) + '\n\nSau khi vào Discord, hãy vào kênh #truy-cập-tài-liệu và bấm “Kích hoạt quyền truy cập tài liệu” để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.\n\nTrân trọng,\nHVHN · Hồn Văn, Hồn Người';
+    const html = '<div style="max-width:620px;margin:auto;font-family:Arial,sans-serif;color:#202124;line-height:1.6">' +
+      '<h2 style="margin:0 0 8px;color:#6a1b9a">HVHN · Xác nhận slot nhóm học tập</h2>' +
+      '<p>Chào <strong>' + _pmtEsc(name) + '</strong>,</p>' +
+      '<p>HVHN đã xác nhận slot nhóm học tập của bạn. Bấm nút dưới đây để tham gia cộng đồng Discord HVHN.</p>' +
+      '<p style="text-align:center;margin:24px 0"><a href="' + _pmtEsc(inviteUrl) + '" style="display:inline-block;padding:12px 20px;background:#5865F2;color:#fff;text-decoration:none;border-radius:6px;font-weight:bold">Tham gia Discord HVHN</a></p>' +
+      _customerOnboardingHtml(materials) +
+      '<p>Sau khi vào Discord, hãy vào kênh <strong>#truy-cập-tài-liệu</strong> và bấm <strong>“Kích hoạt quyền truy cập tài liệu”</strong> để điền Họ tên + Email. Khi hoàn tất, hệ thống sẽ tiếp tục cấp học liệu theo quy trình của HVHN.</p>' +
+      '<p style="font-size:13px;color:#5f6368">Link mời là link riêng, có giới hạn sử dụng. Nếu cần hỗ trợ, hãy phản hồi email này để được hỗ trợ.</p>' +
+      '<p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
+    return { to: email, subject: '[HVHN] Link tham gia nhóm học tập của bạn', body: body, htmlBody: html, name: 'HVHN' };
+  };
+  return _sendCustomerAccessEmail(buildMessage, _customerOnboardingMaterials());
 }
 
 function _preorderFindRowByEmail(sheet, email) {
@@ -2999,6 +3064,84 @@ function _preorderFindRowByEmail(sheet, email) {
 // bị từ chối, kể cả khi nhiều người cùng dùng chung một hộp thư. Nếu khách cần
 // hỗ trợ, quản lý dùng nút gửi lại link trong tab _khach_preorder, không mở lại Form.
 // Bot vẫn lưu pending member nên khách bấm invite rồi kích hoạt ở #truy-cập-tài-liệu như luồng thường.
+const PREORDER_STALE_MINUTES = 2;
+
+function _preorderIsStale(lastAttemptAt) {
+  const created = new Date(lastAttemptAt);
+  return !isNaN(created.getTime()) && (_now().getTime() - created.getTime()) >= PREORDER_STALE_MINUTES * 60000;
+}
+
+function _preorderMarkFailure(sheet, row, status, error) {
+  sheet.getRange(row, 5).setValue(status);
+  sheet.getRange(row, 8).setValue(String((error && error.message) || error || '').slice(0, 500));
+}
+
+function _preorderRecordRejected(name, email, status, note) {
+  const sheet = _preorderSheet();
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const existing = _isValidEmail(cleanEmail) ? _preorderFindRowByEmail(sheet, cleanEmail) : 0;
+  if (existing) {
+    _preorderMarkFailure(sheet, existing, status, note);
+    return existing;
+  }
+  const code = _preorderCode(cleanEmail || ('invalid-' + Date.now()));
+  sheet.appendRow([new Date(), String(name || '').trim(), cleanEmail, code, status, '', '', String(note || '')]);
+  return sheet.getLastRow();
+}
+
+// Chạy bằng trigger riêng để Form submit không bị treo khi bot/Render đang khởi động.
+// Dòng đang tạo quá lâu được thử lại an toàn: endpoint bot idempotent theo mã pre-order.
+function xuLyDonPreorderTuDong() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
+  try {
+    const sheet = _preorderSheet();
+    const last = sheet.getLastRow();
+    if (last < 2) return;
+    const rows = sheet.getRange(2, 1, last - 1, 8).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      const row = i + 2;
+      const name = String(rows[i][1] || '').trim();
+      const email = String(rows[i][2] || '').trim().toLowerCase();
+      const code = String(rows[i][3] || _preorderCode(email)).trim();
+      const status = String(rows[i][4] || '');
+      const note = String(rows[i][7] || '');
+      const lastAttemptAt = note.replace(/^worker_bat_dau\s+/, '') || rows[i][0];
+      const shouldProcess = status === 'cho_tao_invite'
+        || (status === 'dang_tao_invite' && _preorderIsStale(lastAttemptAt));
+      if (!shouldProcess) continue;
+
+      if (!_isValidPersonName(name) || !_isValidEmail(email)) {
+        _preorderMarkFailure(sheet, row, 'loi_du_lieu', 'Tên hoặc email không hợp lệ.');
+        continue;
+      }
+
+      let stage = 'tao_invite';
+      try {
+        sheet.getRange(row, 4).setValue(code);
+        sheet.getRange(row, 5).setValue('dang_tao_invite');
+        sheet.getRange(row, 8).setValue('worker_bat_dau ' + new Date().toISOString());
+        const out = _pmtMintInvite(code, name, email);
+        if (!out.invite_url) throw new Error(out.error || 'Không tạo được invite Discord.');
+        sheet.getRange(row, 5).setValue('dang_gui_email');
+        stage = 'gui_email';
+        _preorderSendInviteEmail(email, name, out.invite_url);
+        sheet.getRange(row, 5).setValue('da_gui_link');
+        sheet.getRange(row, 6).setValue(out.invite_url);
+        sheet.getRange(row, 7).setValue(new Date());
+        sheet.getRange(row, 8).setValue(out.reused ? 'gui_lai_invite_cu' : 'invite_moi');
+        ghiLog('Đã cấp link Discord pre-order', code + ' - ' + name + ' - ' + email);
+      } catch (e) {
+        _preorderMarkFailure(sheet, row, stage === 'gui_email' ? 'loi_gui_email' : 'loi_tao_invite', e);
+        ghiLog('LỖI worker pre-order', code + ' - ' + ((e && e.message) || String(e)));
+      }
+      return; // Mỗi lượt chỉ xử lý 1 đơn để tránh chuỗi request mạng kéo dài.
+    }
+  } finally {
+    lock.releaseLock();
+  }
+}
+
 function xuLyFormPreorder(e) {
   const lock = LockService.getScriptLock();
   lock.waitLock(30000);
@@ -3010,11 +3153,13 @@ function xuLyFormPreorder(e) {
       else if (title.indexOf('email') >= 0) email = String(it.getResponse()).trim().toLowerCase();
     });
     if (!_isValidPersonName(name) || !_isValidEmail(email)) {
+      _preorderRecordRejected(name, email, 'tu_choi_du_lieu', 'Tên hoặc email không hợp lệ.');
       ghiLog('Từ chối Form pre-order (tên/email không hợp lệ)', name + ' - ' + email);
       return;
     }
     const allowed = _preorderAllowedEmails();
     if (!allowed[email]) {
+      _preorderRecordRejected(name, email, 'tu_choi_allowlist', 'Email không có trong sheet responses cũ.');
       ghiLog('Từ chối Form pre-order (email không có trong sheet responses cũ)', email);
       return;
     }
@@ -3026,15 +3171,8 @@ function xuLyFormPreorder(e) {
       return;
     }
     row = sheet.getLastRow() + 1;
-    sheet.getRange(row, 1, 1, 8).setValues([[new Date(), name, email, code, 'dang_tao_invite', '', '', '']]);
-    const out = _pmtMintInvite(code, name, email);
-    if (!out.invite_url) throw new Error(out.error || 'Không tạo được invite Discord.');
-    _preorderSendInviteEmail(email, name, out.invite_url);
-    sheet.getRange(row, 5).setValue('da_gui_link');
-    sheet.getRange(row, 6).setValue(out.invite_url);
-    sheet.getRange(row, 7).setValue(new Date());
-    sheet.getRange(row, 8).setValue(out.reused ? 'gui_lai_invite_cu' : 'invite_moi');
-    ghiLog('Đã cấp link Discord pre-order', code + ' - ' + name + ' - ' + email);
+    sheet.getRange(row, 1, 1, 8).setValues([[new Date(), name, email, code, 'cho_tao_invite', '', '', '']]);
+    ghiLog('Đã nhận pre-order, chờ tạo invite', code + ' - ' + name + ' - ' + email);
   } catch (err) {
     ghiLog('LỖI Form pre-order', (err && err.message) || String(err));
     throw err;
@@ -3055,27 +3193,9 @@ function guiLaiLinkDiscordChoPreorderDangChon() {
   if (!_isValidPersonName(name) || !_isValidEmail(email)) {
     SpreadsheetApp.getUi().alert('Dòng này có tên hoặc email không hợp lệ.'); return;
   }
-  const lock = LockService.getScriptLock();
-  let locked = false;
-  let resultMessage = '';
-  try {
-    lock.waitLock(30000);
-    locked = true;
-    const out = _pmtMintInvite(code, name, email);
-    if (!out.invite_url) throw new Error(out.error || 'Không tạo được invite Discord.');
-    _preorderSendInviteEmail(email, name, out.invite_url);
-    sheet.getRange(row, 4).setValue(code);
-    sheet.getRange(row, 5).setValue('da_gui_lai_link');
-    sheet.getRange(row, 6).setValue(out.invite_url);
-    sheet.getRange(row, 7).setValue(new Date());
-    sheet.getRange(row, 8).setValue(out.reused ? 'gui_lai_invite_cu' : 'gui_lai_invite_moi');
-    ghiLog('Gửi lại link Discord pre-order', code + ' - ' + email);
-    resultMessage = 'Đã gửi lại link Discord cho khách.';
-  } catch (err) {
-    ghiLog('LỖI gửi lại link Discord pre-order', (err && err.message) || String(err));
-    resultMessage = 'Không gửi được: ' + ((err && err.message) || String(err));
-  } finally {
-    if (locked) lock.releaseLock();
-  }
-  SpreadsheetApp.getUi().alert(resultMessage);
+  sheet.getRange(row, 4).setValue(code);
+  sheet.getRange(row, 5).setValue('cho_tao_invite');
+  sheet.getRange(row, 8).setValue('yeu_cau_gui_lai ' + new Date().toISOString());
+  ghiLog('Xếp hàng gửi lại link Discord pre-order', code + ' - ' + email);
+  SpreadsheetApp.getUi().alert('Đã xếp hàng gửi lại link. Hệ thống sẽ xử lý trong tối đa 1 phút; nếu lỗi, trạng thái và lý do sẽ hiện ngay trên dòng này.');
 }
