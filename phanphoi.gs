@@ -2950,6 +2950,7 @@ function _pmtVerifyWebhook(data, signature) {
 
 const PREORDER_WORKER_RELAY_ACTION = 'schedule_preorder_worker';
 const PREORDER_WORKER_RELAY_MAX_AGE_MS = 5 * 60 * 1000;
+const DISTRIBUTION_RECOVERY_RELAY_ACTION = 'recover_pending_distribution';
 
 function _preorderWorkerRelaySignature(timestamp) {
   return _pmtHmac(PREORDER_WORKER_RELAY_ACTION + ':' + String(timestamp), _pmtProp('PMT_SECRET', ''));
@@ -2960,6 +2961,33 @@ function _isAuthorizedPreorderWorkerRelay(payload) {
   const secret = _pmtProp('PMT_SECRET', '');
   if (!secret || !timestamp || Math.abs(Date.now() - timestamp) > PREORDER_WORKER_RELAY_MAX_AGE_MS) return false;
   return String(payload.signature || '').toLowerCase() === _preorderWorkerRelaySignature(timestamp).toLowerCase();
+}
+
+function _distributionRecoveryRelaySignature(timestamp) {
+  return _pmtHmac(DISTRIBUTION_RECOVERY_RELAY_ACTION + ':' + String(timestamp), _pmtProp('PMT_SECRET', ''));
+}
+
+function _isAuthorizedDistributionRecoveryRelay(payload) {
+  const timestamp = Number(payload && payload.timestamp || 0);
+  const secret = _pmtProp('PMT_SECRET', '');
+  if (!secret || !timestamp || Math.abs(Date.now() - timestamp) > PREORDER_WORKER_RELAY_MAX_AGE_MS) return false;
+  return String(payload.signature || '').toLowerCase() === _distributionRecoveryRelaySignature(timestamp).toLowerCase();
+}
+
+// Chạy trong Web App execute-as-owner. Đây là đường hồi phục độc lập với trigger
+// thời gian: chỉ thao tác khi còn dòng chưa Xong, rồi dùng luồng chuẩn để copy Drive,
+// đồng bộ tab Khách hàng và Dashboard trong cùng một giao dịch.
+function _recoverPendingDistributionAsDeploymentOwner() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(5000)) return { status: 'busy' };
+  try {
+    if (!_coDongCanPhanPhoi()) return { status: 'idle', distributed: 0, missing: 0 };
+    const result = phanPhoi();
+    ghiLog('Khôi phục phân phối qua Web App', result.distributed + ' xong; ' + result.missing + ' chưa thấy file');
+    return { status: 'ok', distributed: result.distributed, missing: result.missing, touchedRows: result.touchedRows };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // Hàm này chạy dưới danh tính Web App đã deploy, tức tài khoản chủ automation.
@@ -3023,6 +3051,15 @@ function doPost(e) {
       return _pmtOut('preorder_worker_scheduled');
     } catch (relayError) {
       ghiLog('LỖI relay worker pre-order', (relayError && relayError.message) || String(relayError));
+      return _pmtOut('loi');
+    }
+  }
+  if (payload.internalAction === DISTRIBUTION_RECOVERY_RELAY_ACTION) {
+    if (!_isAuthorizedDistributionRecoveryRelay(payload)) return _pmtOut('unauthorized');
+    try {
+      return _pmtOut(JSON.stringify(_recoverPendingDistributionAsDeploymentOwner()));
+    } catch (recoveryError) {
+      ghiLog('LỖI khôi phục phân phối qua Web App', (recoveryError && recoveryError.message) || String(recoveryError));
       return _pmtOut('loi');
     }
   }

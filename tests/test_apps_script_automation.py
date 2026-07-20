@@ -26,6 +26,8 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("PREORDER_FAST_DELAY_MS = 10000", self.src)
         self.assertIn("function _relayPreorderWorkerToDeploymentOwner()", self.src)
         self.assertIn("PREORDER_WORKER_RELAY_ACTION", self.src)
+        self.assertIn("DISTRIBUTION_RECOVERY_RELAY_ACTION", self.src)
+        self.assertIn("function _recoverPendingDistributionAsDeploymentOwner()", self.src)
         self.assertIn("skipDistributionWhenIdle: true", self.src)
         self.assertIn("retryMissingWhenIdle: false", self.src)
         self.assertIn("function _coDongCanPhanPhoi()", self.src)
@@ -285,6 +287,8 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("_schedulePreorderWorkerSoon(PREORDER_FAST_DELAY_MS)", resend)
         self.assertIn("payload.internalAction === PREORDER_WORKER_RELAY_ACTION", self.src)
         self.assertIn("_schedulePreorderWorkerAsDeploymentOwner()", self.src)
+        self.assertIn("payload.internalAction === DISTRIBUTION_RECOVERY_RELAY_ACTION", self.src)
+        self.assertIn("_recoverPendingDistributionAsDeploymentOwner()", self.src)
         system_tabs = self.src[self.src.index("function isSystemTab"):self.src.index("function _isValidClientTabName")]
         self.assertIn("PMT_ORDER_TAB, PREORDER_TAB", system_tabs)
 
