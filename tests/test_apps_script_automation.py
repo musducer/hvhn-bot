@@ -108,6 +108,9 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertNotIn("catch", share)
         self.assertIn("function _viewerGrantConfirmed(item, email)", self.src)
         self.assertIn("Utilities.sleep(pauses[i])", self.src)
+        self.assertIn("function _emailIdentityKey(email)", self.src)
+        self.assertIn("local.split('+')[0].replace(/\\./g, '')", self.src)
+        self.assertIn("_matchingEmailIndex(viewers, email)", self.src)
         self.assertIn("Chưa cấp được quyền folder khách", self.src)
 
     def test_migration_and_revocation_fail_closed(self):

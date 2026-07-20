@@ -1449,6 +1449,29 @@ function getOrCreateFolder(parent, name) {
   return parent.createFolder(name);
 }
 
+// Drive trả về email chuẩn của tài khoản Google. Với Gmail, dấu chấm và phần sau
+// dấu + ở local-part không đổi hộp thư, nên phải so theo định danh tài khoản.
+function _emailIdentityKey(email) {
+  const clean = String(email || '').trim().toLowerCase();
+  const at = clean.lastIndexOf('@');
+  if (at <= 0) return clean;
+  let local = clean.substring(0, at);
+  let domain = clean.substring(at + 1);
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    local = local.split('+')[0].replace(/\./g, '');
+    domain = 'gmail.com';
+  }
+  return local + '@' + domain;
+}
+
+function _matchingEmailIndex(emails, email) {
+  const key = _emailIdentityKey(email);
+  for (let i = 0; i < emails.length; i++) {
+    if (_emailIdentityKey(emails[i]) === key) return i;
+  }
+  return -1;
+}
+
 // Drive có độ trễ đồng bộ quyền. Kiểm tra lại có giới hạn thay vì coi lần đọc ngay
 // sau addViewer là kết quả cuối cùng.
 function _viewerGrantConfirmed(item, email) {
@@ -1456,7 +1479,7 @@ function _viewerGrantConfirmed(item, email) {
   for (let i = 0; i < pauses.length; i++) {
     if (pauses[i]) Utilities.sleep(pauses[i]);
     const viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
-    if (viewers.indexOf(email) >= 0) return true;
+    if (_matchingEmailIndex(viewers, email) >= 0) return true;
   }
   return false;
 }
@@ -1467,14 +1490,15 @@ function _ensureOnlyViewer(item, email) {
   if (!_isValidEmail(lower)) throw new Error('Email chia sẻ không hợp lệ: ' + lower);
 
   let editors = item.getEditors().map(u => String(u.getEmail() || '').toLowerCase());
-  if (editors.indexOf(lower) >= 0) item.removeEditor(lower);
+  let editorIndex = _matchingEmailIndex(editors, lower);
+  if (editorIndex >= 0) item.removeEditor(editors[editorIndex]);
   editors = item.getEditors().map(u => String(u.getEmail() || '').toLowerCase());
-  if (editors.indexOf(lower) >= 0) {
+  if (_matchingEmailIndex(editors, lower) >= 0) {
     throw new Error('Không thể hạ quyền Editor xuống Viewer cho ' + lower);
   }
 
   let viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
-  if (viewers.indexOf(lower) < 0) item.addViewer(lower);
+  if (_matchingEmailIndex(viewers, lower) < 0) item.addViewer(lower);
   if (!_viewerGrantConfirmed(item, lower)) {
     throw new Error('Drive không xác nhận quyền Viewer cho ' + lower);
   }
@@ -1486,13 +1510,15 @@ function _removeAccess(item, email) {
   if (!_isValidEmail(lower)) throw new Error('Email gỡ quyền không hợp lệ: ' + lower);
 
   let viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
-  if (viewers.indexOf(lower) >= 0) item.removeViewer(lower);
+  let viewerIndex = _matchingEmailIndex(viewers, lower);
+  if (viewerIndex >= 0) item.removeViewer(viewers[viewerIndex]);
   let editors = item.getEditors().map(u => String(u.getEmail() || '').toLowerCase());
-  if (editors.indexOf(lower) >= 0) item.removeEditor(lower);
+  let editorIndex = _matchingEmailIndex(editors, lower);
+  if (editorIndex >= 0) item.removeEditor(editors[editorIndex]);
 
   viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
   editors = item.getEditors().map(u => String(u.getEmail() || '').toLowerCase());
-  if (viewers.indexOf(lower) >= 0 || editors.indexOf(lower) >= 0) {
+  if (_matchingEmailIndex(viewers, lower) >= 0 || _matchingEmailIndex(editors, lower) >= 0) {
     throw new Error('Drive chưa xác nhận gỡ hết quyền của ' + lower);
   }
   return true;
