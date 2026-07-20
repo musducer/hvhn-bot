@@ -322,13 +322,24 @@ class Membership(commands.Cog):
                 return self._activation_channel(guild)
 
         panel_message = None
+        legacy_prompts = []
         try:
-            async for message in channel.history(limit=25):
+            async for message in channel.history(limit=100):
                 if message.author != guild.me:
                     continue
                 if any(embed.title == ACTIVATE_PANEL_TITLE for embed in message.embeds):
                     panel_message = message
-                    break
+                    continue
+                # Các lời chào cũ từng công khai tên khách trong kênh. Chỉ dọn đúng
+                # mẫu do bot tạo, không chạm tới panel hoặc nội dung của thành viên.
+                if (
+                    message.content.startswith("Chào <@")
+                    and "rất vui vì bạn đã đến với HVHN." in message.content
+                    and "Kích hoạt quyền truy cập tài liệu" in message.content
+                ):
+                    legacy_prompts.append(message)
+            for message in legacy_prompts:
+                await message.delete()
             if panel_message:
                 # Sửa ngay bảng cũ khi bot khởi động/chạy /setup, không tạo thêm bài hướng dẫn.
                 await panel_message.edit(embed=self._activation_portal_embed(), view=CustomerActivationView(self))
@@ -726,17 +737,16 @@ class Membership(commands.Cog):
         row = await self._mark_invite_joined(used_code, member.id)
         if row is None:
             return
-        channel = await self.ensure_activation_portal(guild)
+        await self.ensure_activation_portal(guild)
         message = (
-            f"Chào {member.mention}, rất vui vì bạn đã đến với HVHN.\n\n"
+            f"Chào {member.display_name}, rất vui vì bạn đã đến với HVHN.\n\n"
             "Bạn có thể bấm **Kích hoạt quyền truy cập tài liệu** ngay bên dưới để điền Họ tên và Email. "
             "Then sẽ xác nhận quyền của bạn; học liệu và quyền dùng Then trên web sẽ được cấp theo email bạn đã đăng ký."
         )
-        if channel:
-            try:
-                await channel.send(message, view=CustomerActivationView(self))
-            except discord.HTTPException as exc:
-                print(f"[debug] khach_activation_channel_post_failed member={member.id} err={exc}", flush=True)
+        try:
+            await member.send(message, view=CustomerActivationView(self))
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"[debug] khach_activation_dm_failed member={member.id} err={exc}", flush=True)
 
     # ---- lệnh admin ----
     @app_commands.command(name="hvhn_moikhach", description="(Admin) Tạo invite 1 lần cho khách tự kích hoạt bằng tên/email")

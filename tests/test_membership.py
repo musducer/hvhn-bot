@@ -354,10 +354,14 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(m.bot.db.rows[0]["discord_id"], 111)
 
-    def test_onboarding_posts_in_server_not_dm(self):
+    def test_onboarding_is_private_and_legacy_public_prompts_are_cleaned(self):
         source = inspect.getsource(Membership.on_member_join)
         self.assertIn("ensure_activation_portal", source)
-        self.assertNotIn("member.send", source)
+        self.assertIn("member.send", source)
+        self.assertNotIn("channel.send(message", source)
+        portal_source = inspect.getsource(Membership.ensure_activation_portal)
+        self.assertIn("legacy_prompts", portal_source)
+        self.assertIn("await message.delete()", portal_source)
 
     async def test_active_customer_retry_repairs_roles_without_backfilling_a_job(self):
         m = self._cog()
