@@ -21,6 +21,7 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function hvhnXuLyNhanh()", self.src)
         self.assertIn("ScriptApp.newTrigger('hvhnXuLyNhanh')", self.src)
         self.assertIn("ScriptApp.newTrigger('xuLyDonPreorderTuDong')", self.src)
+        self.assertIn("ScriptApp.newTrigger('xuLyXoaKhachDaTichAnToan')", self.src)
         self.assertIn("function _schedulePreorderWorkerSoon(delayMs)", self.src)
         self.assertIn("PREORDER_FAST_DELAY_MS = 10000", self.src)
         self.assertIn("skipDistributionWhenIdle: true", self.src)
@@ -30,13 +31,23 @@ class AppsScriptAutomationTest(unittest.TestCase):
     def test_simple_sheet_triggers_never_call_drive_and_repair_removes_legacy_edit_triggers(self):
         on_edit = self.src[self.src.index("function onEdit(e)"):self.src.index("function ensureDashboard")]
         on_open = self.src[self.src.index("function onOpen()"):self.src.index("function onEdit(e)")]
-        installer = self.src[self.src.index("function caiDatTuDongHoa()"):self.src.index("function _kiemTraQuyenDrive()")]
+        installer = self.src[self.src.index("function _caiDatTuDongHoaCore(owner)"):self.src.index("function _kiemTraQuyenDrive()")]
         self.assertIn("capNhatDashboard({ skipDrive: true })", on_edit)
         self.assertNotIn("DriveApp.", on_edit)
         self.assertNotIn("DriveApp.", on_open)
         self.assertIn("function suaLoiQuyenDriveVaTrigger()", self.src)
         self.assertIn("onEdit: true", self.src)
         self.assertIn("legacyHandlers[handler]", installer)
+
+    def test_customer_deletion_is_queued_and_only_authorized_workers_touch_drive(self):
+        manual = self.src[self.src.index("function xoaKhachDaTich()"):self.src.index("function xoaKhachDaTichTuDong()")]
+        worker = self.src[self.src.index("function xoaKhachDaTichTuDong()"):self.src.index("function xoaTatCaKhach()")]
+        self.assertNotIn("DriveApp.", manual)
+        self.assertIn("Đã xếp", manual)
+        self.assertIn("_skipDriveAutomationForUntrustedExecutor('xoaKhachDaTichTuDong')", worker)
+        self.assertIn("function xuLyXoaKhachDaTichAnToan()", worker)
+        self.assertIn("AUTOMATION_OWNER_PROP", self.src)
+        self.assertIn("function tuSuaXoaKhachTuDong()", self.src)
 
     def test_fast_lane_retries_missing_files_without_full_post_sync(self):
         self.assertIn("phanPhoi({ onlyMissing: true, skipPostSync: true", self.src)
@@ -95,6 +106,9 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("Drive không xác nhận quyền Viewer", share)
         self.assertIn("Không thể hạ quyền Editor", share)
         self.assertNotIn("catch", share)
+        self.assertIn("function _viewerGrantConfirmed(item, email)", self.src)
+        self.assertIn("Utilities.sleep(pauses[i])", self.src)
+        self.assertIn("Chưa cấp được quyền folder khách", self.src)
 
     def test_migration_and_revocation_fail_closed(self):
         migration = self.src[

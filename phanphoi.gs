@@ -77,6 +77,10 @@ const DISCORD_RENEW_HISTORY_PROP = 'DISCORD_RENEW_JOB_HISTORY';
 const SHEET_STATUS_NAME = '_sheet_status';
 const SHEET_STATUS_FILE = 'sheet_status.json';
 const BOT_ONLY_DOC_PREFIXES = ['discord'];
+// Mọi thao tác tự động chạm Drive phải chạy bằng đúng tài khoản đã được xác minh.
+// Tránh trigger do một tài khoản khác tạo gây "Access denied: DriveApp" rồi dừng cả luồng.
+const AUTOMATION_OWNER_PROP = 'HVHN_AUTOMATION_OWNER_EMAIL';
+const AUTOMATION_OWNER_SKIP_LOG_PROP = 'HVHN_AUTOMATION_OWNER_SKIP_LOG_AT';
 
 // Tab không phải dữ liệu khách -> luôn bỏ qua khi quét
 function isSystemTab(name) {
@@ -300,6 +304,7 @@ function mergeRowsIntoClientTabs(ss, rows) {
 // Gắn hàm này vào 1 Trigger chạy theo giờ (Triggers > Add Trigger > Time-driven) để tự chạy định kỳ,
 // khỏi cần mở Sheet lên bấm gì cả.
 function tuDongXuLyFileMoi(options) {
+  if (_skipDriveAutomationForUntrustedExecutor('tuDongXuLyFileMoi')) return { skipped: true };
   options = options || {};
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
@@ -334,6 +339,7 @@ function tuDongXuLyFileMoi(options) {
 // LÀN NHANH 1 PHÚT: chỉ kéo new_rows*.csv mới từ watcher rồi phân phối ngay.
 // Không chạy gia hạn/dọn dẹp/dashboard toàn hệ thống; những việc đó vẫn ở trigger 5 phút.
 function hvhnXuLyNhanh() {
+  if (_skipDriveAutomationForUntrustedExecutor('hvhnXuLyNhanh')) return;
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return;
   try {
@@ -349,6 +355,7 @@ function hvhnXuLyNhanh() {
 // TRIGGER 5 PHÚT: gom toàn bộ việc cần tự động hoá vào 1 hàm duy nhất.
 // Chạy vô hại nhiều lần: dòng đã Xong bỏ qua, tick đã xử lý thì tự mất/xoá dòng.
 function hvhnTuDongHoa() {
+  if (_skipDriveAutomationForUntrustedExecutor('hvhnTuDongHoa')) return;
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return;
   try {
@@ -358,7 +365,7 @@ function hvhnTuDongHoa() {
     kiemTraHetHan();          // quá hạn -> tự gỡ quyền/xoá file
     xuLyLenhDiscordTuDong();  // lệnh xoá từ Discord -> xoá Sheet/Drive thật
     donTaiLieuBotOnlyKhoKhachTuDong(); // tài liệu bot-only lỡ lọt kho khách -> gỡ khỏi Sheet/Drive
-    xoaKhachDaTichTuDong();   // tick Xóa khách -> tự xoá, không cần bấm menu
+    // Xóa khách chạy bằng worker riêng để một trigger sai tài khoản không làm hỏng cả vòng tổng.
     xoaTaiLieuDaTichTuDong(); // tick Xóa tài liệu -> tự xoá, không cần bấm menu
     capNhatTaiLieu();         // tab Tài liệu luôn mới
     canhBaoTrungTenKhach();   // B1: cảnh báo khách trùng tên (khác email) -> tránh dùng chung folder
@@ -380,6 +387,7 @@ function _triggerHandlers() {
     kiemTraHetHan: true,
     xuLyDonPreorderTuDong: true,
     xuLyDonPreorderNhanh: true,
+    xuLyXoaKhachDaTichAnToan: true,
   };
 }
 
@@ -413,6 +421,40 @@ function _demTriggerLegacyDrive() {
   return ScriptApp.getProjectTriggers().filter(t => legacy[t.getHandlerFunction()]).length;
 }
 
+function _automationExecutionEmail() {
+  try { return String(Session.getEffectiveUser().getEmail() || '').trim().toLowerCase(); }
+  catch (e) { return ''; }
+}
+
+// Một trigger cũ do tài khoản khác tạo không thể bị xóa từ tài khoản hiện tại.
+// Khi phát hiện, nó phải dừng trước khi gọi DriveApp thay vì ném lỗi quyền ra Sheet.
+function _skipDriveAutomationForUntrustedExecutor(handler) {
+  const props = PropertiesService.getScriptProperties();
+  const owner = String(props.getProperty(AUTOMATION_OWNER_PROP) || '').trim().toLowerCase();
+  if (!owner) return false; // tương thích khi hệ thống chưa được nâng cấp lần đầu
+  const current = _automationExecutionEmail();
+  if (current && current === owner) return false;
+
+  const now = Date.now();
+  const last = Number(props.getProperty(AUTOMATION_OWNER_SKIP_LOG_PROP) || 0);
+  if (now - last > 6 * 60 * 60 * 1000) {
+    props.setProperty(AUTOMATION_OWNER_SKIP_LOG_PROP, String(now));
+    ghiLog('Bỏ qua trigger Drive sai tài khoản', handler + ' chạy bởi ' + (current || '(không xác định)') + '; cần tài khoản ' + owner);
+  }
+  return true;
+}
+
+function _claimDriveAutomationOwner() {
+  const owner = _automationExecutionEmail();
+  if (!owner) throw new Error('Không xác định được tài khoản chạy automation.');
+  const failures = _kiemTraQuyenDrive();
+  if (failures.length) throw new Error(failures.join('\n'));
+  const props = PropertiesService.getScriptProperties();
+  props.setProperty(AUTOMATION_OWNER_PROP, owner);
+  props.deleteProperty(AUTOMATION_OWNER_SKIP_LOG_PROP);
+  return owner;
+}
+
 function kiemTraTuDongHoa() {
   const counts = _demTriggerTheoHandler();
   const ok = (counts.hvhnTuDongHoa || 0) > 0;
@@ -424,7 +466,9 @@ function kiemTraTuDongHoa() {
     '- hvhnXuLyNhanh: ' + (counts.hvhnXuLyNhanh || 0),
     '- kiemTraHetHan: ' + (counts.kiemTraHetHan || 0),
     '- xuLyDonPreorderTuDong: ' + (counts.xuLyDonPreorderTuDong || 0),
+    '- xuLyXoaKhachDaTichAnToan: ' + (counts.xuLyXoaKhachDaTichAnToan || 0),
     '- Trigger edit cũ cần dọn: ' + _demTriggerLegacyDrive(),
+    '- Tài khoản Drive automation: ' + (PropertiesService.getScriptProperties().getProperty(AUTOMATION_OWNER_PROP) || '(chưa xác minh)'),
     '',
     ok
       ? 'Nếu dữ liệu vẫn không tự lên, mở Apps Script > Executions để xem lỗi trigger gần nhất.'
@@ -436,6 +480,7 @@ function kiemTraTuDongHoa() {
 function damBaoTuDongHoa() {
   if (!_coTrigger('hvhnTuDongHoa') || !_coTrigger('hvhnXuLyNhanh')
       || !_coTrigger('kiemTraHetHan') || !_coTrigger('xuLyDonPreorderTuDong')
+      || !_coTrigger('xuLyXoaKhachDaTichAnToan')
       || _demTriggerLegacyDrive()) {
     caiDatTuDongHoa();
     return;
@@ -443,7 +488,7 @@ function damBaoTuDongHoa() {
   SpreadsheetApp.getActiveSpreadsheet().toast('Trigger đã có: làn nhanh mỗi 1 phút + tự động hoá tổng mỗi 5 phút.');
 }
 
-function caiDatTuDongHoa() {
+function _caiDatTuDongHoaCore(owner) {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const keepHandlers = _triggerHandlers();
   const legacyHandlers = _legacyDriveTriggerHandlers();
@@ -477,13 +522,23 @@ function caiDatTuDongHoa() {
     .everyMinutes(1)
     .create();
 
+  ScriptApp.newTrigger('xuLyXoaKhachDaTichAnToan')
+    .timeBased()
+    .everyMinutes(1)
+    .create();
+
   ensureDashboard();
   ensureStaging();
   ensureRegistry();
   capNhatTaiLieu();
   capNhatDashboard();
-  ghiLog('Cài tự động hoá', 'làn nhanh new_rows và pre-order mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h; đã dọn ' + removedLegacy + ' trigger edit cũ');
-  ss.toast('Đã cài tự động hoá. File mới và pre-order chờ xử lý mỗi 1 phút.');
+  ghiLog('Cài tự động hoá', 'chủ Drive=' + owner + '; làn nhanh new_rows, pre-order và xóa khách mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h; đã dọn ' + removedLegacy + ' trigger cũ');
+  ss.toast('Đã cài tự động hoá. File mới, pre-order và xóa khách chờ xử lý mỗi 1 phút.');
+  return { owner: owner, removedLegacy: removedLegacy };
+}
+
+function caiDatTuDongHoa() {
+  return _caiDatTuDongHoaCore(_claimDriveAutomationOwner());
 }
 
 function _kiemTraQuyenDrive() {
@@ -508,18 +563,24 @@ function _kiemTraQuyenDrive() {
 // Chạy từ menu bằng chính tài khoản quản lý để cấp lại quyền Drive và thay trigger cũ.
 function suaLoiQuyenDriveVaTrigger() {
   const ui = SpreadsheetApp.getUi();
-  const failures = _kiemTraQuyenDrive();
-  if (failures.length) {
+  try {
+    const result = _caiDatTuDongHoaCore(_claimDriveAutomationOwner());
+    ui.alert('Đã xác nhận quyền Drive cho ' + result.owner + ' và cài lại trigger. Tick cột "Xóa khách" sẽ được worker an toàn xử lý trong tối đa 1 phút.');
+  } catch (e) {
     const account = Session.getEffectiveUser().getEmail() || '(không xác định được email)';
     ui.alert(
       'Chưa thể dùng Drive với tài khoản chạy script: ' + account + '.\n\n'
-      + failures.join('\n')
+      + ((e && e.message) || String(e))
       + '\n\nHãy chia sẻ các folder/file trên cho tài khoản này với quyền Editor, rồi chạy lại mục này.'
     );
-    return;
   }
-  caiDatTuDongHoa();
-  ui.alert('Đã xác nhận quyền Drive và cài lại trigger. Từ giờ tick cột "Xóa khách" sẽ được xử lý an toàn trong tối đa 5 phút.');
+}
+
+// Entry point private cho Apps Script Execution API: tự nhận tài khoản chủ Drive,
+// thay trigger cũ và trả kết quả máy đọc được. Không mở dữ liệu ra bên ngoài.
+function tuSuaXoaKhachTuDong() {
+  const result = _caiDatTuDongHoaCore(_claimDriveAutomationOwner());
+  return JSON.stringify({ owner: result.owner, removedLegacy: result.removedLegacy, deleteWorker: 'every_1_minute' });
 }
 
 // Gộp các dòng đang nằm ở tab "Nhập mới" (đường tay dự phòng, khi không dùng new_rows.csv)
@@ -843,6 +904,7 @@ function capQuyenFolderKhachHangTuDong() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
   const granted = {};
+  const failures = [];
 
   // Chi cap quyen cho khach CON HAN. Truoc day cap cho moi khach khong xet han ->
   // khach het han (da bi kiemTraHetHan go) bi cap lai o vong phanPhoi ke tiep.
@@ -882,15 +944,27 @@ function capQuyenFolderKhachHangTuDong() {
       if (!conHan[String(email).toLowerCase()]) break;
 
       const folders = destRoot.getFoldersByName(name);
-      if (folders.hasNext()) _ensureOnlyViewer(folders.next(), email);
+      if (folders.hasNext()) {
+        try {
+          _ensureOnlyViewer(folders.next(), email);
+        } catch (e) {
+          const detail = name + ' - ' + email + ': ' + ((e && e.message) || String(e));
+          failures.push(detail);
+          ghiLog('Chưa cấp được quyền folder khách', detail);
+        }
+      }
       break;
     }
   });
+  return failures;
 }
 
 function capQuyenFolderKhachHang() {
-  capQuyenFolderKhachHangTuDong();
-  SpreadsheetApp.getActiveSpreadsheet().toast('Đã cấp quyền xem folder cho các khách đang có folder Drive.');
+  const failures = capQuyenFolderKhachHangTuDong();
+  const message = failures.length
+    ? ('Đang thử lại quyền Drive cho ' + failures.length + ' khách. Xem tab Nhật ký nếu trạng thái này còn lặp lại.')
+    : 'Đã cấp quyền xem folder cho các khách đang có folder Drive.';
+  SpreadsheetApp.getActiveSpreadsheet().toast(message, 'HVHN', 8);
 }
 
 // ============ QUẢN LÝ GÓI / HẠN DÙNG ============
@@ -1019,6 +1093,7 @@ function capNhatTrangThaiHan(reg) {
 
 // TRIGGER HẰNG NGÀY: khách quá hạn -> XOÁ file phân phối (bỏ file) + gỡ chia sẻ, đánh 'Đã gỡ quyền'.
 function kiemTraHetHan() {
+  if (_skipDriveAutomationForUntrustedExecutor('kiemTraHetHan')) return;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const reg = ensureRegistry();
   const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
@@ -1126,6 +1201,7 @@ function xuLyGiaHan() {
 
 // Bản tự động: xử lý mọi ô Gia hạn đã tick, không gọi UI/menu.
 function xuLyGiaHanTuDong() {
+  if (_skipDriveAutomationForUntrustedExecutor('xuLyGiaHanTuDong')) return;
   const reg = ensureRegistry();
   const last = reg.getLastRow();
   if (last < 2) return;
@@ -1373,6 +1449,18 @@ function getOrCreateFolder(parent, name) {
   return parent.createFolder(name);
 }
 
+// Drive có độ trễ đồng bộ quyền. Kiểm tra lại có giới hạn thay vì coi lần đọc ngay
+// sau addViewer là kết quả cuối cùng.
+function _viewerGrantConfirmed(item, email) {
+  const pauses = [0, 250, 500, 1000, 2000, 4000];
+  for (let i = 0; i < pauses.length; i++) {
+    if (pauses[i]) Utilities.sleep(pauses[i]);
+    const viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
+    if (viewers.indexOf(email) >= 0) return true;
+  }
+  return false;
+}
+
 // Cap dung 1 quyen cho khach: viewer tren folder/file, khong editor.
 function _ensureOnlyViewer(item, email) {
   const lower = String(email || '').trim().toLowerCase();
@@ -1387,8 +1475,7 @@ function _ensureOnlyViewer(item, email) {
 
   let viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
   if (viewers.indexOf(lower) < 0) item.addViewer(lower);
-  viewers = item.getViewers().map(u => String(u.getEmail() || '').toLowerCase());
-  if (viewers.indexOf(lower) < 0) {
+  if (!_viewerGrantConfirmed(item, lower)) {
     throw new Error('Drive không xác nhận quyền Viewer cho ' + lower);
   }
   return true;
@@ -1615,20 +1702,15 @@ function xoaKhachDaTich() {
     ui.ButtonSet.YES_NO);
   if (resp !== ui.Button.YES) return;
 
-  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
-  // xoá tab trước sẽ làm dịch dòng registry -> xoá registry theo thứ tự giảm dần, xử Drive/tab luôn
-  targets.sort((a, b) => b.row - a.row);
-  targets.forEach(t => {
-    _xoaMotKhach(ss, destRoot, t.name, t.email);
-    reg.deleteRow(t.row);
-  });
-  decorateRegistry(reg);
-  capNhatDashboard();
-  ui.alert('Đã xoá ' + targets.length + ' khách.');
+  // UI chỉ đánh dấu/yêu cầu xóa. Worker được xác minh quyền Drive sẽ xử lý trong nền.
+  // Nhờ vậy tài khoản chỉ có quyền Sheet không thể làm bật lỗi quyền truy cập Drive.
+  ghiLog('Xếp hàng xóa khách', targets.length + ' khách; chờ worker Drive được ủy quyền');
+  ui.alert('Đã xếp ' + targets.length + ' khách vào hàng xóa an toàn. Hệ thống sẽ xử lý trong tối đa 1 phút.');
 }
 
 // Bản tự động: tick cột H là xoá trong vòng chạy trigger kế tiếp, không cần bấm menu.
 function xoaKhachDaTichTuDong() {
+  if (_skipDriveAutomationForUntrustedExecutor('xoaKhachDaTichTuDong')) return;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const reg = ensureRegistry();
   const last = reg.getLastRow();
@@ -1648,6 +1730,17 @@ function xoaKhachDaTichTuDong() {
   decorateRegistry(reg);
   capNhatDashboard();
   ghiLog('Tự động xoá khách đã tick', targets.length + ' khách');
+}
+
+// Worker riêng cho hàng xóa khách. Chạy tách khỏi worker tổng để lỗi Drive không chặn
+// các luồng phân phối, gia hạn hay pre-order.
+function xuLyXoaKhachDaTichAnToan() {
+  if (_skipDriveAutomationForUntrustedExecutor('xuLyXoaKhachDaTichAnToan')) return;
+  try {
+    xoaKhachDaTichTuDong();
+  } catch (e) {
+    ghiLog('LỖI worker xóa khách', (e && e.message) || String(e));
+  }
 }
 
 // Menu: xoá TẤT CẢ khách (dọn sạch để bắt đầu lại). Xác nhận 2 lớp.
@@ -1863,6 +1956,7 @@ function xoaTaiLieuDaTich() {
 
 // Bản tự động: tick cột "Xóa tài liệu" là xoá trong vòng chạy trigger kế tiếp.
 function xoaTaiLieuDaTichTuDong() {
+  if (_skipDriveAutomationForUntrustedExecutor('xoaTaiLieuDaTichTuDong')) return;
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sh = ss.getSheetByName(DOCS_NAME);
   if (!sh || sh.getLastRow() < 2) return;
