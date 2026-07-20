@@ -336,14 +336,40 @@ function tuDongXuLyFileMoi(options) {
   return { mergedAny: mergedAny, totalAdded: totalAdded, distribution: distribution };
 }
 
-// LÀN NHANH 1 PHÚT: chỉ kéo new_rows*.csv mới từ watcher rồi phân phối ngay.
-// Không chạy gia hạn/dọn dẹp/dashboard toàn hệ thống; những việc đó vẫn ở trigger 5 phút.
+// Có dòng khách chưa Xong (trống, lỗi, hoặc thiếu file) hay không. Tách bước kiểm tra
+// nhẹ này ra để làn 1 phút tự cứu một batch đã kịp gộp vào Sheet nhưng lượt phân phối
+// cùng lúc bị dừng giữa chừng; không phải chờ đến vòng tổng 5 phút.
+function _coDongCanPhanPhoi() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  return ss.getSheets().some(sheet => {
+    if (isSystemTab(sheet.getName())) return false;
+    const data = sheet.getDataRange().getValues();
+    if (!data.length || data[0][0] !== 'TenNguoiNhan') return false;
+    return data.slice(1).some(row => row[0] && row[1] && row[2]
+      && !String(row[3] || '').startsWith('Xong'));
+  });
+}
+
+// LÀN NHANH 1 PHÚT: kéo new_rows*.csv mới và tự khôi phục MỌI dòng chưa Xong.
+// Trước đây lúc rảnh chỉ thử lại "Không thấy file". Nếu Apps Script hết thời gian sau
+// khi đã gộp CSV nhưng trước lúc copy Drive, dòng trạng thái trống sẽ bị bỏ sót tới
+// vòng tổng sau. Làn nhanh nay xử lý cả trường hợp này ngay ở lượt kế tiếp.
 function hvhnXuLyNhanh() {
   if (_skipDriveAutomationForUntrustedExecutor('hvhnXuLyNhanh')) return;
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return;
   try {
-    tuDongXuLyFileMoi({ skipDistributionWhenIdle: true, retryMissingWhenIdle: true, skipPostSync: true });
+    const result = tuDongXuLyFileMoi({
+      skipDistributionWhenIdle: true,
+      retryMissingWhenIdle: false,
+    });
+    if (!result.mergedAny && _coDongCanPhanPhoi()) {
+      const recovered = phanPhoi();
+      if (recovered.touchedRows) {
+        ghiLog('Tự khôi phục phân phối còn dở', recovered.distributed + ' xong; '
+          + recovered.missing + ' chưa thấy file');
+      }
+    }
   } catch (e) {
     ghiLog('LỖI làn nhanh', e.message || String(e));
     throw e;

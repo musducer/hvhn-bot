@@ -27,8 +27,9 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function _relayPreorderWorkerToDeploymentOwner()", self.src)
         self.assertIn("PREORDER_WORKER_RELAY_ACTION", self.src)
         self.assertIn("skipDistributionWhenIdle: true", self.src)
-        self.assertIn("retryMissingWhenIdle: true", self.src)
-        self.assertIn("skipPostSync: true", self.src)
+        self.assertIn("retryMissingWhenIdle: false", self.src)
+        self.assertIn("function _coDongCanPhanPhoi()", self.src)
+        self.assertIn("if (!result.mergedAny && _coDongCanPhanPhoi())", self.src)
 
     def test_simple_sheet_triggers_never_call_drive_and_repair_removes_legacy_edit_triggers(self):
         on_edit = self.src[self.src.index("function onEdit(e)"):self.src.index("function ensureDashboard")]
@@ -51,12 +52,15 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("AUTOMATION_OWNER_PROP", self.src)
         self.assertIn("function tuSuaXoaKhachTuDong()", self.src)
 
-    def test_fast_lane_retries_missing_files_without_full_post_sync(self):
+    def test_fast_lane_recovers_every_pending_distribution_state(self):
         self.assertIn("phanPhoi({ onlyMissing: true, skipPostSync: true", self.src)
         self.assertIn("options.onlyMissing", self.src)
         self.assertIn("statusText.startsWith('Không thấy')", self.src)
         self.assertIn("if (!options.skipPostSync)", self.src)
         self.assertIn("return { distributed: distributed, missing: missing, touchedRows: touchedRows }", self.src)
+        fast_lane = self.src[self.src.index("function hvhnXuLyNhanh()"):self.src.index("function hvhnTuDongHoa()")]
+        self.assertIn("_coDongCanPhanPhoi()", fast_lane)
+        self.assertIn("const recovered = phanPhoi();", fast_lane)
 
     def test_form_setup_also_installs_automation(self):
         idx_form = self.src.index("function caiDatForm()")
