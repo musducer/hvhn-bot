@@ -249,10 +249,10 @@ class AppsScriptAutomationTest(unittest.TestCase):
 
     def test_preorder_queues_idempotent_invites_and_is_not_client_data_tab(self):
         self.assertIn("function xuLyFormPreorder(e)", self.src)
-        self.assertIn("function xuLyDonPreorderTuDong()", self.src)
+        self.assertIn("function xuLyDonPreorderTuDong(options)", self.src)
         self.assertIn("function _preorderCode(email)", self.src)
         worker = self.src[
-            self.src.index("function xuLyDonPreorderTuDong()"):
+            self.src.index("function xuLyDonPreorderTuDong(options)"):
             self.src.index("function xuLyFormPreorder(e)")
         ]
         form_handler = self.src[
@@ -267,6 +267,9 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("PREORDER_STALE_MINUTES = 2", self.src)
         self.assertIn("_preorderRetryDue(status, note, rows[i][0])", worker)
         self.assertIn("_preorderScheduleFailure", worker)
+        self.assertIn("lockAlreadyHeld", worker)
+        self.assertIn("xuLyDonPreorderTuDong({ lockAlreadyHeld: true })", self.src)
+        self.assertIn("allowed[_emailIdentityKey(email)]", self.src)
         self.assertIn("function kiemTraEmailPreorder()", self.src)
         self.assertIn("function guiLaiLinkDiscordChoPreorderDangChon()", self.src)
         resend = self.src[self.src.index("function guiLaiLinkDiscordChoPreorderDangChon()") :]

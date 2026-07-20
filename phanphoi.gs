@@ -355,10 +355,15 @@ function hvhnXuLyNhanh() {
 // TRIGGER 5 PHÚT: gom toàn bộ việc cần tự động hoá vào 1 hàm duy nhất.
 // Chạy vô hại nhiều lần: dòng đã Xong bỏ qua, tick đã xử lý thì tự mất/xoá dòng.
 function hvhnTuDongHoa() {
-  if (_skipDriveAutomationForUntrustedExecutor('hvhnTuDongHoa')) return;
+  if (_skipDriveAutomationForUntrustedExecutor('hvhnTuDongHoa')) {
+    // Pre-order không phụ thuộc Drive; vẫn cứu hàng đợi dù worker Drive sai tài khoản.
+    xuLyDonPreorderTuDong();
+    return;
+  }
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return;
   try {
+    xuLyDonPreorderTuDong({ lockAlreadyHeld: true }); // watchdog 5 phút cho mọi đơn bị kẹt
     tuDongXuLyFileMoi();      // kéo new_rows*.csv + phân phối + sync khách/dashboard
     xuLyGiaHanTuDong();       // tick Gia hạn -> tự gia hạn, nếu cần thì phân phối lại
     xuLyLenhGiaHanDiscordTuDong(); // lệnh gia hạn từ Discord
@@ -3135,7 +3140,7 @@ function _preorderEmailsFromConfig(cfg) {
 
 function _preorderAllowedEmails() {
   const allowed = {};
-  _preorderEmailsFromSourceSheet().forEach(email => { allowed[email] = true; });
+  _preorderEmailsFromSourceSheet().forEach(email => { allowed[_emailIdentityKey(email)] = true; });
   return allowed;
 }
 
@@ -3156,7 +3161,7 @@ function _preorderSheet() {
 
 // Dùng mã ổn định theo email: một slot luôn gắn với một mã invite duy nhất.
 function _preorderCode(email) {
-  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, String(email || '').trim().toLowerCase());
+  const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, _emailIdentityKey(email));
   return 'PRE' + _pmtHex(digest).slice(0, 16).toUpperCase();
 }
 
@@ -3228,7 +3233,7 @@ function kiemTraEmailPreorder() {
     const row = _preorderFindRowByEmail(sheet, email);
     const status = row ? String(sheet.getRange(row, 5).getValue() || '') : '';
     const note = row ? String(sheet.getRange(row, 8).getValue() || '') : '';
-    const message = allowed[email]
+    const message = allowed[_emailIdentityKey(email)]
       ? 'Email có trong allowlist pre-order.'
       : 'Email KHÔNG có trong allowlist pre-order hiện tại.';
     ui.alert(message + '\n\n' +
@@ -3287,7 +3292,7 @@ function _preorderFindRowByEmail(sheet, email) {
   if (last < 2) return 0;
   const emails = sheet.getRange(2, 3, last - 1, 1).getValues();
   for (let i = 0; i < emails.length; i++) {
-    if (String(emails[i][0] || '').trim().toLowerCase() === email) return i + 2;
+    if (_emailIdentityKey(emails[i][0]) === _emailIdentityKey(email)) return i + 2;
   }
   return 0;
 }
@@ -3395,9 +3400,10 @@ function _preorderRecordRejected(name, email, status, note) {
 
 // Chạy bằng trigger riêng để Form submit không bị treo khi bot/Render đang khởi động.
 // Dòng đang tạo quá lâu được thử lại an toàn: endpoint bot idempotent theo mã pre-order.
-function xuLyDonPreorderTuDong() {
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) return;
+function xuLyDonPreorderTuDong(options) {
+  options = options || {};
+  const lock = options.lockAlreadyHeld ? null : LockService.getScriptLock();
+  if (lock && !lock.tryLock(1000)) return;
   try {
     const sheet = _preorderSheet();
     const last = sheet.getLastRow();
@@ -3440,7 +3446,7 @@ function xuLyDonPreorderTuDong() {
       return; // Mỗi lượt chỉ xử lý 1 đơn để tránh chuỗi request mạng kéo dài.
     }
   } finally {
-    lock.releaseLock();
+    if (lock) lock.releaseLock();
   }
 }
 
@@ -3460,7 +3466,7 @@ function xuLyFormPreorder(e) {
       return;
     }
     const allowed = _preorderAllowedEmails();
-    if (!allowed[email]) {
+    if (!allowed[_emailIdentityKey(email)]) {
       _preorderRecordRejected(name, email, 'tu_choi_allowlist', 'Email không có trong sheet responses cũ.');
       ghiLog('Từ chối Form pre-order (email không có trong sheet responses cũ)', email);
       return;
