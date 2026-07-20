@@ -2918,6 +2918,53 @@ function _pmtVerifyWebhook(data, signature) {
   return !!key && String(signature || '').toLowerCase() === _pmtHmac(_pmtPayosDataString(data), key).toLowerCase();
 }
 
+const PREORDER_WORKER_RELAY_ACTION = 'schedule_preorder_worker';
+const PREORDER_WORKER_RELAY_MAX_AGE_MS = 5 * 60 * 1000;
+
+function _preorderWorkerRelaySignature(timestamp) {
+  return _pmtHmac(PREORDER_WORKER_RELAY_ACTION + ':' + String(timestamp), _pmtProp('PMT_SECRET', ''));
+}
+
+function _isAuthorizedPreorderWorkerRelay(payload) {
+  const timestamp = Number(payload && payload.timestamp || 0);
+  const secret = _pmtProp('PMT_SECRET', '');
+  if (!secret || !timestamp || Math.abs(Date.now() - timestamp) > PREORDER_WORKER_RELAY_MAX_AGE_MS) return false;
+  return String(payload.signature || '').toLowerCase() === _preorderWorkerRelaySignature(timestamp).toLowerCase();
+}
+
+// Hàm này chạy dưới danh tính Web App đã deploy, tức tài khoản chủ automation.
+// Nó chỉ cài trigger, không mint invite hay gửi email trong request webhook ngắn này.
+function _schedulePreorderWorkerAsDeploymentOwner() {
+  const triggers = ScriptApp.getProjectTriggers();
+  const hasRecurring = triggers.some(t => t.getHandlerFunction() === 'xuLyDonPreorderTuDong');
+  const hasFast = triggers.some(t => t.getHandlerFunction() === PREORDER_FAST_TRIGGER_HANDLER);
+  if (!hasRecurring) ScriptApp.newTrigger('xuLyDonPreorderTuDong').timeBased().everyMinutes(1).create();
+  if (!hasFast) {
+    ScriptApp.newTrigger(PREORDER_FAST_TRIGGER_HANDLER)
+      .timeBased()
+      .after(PREORDER_FAST_DELAY_MS)
+      .create();
+  }
+}
+
+function _relayPreorderWorkerToDeploymentOwner() {
+  const appUrl = _pmtAppUrl();
+  const secret = _pmtProp('PMT_SECRET', '');
+  if (!appUrl || !secret) return false;
+  const timestamp = Date.now();
+  const res = UrlFetchApp.fetch(appUrl, {
+    method: 'post', contentType: 'application/json', muteHttpExceptions: true,
+    payload: JSON.stringify({
+      internalAction: PREORDER_WORKER_RELAY_ACTION,
+      timestamp: timestamp,
+      signature: _preorderWorkerRelaySignature(timestamp),
+    }),
+  });
+  const body = String(res.getContentText() || '').trim();
+  if (res.getResponseCode() >= 200 && res.getResponseCode() < 300 && body === 'preorder_worker_scheduled') return true;
+  throw new Error('Relay worker HTTP ' + res.getResponseCode() + ': ' + body.slice(0, 200));
+}
+
 function testWebhookThanhToanChoDonDangChon() {
   const sheet = SpreadsheetApp.getActiveSpreadsheet().getActiveSheet();
   if (sheet.getName() !== PMT_ORDER_TAB || sheet.getActiveRange().getRow() <= 1) {
@@ -2933,6 +2980,22 @@ function testWebhookThanhToanChoDonDangChon() {
 
 // PayOS webhook: xác thực HMAC trước, sau đó khớp orderCode + số tiền cố định.
 function doPost(e) {
+  let payload;
+  try {
+    payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+  } catch (e2) {
+    return _pmtOut('bo_qua');
+  }
+  if (payload.internalAction === PREORDER_WORKER_RELAY_ACTION) {
+    if (!_isAuthorizedPreorderWorkerRelay(payload)) return _pmtOut('unauthorized');
+    try {
+      _schedulePreorderWorkerAsDeploymentOwner();
+      return _pmtOut('preorder_worker_scheduled');
+    } catch (relayError) {
+      ghiLog('LỖI relay worker pre-order', (relayError && relayError.message) || String(relayError));
+      return _pmtOut('loi');
+    }
+  }
   const lock = LockService.getScriptLock();
   let locked = false;
   try {
@@ -2940,7 +3003,6 @@ function doPost(e) {
     // check -> mint -> email -> đánh dấu để một đơn chỉ gửi mail một lần.
     lock.waitLock(30000);
     locked = true;
-    const payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
     const data = payload.data || {};
     if (!payload.success || payload.code !== '00' || data.code !== '00') return _pmtOut('bo_qua');
     if (!_pmtVerifyWebhook(data, payload.signature)) {
@@ -3274,9 +3336,14 @@ function _ensurePreorderWorkerTrigger() {
   ghiLog('Tự chữa trigger pre-order', 'Đã cài worker mỗi 1 phút');
 }
 
-// after(10 giây) là best-effort của Google Apps Script; trigger 1 phút bên trên
-// vẫn là đường dự phòng đáng tin cậy nếu nền tảng làm tròn lịch chạy.
+// Ưu tiên relay sang Web App để trigger thuộc đúng tài khoản chủ automation.
+// Nếu Web App đang tạm thời không phản hồi, vẫn thử scheduler cục bộ làm dự phòng.
 function _schedulePreorderWorkerSoon(delayMs) {
+  try {
+    if (_relayPreorderWorkerToDeploymentOwner()) return;
+  } catch (relayError) {
+    ghiLog('LỖI relay worker pre-order', (relayError && relayError.message) || String(relayError));
+  }
   try {
     _ensurePreorderWorkerTrigger();
     const hasFast = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === PREORDER_FAST_TRIGGER_HANDLER);
