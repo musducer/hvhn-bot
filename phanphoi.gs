@@ -356,14 +356,12 @@ function hvhnXuLyNhanh() {
 // Chạy vô hại nhiều lần: dòng đã Xong bỏ qua, tick đã xử lý thì tự mất/xoá dòng.
 function hvhnTuDongHoa() {
   if (_skipDriveAutomationForUntrustedExecutor('hvhnTuDongHoa')) {
-    // Pre-order không phụ thuộc Drive; vẫn cứu hàng đợi dù worker Drive sai tài khoản.
-    xuLyDonPreorderTuDong();
+    _preorderWatchdog();
     return;
   }
   const lock = LockService.getScriptLock();
   if (!lock.tryLock(1000)) return;
   try {
-    xuLyDonPreorderTuDong({ lockAlreadyHeld: true }); // watchdog 5 phút cho mọi đơn bị kẹt
     tuDongXuLyFileMoi();      // kéo new_rows*.csv + phân phối + sync khách/dashboard
     xuLyGiaHanTuDong();       // tick Gia hạn -> tự gia hạn, nếu cần thì phân phối lại
     xuLyLenhGiaHanDiscordTuDong(); // lệnh gia hạn từ Discord
@@ -375,6 +373,7 @@ function hvhnTuDongHoa() {
     capNhatTaiLieu();         // tab Tài liệu luôn mới
     canhBaoTrungTenKhach();   // B1: cảnh báo khách trùng tên (khác email) -> tránh dùng chung folder
     capNhatDashboard();       // dashboard luôn mới
+    _preorderWatchdog();      // chỉ đánh thức worker, không để invite chậm chặn phân phối
   } catch (e) {
     ghiLog('LỖI tự động hoá', e.message || String(e));
     throw e;
@@ -3363,6 +3362,21 @@ function _schedulePreorderWorkerSoon(delayMs) {
   }
 }
 
+// Watchdog nhẹ: chỉ yêu cầu Web App của chủ automation đảm bảo worker tồn tại.
+// Tuyệt đối không mint invite trong luồng phân phối/gia hạn chung.
+function _preorderWatchdog() {
+  try {
+    if (_relayPreorderWorkerToDeploymentOwner()) return;
+  } catch (e) {
+    ghiLog('LỖI watchdog pre-order', (e && e.message) || String(e));
+  }
+  try {
+    _ensurePreorderWorkerTrigger();
+  } catch (fallbackError) {
+    ghiLog('LỖI watchdog pre-order dự phòng', (fallbackError && fallbackError.message) || String(fallbackError));
+  }
+}
+
 function xuLyDonPreorderNhanh() {
   // Đây là trigger một lần; tự dọn trước khi xử lý để không tiêu quota trigger.
   ScriptApp.getProjectTriggers().forEach(t => {
@@ -3400,10 +3414,9 @@ function _preorderRecordRejected(name, email, status, note) {
 
 // Chạy bằng trigger riêng để Form submit không bị treo khi bot/Render đang khởi động.
 // Dòng đang tạo quá lâu được thử lại an toàn: endpoint bot idempotent theo mã pre-order.
-function xuLyDonPreorderTuDong(options) {
-  options = options || {};
-  const lock = options.lockAlreadyHeld ? null : LockService.getScriptLock();
-  if (lock && !lock.tryLock(1000)) return;
+function xuLyDonPreorderTuDong() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return;
   try {
     const sheet = _preorderSheet();
     const last = sheet.getLastRow();
@@ -3446,7 +3459,7 @@ function xuLyDonPreorderTuDong(options) {
       return; // Mỗi lượt chỉ xử lý 1 đơn để tránh chuỗi request mạng kéo dài.
     }
   } finally {
-    if (lock) lock.releaseLock();
+    lock.releaseLock();
   }
 }
 
