@@ -44,11 +44,23 @@ class ReadingExamGuidanceTest(unittest.TestCase):
 
     def test_new_opal_section_is_utf8_and_append_only_specialist_content(self):
         text = Path("OPAL_PROMPT.md").read_text(encoding="utf-8")
-        marker = "# CHUYÊN ĐỀ BỔ SUNG: ĐỌC HIỂU VÀ ĐÁNH GIÁ NĂNG LỰC"
+        marker = "# CHUYÊN ĐỀ BỔ SUNG: ĐỌC HIỂU"
         section = text[text.index(marker):]
 
         self.assertIn("chỉ bổ sung, không thay thế", section)
         self.assertIn("Văn bản, đoạn trích và các phương án", section)
+        self.assertIsNone(re.search(r"(?:Ã|Â|Ä|Æ)[\x80-\xbf]|á[º»]", section))
+
+    def test_opal_has_a_beginner_first_system_support_layer(self):
+        text = Path("OPAL_PROMPT.md").read_text(encoding="utf-8")
+        marker = "# CHUYÊN ĐỀ BỔ SUNG: ĐỒNG HÀNH VÀ HỖ TRỢ NGƯỜI DÙNG HỆ THỐNG HVHN"
+        section = text[text.index(marker):]
+
+        self.assertIn("chưa từng dùng Discord", section)
+        self.assertIn("Then trên web và bot Discord là hai công cụ khác nhau", section)
+        self.assertIn("Không bao giờ yêu cầu hoặc nhận mật khẩu Discord", section)
+        self.assertIn("tối đa ba bước nhỏ", section)
+        self.assertIn("Không bao giờ gọi câu hỏi của người dùng là ngớ ngẩn", section)
         self.assertIsNone(re.search(r"(?:Ã|Â|Ä|Æ)[\x80-\xbf]|á[º»]", section))
 
 
