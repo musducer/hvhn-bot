@@ -33,6 +33,12 @@ class InternetFetchPolicyTests(unittest.TestCase):
         self.assertEqual(get.call_count, 1)
         self.assertTrue(response.closed)
 
+    def test_requests_fetch_rejects_a_hostname_resolving_to_private_network(self):
+        with patch("internet_curator.socket.getaddrinfo", return_value=[(2, 1, 6, "", ("127.0.0.1", 0))]), \
+             patch("internet_curator.requests.get") as get:
+            self.assertIsNone(_requests_get_public("https://example.com/article", timeout=5))
+        get.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

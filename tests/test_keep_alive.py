@@ -8,6 +8,7 @@ import keep_alive
 class KeepAliveWebhookTest(unittest.TestCase):
     def setUp(self):
         self.client = keep_alive.app.test_client()
+        keep_alive._mint_attempts.clear()
 
     def test_secret_is_required(self):
         with patch.object(keep_alive, "MINT_SECRET", "secret"):
@@ -39,6 +40,40 @@ class KeepAliveWebhookTest(unittest.TestCase):
                 headers={"X-HVHN-Secret": "secret"},
             )
         self.assertEqual(response.status_code, 413)
+
+    def test_rejects_formula_like_names_and_invalid_order_codes(self):
+        with patch.object(keep_alive, "MINT_SECRET", "secret"):
+            response = self.client.post(
+                "/mint-invite",
+                json={
+                    "order_code": "bad code",
+                    "name": "=IMPORTXML",
+                    "email": "an@example.com",
+                    "duration_days": 30,
+                },
+                headers={"X-HVHN-Secret": "secret"},
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "invalid_input")
+
+    def test_authenticated_requests_are_rate_limited_before_bot_dispatch(self):
+        payload = {
+            "order_code": "ORDER1",
+            "name": "An",
+            "email": "an@example.com",
+            "duration_days": 30,
+        }
+        with patch.object(keep_alive, "MINT_SECRET", "secret"), \
+             patch.object(keep_alive, "MINT_RATE_LIMIT", 1):
+            first = self.client.post("/mint-invite", json=payload, headers={"X-HVHN-Secret": "secret"})
+            second = self.client.post("/mint-invite", json=payload, headers={"X-HVHN-Secret": "secret"})
+        self.assertEqual(first.status_code, 503)
+        self.assertEqual(second.status_code, 429)
+
+    def test_webhook_responses_do_not_allow_browser_caching(self):
+        response = self.client.get("/")
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
 
     def test_mint_timeout_returns_promptly_and_cancels_pending_work(self):
         class SlowFuture:

@@ -30,6 +30,15 @@ const THEN_TREN_WEB_FILE_ID = '1I_L8b8U0y7mBx6IW_MGIOAo1lgV8eXr4';
 // (nhận mọi đơn như cũ, tương thích ngược). BẬT: điền email quản lý vào đây + trong TỪNG Form
 // bật "Settings → Responses → Collect email addresses". Đơn từ email lạ sẽ bị bỏ qua + ghi log.
 const MANAGER_EMAILS = []; // vd: ['chu@gmail.com', 'quanly2@gmail.com']
+const MANAGER_EMAILS_PROP = 'HVHN_MANAGER_EMAILS';
+
+function _managerEmails() {
+  const configured = String(PropertiesService.getScriptProperties().getProperty(MANAGER_EMAILS_PROP) || '')
+    .split(/[;,\s]+/);
+  const seen = {};
+  return MANAGER_EMAILS.concat(configured).map(email => String(email || '').trim().toLowerCase())
+    .filter(email => _isValidEmail(email) && !seen[email] && (seen[email] = true));
+}
 
 // B1: cảnh báo registry có 2+ khách CÙNG TÊN nhưng KHÁC EMAIL. mergeRowsIntoClientTabs
 // và phanPhoi còn có cổng cứng: từ chối dòng xung đột và thu quyền email sai khỏi folder.
@@ -57,15 +66,49 @@ function canhBaoTrungTenKhach() {
 }
 
 function _formAllowed(e) {
-  if (!MANAGER_EMAILS.length) return true; // tính năng tắt
+  const allow = _managerEmails();
+  if (!allow.length) {
+    try { ghiLog('Từ chối đơn Form (chưa cấu hình quản lý)', 'Chạy menu Bảo mật để cấu hình Form quản lý'); } catch (e1) {}
+    return false;
+  }
   var email = '';
   try {
     email = String((e && e.response && e.response.getRespondentEmail && e.response.getRespondentEmail()) || '').toLowerCase();
   } catch (err) {}
-  var allow = MANAGER_EMAILS.map(function (x) { return String(x).toLowerCase().trim(); });
   var ok = email && allow.indexOf(email) >= 0;
   if (!ok) { try { ghiLog('Từ chối đơn Form (ngoài allowlist)', email || '(chưa bật thu thập email)'); } catch (e2) {} }
   return ok;
+}
+
+// Thiết lập một lần bằng menu HVHN. Các Form quản lý chỉ nhận đơn từ email này
+// và buộc Google Form thu thập email người gửi để allowlist có thể kiểm tra.
+function caiDatBaoMatFormQuanLy() {
+  const ui = SpreadsheetApp.getUi();
+  const current = _managerEmails().join(', ');
+  const response = ui.prompt(
+    'Bảo mật Form quản lý',
+    'Nhập các email quản lý, cách nhau bằng dấu phẩy. Mọi Form thêm khách/tài liệu sẽ chỉ nhận các email này.\n\nHiện tại: ' + (current || '(chưa cấu hình)'),
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK) return;
+  const emails = String(response.getResponseText() || '').split(/[;,\s]+/)
+    .map(email => String(email || '').trim().toLowerCase())
+    .filter(_isValidEmail);
+  const unique = {};
+  const allowed = emails.filter(email => !unique[email] && (unique[email] = true));
+  if (!allowed.length) {
+    ui.alert('Chưa có email hợp lệ. Không thay đổi cấu hình bảo mật.');
+    return;
+  }
+  PropertiesService.getScriptProperties().setProperty(MANAGER_EMAILS_PROP, allowed.join(','));
+  ['FORM_KHACH_ID', 'FORM_TL_ID', 'FORM_BOT_TL_ID', 'FORM_MD_ID'].forEach(key => {
+    const form = _openFormIfAlive(PropertiesService.getScriptProperties().getProperty(key));
+    if (!form) return;
+    try { form.setCollectEmail(true); }
+    catch (e) { ghiLog('LỖI bật thu thập email Form', key + ' - ' + ((e && e.message) || String(e))); }
+  });
+  ghiLog('Cập nhật allowlist Form quản lý', allowed.join(', '));
+  ui.alert('Đã bảo vệ Form quản lý. Chỉ các email đã cấu hình mới được tạo khách hoặc nạp tài liệu.');
 }
 
 const XOA_KHACH_NAME = '_don_xoa_khach';
@@ -125,6 +168,7 @@ function onOpen() {
     .addItem('🚀 Chạy tất cả NGAY (phân phối + gia hạn + hết hạn + dashboard)', 'hvhnTuDongHoa')
     .addItem('⚙️ Cài/kiểm tra tự động hoá', 'damBaoTuDongHoa')
     .addItem('🛠️ Sửa quyền Drive + trigger', 'suaLoiQuyenDriveVaTrigger')
+    .addItem('🔒 Cấu hình bảo mật Form quản lý', 'caiDatBaoMatFormQuanLy')
     .addItem('📝 Nhập mới thủ công (tab "Nhập mới") + Phân phối', 'themMoiVaPhanPhoi')
     .addItem('🔁 Phân phối lại (quét toàn bộ)', 'phanPhoi')
     .addItem('♻️ Gia hạn ngay các khách đã tick', 'xuLyGiaHan')
@@ -2105,6 +2149,7 @@ function _taoFormKhach(props) {
   form.addTextItem().setTitle('Email (Gmail) học viên').setRequired(true).setValidation(_emailTextValidation());
   form.setConfirmationMessage('Đã nhận! Tài liệu sẽ được gửi sau khi hệ thống xử lý.');
   form.setAcceptingResponses(true);
+  try { form.setCollectEmail(true); } catch (e) { ghiLog('LỖI bật thu thập email Form', 'FORM_KHACH_ID - ' + ((e && e.message) || String(e))); }
   _ensureSingleFormTrigger('xuLyFormKhach', form);
   props.setProperty('FORM_KHACH_ID', form.getId());
   return form;
@@ -2117,6 +2162,7 @@ function _taoFormBot(props) {
   // Apps Script không tạo được câu hỏi upload file bằng code -> thêm tay 1 lần trong link sửa form.
   form.setConfirmationMessage('Đã nhận file. Bot sẽ đọc sau khi watcher trên PC xử lý.');
   form.setAcceptingResponses(true);
+  try { form.setCollectEmail(true); } catch (e) { ghiLog('LỖI bật thu thập email Form', 'FORM_BOT_TL_ID - ' + ((e && e.message) || String(e))); }
   _ensureSingleFormTrigger('xuLyFormTaiLieuBot', form);
   props.setProperty('FORM_BOT_TL_ID', form.getId());
   return form;
@@ -2160,6 +2206,7 @@ function _taoFormMd(props) {
   // Apps Script không tạo được câu hỏi upload file bằng code -> thêm tay 1 lần trong link sửa form.
   form.setConfirmationMessage('Đã nhận file. Bot sẽ đọc sau khi watcher trên PC xử lý.');
   form.setAcceptingResponses(true);
+  try { form.setCollectEmail(true); } catch (e) { ghiLog('LỖI bật thu thập email Form', 'FORM_MD_ID - ' + ((e && e.message) || String(e))); }
   _ensureSingleFormTrigger('xuLyFormMd', form);
   props.setProperty('FORM_MD_ID', form.getId());
   return form;
@@ -2346,6 +2393,7 @@ const PMT_ORDER_TAB = '_don_dat_mua';
 const PMT_DEFAULT_AMOUNT = 99999;
 const PMT_AMOUNT_PROP = 'PMT_FIXED_AMOUNT';
 const PMT_LINK_MINUTES = 30;
+const PMT_MAX_OPEN_ORDERS_PER_EMAIL = 1;
 const PMT_PAYOS_API = 'https://api-merchant.payos.vn';
 const CUSTOMER_GUIDE_FILE_ID = '1DeHcLRGqFWfNVETFRdfx-4dro1-yMsEf';
 const CUSTOMER_GUIDE_URL = 'https://docs.google.com/document/d/1DeHcLRGqFWfNVETFRdfx-4dro1-yMsEf/edit?usp=sharing';
@@ -2612,6 +2660,21 @@ function _pmtShortOrderCode(sheet) {
   throw new Error('Không tạo được mã đơn duy nhất; hãy thử lại.');
 }
 
+function _pmtHasOpenOrderForEmail(sheet, email) {
+  const last = sheet.getLastRow();
+  if (last < 2) return false;
+  const now = _now().getTime();
+  const rows = sheet.getRange(2, 1, last - 1, 15).getValues();
+  let open = 0;
+  rows.forEach(row => {
+    const sameEmail = String(row[3] || '').trim().toLowerCase() === String(email || '').trim().toLowerCase();
+    const status = String(row[5] || '');
+    const expiry = row[14] ? new Date(row[14]).getTime() : 0;
+    if (sameEmail && (status === 'dang_tao_qr' || status === 'cho_thanh_toan') && expiry > now) open++;
+  });
+  return open >= PMT_MAX_OPEN_ORDERS_PER_EMAIL;
+}
+
 function _pmtNumericOrderCode(sheet) {
   const existing = sheet.getLastRow() < 2 ? [] : sheet.getRange(2, 11, sheet.getLastRow() - 1, 1).getValues().flat().map(String);
   for (let attempt = 0; attempt < 20; attempt++) {
@@ -2820,6 +2883,10 @@ function xuLyFormDatMua(e) {
     // Giữ lock chỉ trong lúc cấp mã + đặt chỗ dòng. Hai Form submit đồng
     // thời không thể chọn cùng một dòng hay sinh trùng orderCode.
     sheet = _pmtOrderSheet();
+    if (_pmtHasOpenOrderForEmail(sheet, email)) {
+      ghiLog('Bỏ qua Form đặt mua trùng', email + ' còn đơn thanh toán chưa hết hạn');
+      return;
+    }
     amount = _pmtAmount();
     shortCode = _pmtShortOrderCode(sheet);
     orderCode = _pmtNumericOrderCode(sheet);
@@ -2951,27 +3018,52 @@ function _pmtVerifyWebhook(data, signature) {
 const PREORDER_WORKER_RELAY_ACTION = 'schedule_preorder_worker';
 const PREORDER_WORKER_RELAY_MAX_AGE_MS = 5 * 60 * 1000;
 const DISTRIBUTION_RECOVERY_RELAY_ACTION = 'recover_pending_distribution';
+const INTERNAL_RELAY_SECRET_PROP = 'HVHN_INTERNAL_RELAY_SECRET';
+
+// A distinct per-project secret keeps privileged automation relays independent
+// from the bot/payment integration secret. The external Web App cannot create it.
+function _internalRelaySecret(createIfMissing) {
+  const props = PropertiesService.getScriptProperties();
+  let secret = String(props.getProperty(INTERNAL_RELAY_SECRET_PROP) || '');
+  if (!secret && createIfMissing) {
+    secret = Utilities.getUuid() + Utilities.getUuid();
+    props.setProperty(INTERNAL_RELAY_SECRET_PROP, secret);
+  }
+  return secret;
+}
+
+function _internalRelaySignature(action, timestamp, createIfMissing) {
+  return _pmtHmac(action + ':' + String(timestamp), _internalRelaySecret(!!createIfMissing));
+}
+
+function _consumeInternalRelay(action, timestamp) {
+  const key = 'hvhn_relay_' + action + '_' + String(timestamp);
+  const cache = CacheService.getScriptCache();
+  if (cache.get(key)) return false;
+  cache.put(key, '1', Math.ceil(PREORDER_WORKER_RELAY_MAX_AGE_MS / 1000));
+  return true;
+}
 
 function _preorderWorkerRelaySignature(timestamp) {
-  return _pmtHmac(PREORDER_WORKER_RELAY_ACTION + ':' + String(timestamp), _pmtProp('PMT_SECRET', ''));
+  return _internalRelaySignature(PREORDER_WORKER_RELAY_ACTION, timestamp, true);
 }
 
 function _isAuthorizedPreorderWorkerRelay(payload) {
   const timestamp = Number(payload && payload.timestamp || 0);
-  const secret = _pmtProp('PMT_SECRET', '');
+  const secret = _internalRelaySecret(false);
   if (!secret || !timestamp || Math.abs(Date.now() - timestamp) > PREORDER_WORKER_RELAY_MAX_AGE_MS) return false;
-  return String(payload.signature || '').toLowerCase() === _preorderWorkerRelaySignature(timestamp).toLowerCase();
+  return String(payload.signature || '').toLowerCase() === _internalRelaySignature(PREORDER_WORKER_RELAY_ACTION, timestamp, false).toLowerCase();
 }
 
 function _distributionRecoveryRelaySignature(timestamp) {
-  return _pmtHmac(DISTRIBUTION_RECOVERY_RELAY_ACTION + ':' + String(timestamp), _pmtProp('PMT_SECRET', ''));
+  return _internalRelaySignature(DISTRIBUTION_RECOVERY_RELAY_ACTION, timestamp, true);
 }
 
 function _isAuthorizedDistributionRecoveryRelay(payload) {
   const timestamp = Number(payload && payload.timestamp || 0);
-  const secret = _pmtProp('PMT_SECRET', '');
+  const secret = _internalRelaySecret(false);
   if (!secret || !timestamp || Math.abs(Date.now() - timestamp) > PREORDER_WORKER_RELAY_MAX_AGE_MS) return false;
-  return String(payload.signature || '').toLowerCase() === _distributionRecoveryRelaySignature(timestamp).toLowerCase();
+  return String(payload.signature || '').toLowerCase() === _internalRelaySignature(DISTRIBUTION_RECOVERY_RELAY_ACTION, timestamp, false).toLowerCase();
 }
 
 // Chạy trong Web App execute-as-owner. Đây là đường hồi phục độc lập với trigger
@@ -3007,8 +3099,7 @@ function _schedulePreorderWorkerAsDeploymentOwner() {
 
 function _relayPreorderWorkerToDeploymentOwner() {
   const appUrl = _pmtAppUrl();
-  const secret = _pmtProp('PMT_SECRET', '');
-  if (!appUrl || !secret) return false;
+  if (!appUrl) return false;
   const timestamp = Date.now();
   const res = UrlFetchApp.fetch(appUrl, {
     method: 'post', contentType: 'application/json', muteHttpExceptions: true,
@@ -3040,12 +3131,15 @@ function testWebhookThanhToanChoDonDangChon() {
 function doPost(e) {
   let payload;
   try {
-    payload = JSON.parse((e && e.postData && e.postData.contents) || '{}');
+    const raw = String((e && e.postData && e.postData.contents) || '');
+    if (raw.length > 100000) return _pmtOut('bo_qua');
+    payload = JSON.parse(raw || '{}');
   } catch (e2) {
     return _pmtOut('bo_qua');
   }
   if (payload.internalAction === PREORDER_WORKER_RELAY_ACTION) {
     if (!_isAuthorizedPreorderWorkerRelay(payload)) return _pmtOut('unauthorized');
+    if (!_consumeInternalRelay(PREORDER_WORKER_RELAY_ACTION, Number(payload.timestamp))) return _pmtOut('replay');
     try {
       _schedulePreorderWorkerAsDeploymentOwner();
       return _pmtOut('preorder_worker_scheduled');
@@ -3056,6 +3150,7 @@ function doPost(e) {
   }
   if (payload.internalAction === DISTRIBUTION_RECOVERY_RELAY_ACTION) {
     if (!_isAuthorizedDistributionRecoveryRelay(payload)) return _pmtOut('unauthorized');
+    if (!_consumeInternalRelay(DISTRIBUTION_RECOVERY_RELAY_ACTION, Number(payload.timestamp))) return _pmtOut('replay');
     try {
       return _pmtOut(JSON.stringify(_recoverPendingDistributionAsDeploymentOwner()));
     } catch (recoveryError) {

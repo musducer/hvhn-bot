@@ -36,6 +36,19 @@ def _safe_stem(value: str, fallback: str = "don") -> str:
     return value[:120] or fallback
 
 
+def _safe_person_name(value: str) -> str | None:
+    name = str(value or "").strip()
+    if (not name or len(name) > 120 or re.search(r"[\x00-\x1f\x7f]", name)
+            or name.startswith(("=", "+", "-", "@"))):
+        return None
+    return re.sub(r"\s+", " ", name)
+
+
+def _safe_pdf_filename(value: str) -> str:
+    stem = _safe_stem(Path(str(value or "")).stem or "tai_lieu", "tai_lieu")
+    return stem + ".pdf"
+
+
 def _safe_doc_base(value: str) -> str | None:
     raw = str(value or "").strip()
     if (not raw or raw in {".", ".."} or len(raw) > 200
@@ -150,9 +163,12 @@ class DocumentStorage(commands.Cog):
         if len(data) > MAX_PDF_BYTES:
             return None, f"quá {MAX_PDF_BYTES // 1024 // 1024}MB"
 
+        if not data.startswith(b"%PDF-"):
+            return None, "invalid PDF content"
+
         job_id = await self._enqueue(
             "add_document",
-            file_name=file.filename,
+            file_name=_safe_pdf_filename(file.filename),
             file_data=data,
             requested_by=requested_by,
         )
@@ -180,7 +196,7 @@ class DocumentStorage(commands.Cog):
         if not await self._require_admin(interaction):
             return
         email = email.strip().lower()
-        ten = ten.strip()
+        ten = _safe_person_name(ten)
         if not ten or not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
             await interaction.response.send_message("Tên hoặc email không hợp lệ.", ephemeral=True)
             return

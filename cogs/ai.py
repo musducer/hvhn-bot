@@ -108,8 +108,12 @@ PDF_AGGREGATE_LIMIT = max(
 )
 # Then không có đồng hồ cắt câu trả lời: Discord giữ trạng thái thinking, còn model
 # được quyền hoàn tất suy luận. Timeout mặc định của aiohttp là 5 phút, vì vậy phải
-# đặt total=None một cách tường minh thay vì bỏ tham số timeout.
-LLM_HTTP_TIMEOUT = aiohttp.ClientTimeout(total=None)
+# A bounded provider timeout prevents stuck upstream calls from exhausting workers.
+LLM_HTTP_TIMEOUT = aiohttp.ClientTimeout(
+    total=env_int("HVHN_LLM_TIMEOUT_SECONDS", 120, minimum=20, maximum=300),
+    connect=15,
+    sock_read=110,
+)
 TRUSTED_SOURCE_HINTS = (
     ".gov.vn",
     ".edu.vn",

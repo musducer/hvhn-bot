@@ -5,6 +5,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import tempfile
 import time
 import unicodedata
@@ -32,6 +33,29 @@ MAX_PDF_BYTES = env_int("HVHN_INTERNET_CURATOR_MAX_PDF_MB", 18, minimum=1, maxim
 MAX_PDF_PAGES = env_int("HVHN_INTERNET_CURATOR_MAX_PDF_PAGES", 40, minimum=1, maximum=500)
 DEFAULT_SOURCES_PATH = Path(os.getenv("HVHN_INTERNET_SOURCES", "internet_sources.json"))
 DEFAULT_PENDING_DIR = Path(os.getenv("HVHN_INTERNET_PENDING_DIR", "internet_pending"))
+
+
+def _is_public_address(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(value).is_global
+    except ValueError:
+        return False
+
+
+class PublicOnlyResolver(aiohttp.abc.AbstractResolver):
+    """Reject private, loopback, and link-local DNS answers at connection time."""
+
+    def __init__(self):
+        self._delegate = aiohttp.resolver.DefaultResolver()
+
+    async def resolve(self, host, port=0, family=socket.AF_UNSPEC):
+        records = await self._delegate.resolve(host, port, family)
+        if not records or any(not _is_public_address(record.get("host", "")) for record in records):
+            raise OSError("refusing non-public network destination")
+        return records
+
+    async def close(self):
+        await self._delegate.close()
 
 INTERNET_CURATOR_SCHEMA = """
 CREATE TABLE IF NOT EXISTS ai_internet_items (
@@ -206,6 +230,16 @@ def _requests_get_public(url: str, timeout: int):
         return None
     current = origin
     for _ in range(8):
+        host = urlsplit(current).hostname or ""
+        try:
+            addresses = {
+                item[4][0]
+                for item in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)
+            }
+        except OSError:
+            return None
+        if not addresses or any(not _is_public_address(address) for address in addresses):
+            return None
         response = requests.get(
             current,
             headers={"User-Agent": USER_AGENT},
@@ -871,7 +905,8 @@ async def scan_sources(
     total_examined = 0
     total_inserted = 0
     source_reports = []
-    async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}) as session:
+    connector = aiohttp.TCPConnector(resolver=PublicOnlyResolver(), ttl_dns_cache=0)
+    async with aiohttp.ClientSession(headers={"User-Agent": USER_AGENT}, connector=connector) as session:
         for source in sources:
             discovered = await discover_source_urls(
                 session,

@@ -2,8 +2,10 @@ import os
 import asyncio
 import hmac
 import re
+import time
+from collections import deque
 from concurrent.futures import TimeoutError as FutureTimeoutError
-from threading import Thread
+from threading import Lock, Thread
 
 from flask import Flask, request, jsonify
 from env_utils import env_int
@@ -17,11 +19,48 @@ _bot = None
 # Secret bắt buộc để bảo vệ /mint-invite. Apps Script gửi kèm header X-HVHN-Secret.
 MINT_SECRET = os.getenv("HVHN_MINT_SECRET", "").strip()
 MINT_TIMEOUT = env_int("HVHN_MINT_TIMEOUT", 30, minimum=5, maximum=120)
+MINT_RATE_LIMIT = env_int("HVHN_MINT_RATE_LIMIT", 24, minimum=1, maximum=240)
+MINT_RATE_WINDOW_SECONDS = env_int("HVHN_MINT_RATE_WINDOW_SECONDS", 60, minimum=10, maximum=3600)
+_mint_attempts: deque[float] = deque()
+_mint_attempts_lock = Lock()
+
+
+def _allow_mint_attempt() -> bool:
+    """Bound authenticated invite creation so a leaked integration secret has limited blast radius."""
+    now = time.monotonic()
+    with _mint_attempts_lock:
+        while _mint_attempts and now - _mint_attempts[0] >= MINT_RATE_WINDOW_SECONDS:
+            _mint_attempts.popleft()
+        if len(_mint_attempts) >= MINT_RATE_LIMIT:
+            return False
+        _mint_attempts.append(now)
+        return True
+
+
+def _valid_name(value: str) -> bool:
+    return bool(
+        value
+        and len(value) <= 120
+        and not re.search(r"[\x00-\x1f\x7f]", value)
+        and not value.startswith(("=", "+", "-", "@"))
+    )
+
+
+def _valid_order_code(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Za-z0-9_-]{3,128}", value))
 
 
 @app.errorhandler(413)
 def payload_too_large(_error):
     return jsonify({"error": "payload_too_large"}), 413
+
+
+@app.after_request
+def security_headers(response):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    return response
 
 
 @app.route('/')
@@ -54,9 +93,12 @@ def mint_invite():
         days = 0
     if not order_code or not name or not email or days <= 0:
         return jsonify({"error": "missing_fields", "detail": "Cần order_code, name, email, duration_days > 0"}), 400
-    if (len(order_code) > 128 or len(name) > 200 or len(email) > 320 or days > 3650
+    if (not _valid_order_code(order_code) or not _valid_name(name)
+            or len(email) > 320 or days > 366
             or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)):
         return jsonify({"error": "invalid_input"}), 400
+    if not _allow_mint_attempt():
+        return jsonify({"error": "rate_limited"}), 429
 
     bot = _bot
     cog = bot.get_cog("Membership") if bot is not None else None

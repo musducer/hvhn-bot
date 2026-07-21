@@ -79,6 +79,34 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("function _isValidPersonName(name)", self.src)
         self.assertIn("!_isValidPersonName(name) || !_isValidEmail(email)", self.src)
 
+    def test_manager_forms_fail_closed_and_collect_verified_email(self):
+        self.assertIn("const MANAGER_EMAILS_PROP = 'HVHN_MANAGER_EMAILS'", self.src)
+        form_guard = self.src[self.src.index("function _formAllowed(e)"):self.src.index("const XOA_KHACH_NAME")]
+        self.assertIn("if (!allow.length)", form_guard)
+        self.assertNotIn("if (!MANAGER_EMAILS.length) return true", form_guard)
+        self.assertIn("function caiDatBaoMatFormQuanLy()", self.src)
+        self.assertIn("form.setCollectEmail(true)", self.src)
+
+    def test_privileged_relays_use_a_dedicated_replay_protected_secret(self):
+        self.assertIn("const INTERNAL_RELAY_SECRET_PROP = 'HVHN_INTERNAL_RELAY_SECRET'", self.src)
+        self.assertIn("function _consumeInternalRelay(action, timestamp)", self.src)
+        relays = self.src[
+            self.src.index("const PREORDER_WORKER_RELAY_ACTION"):
+            self.src.index("function _recoverPendingDistributionAsDeploymentOwner")
+        ]
+        self.assertNotIn("_pmtProp('PMT_SECRET'", relays)
+        webhook = self.src[self.src.index("function doPost(e)"):self.src.index("function doGet(e)")]
+        self.assertIn("raw.length > 100000", webhook)
+        self.assertIn("return _pmtOut('replay')", webhook)
+
+    def test_payment_form_does_not_create_duplicate_live_payment_requests(self):
+        self.assertIn("const PMT_MAX_OPEN_ORDERS_PER_EMAIL = 1", self.src)
+        self.assertIn("function _pmtHasOpenOrderForEmail(sheet, email)", self.src)
+        form_handler = self.src[
+            self.src.index("function xuLyFormDatMua(e)"):self.src.index("function _pmtMintInvite")
+        ]
+        self.assertIn("_pmtHasOpenOrderForEmail(sheet, email)", form_handler)
+
     def test_expiry_and_document_deletion_cover_duplicate_legacy_folders(self):
         expiry = self.src[self.src.index("function kiemTraHetHan()"):self.src.index("function giaHanMotDong")]
         remove_doc = self.src[self.src.index("function _xoaMotTaiLieu"):self.src.index("function xoaTaiLieuDaTich")]
