@@ -3318,9 +3318,13 @@ function _preorderSheet() {
   sh.getRange(1, 1, 1, headers.length).setValues([headers]);
   sh.getRange(1, 1, 1, headers.length).setBackground('#6a1b9a').setFontColor('#fff').setFontWeight('bold');
   sh.setFrozenRows(1);
-  sh.setColumnWidth(2, 180); sh.setColumnWidth(3, 240); sh.setColumnWidth(6, 330); sh.setColumnWidth(8, 250);
+  sh.setColumnWidth(1, 145); sh.setColumnWidth(2, 180); sh.setColumnWidth(3, 240);
+  sh.setColumnWidth(4, 155); sh.setColumnWidth(5, 150); sh.setColumnWidth(6, 330); sh.setColumnWidth(7, 145);
   sh.getRange(2, 1, Math.max(1, sh.getMaxRows() - 1), 1).setNumberFormat('dd/mm/yyyy HH:mm:ss');
   sh.getRange(2, 7, Math.max(1, sh.getMaxRows() - 1), 1).setNumberFormat('dd/mm/yyyy HH:mm:ss');
+  // Column H holds response IDs/retry metadata needed for idempotency. It is not
+  // useful to operators and must not make the working view unreadable.
+  sh.hideColumns(8);
   return sh;
 }
 
@@ -3518,6 +3522,43 @@ function _preorderSetNote(sheet, row, detail) {
   sheet.getRange(row, 8).setValue((meta ? meta + '; ' : '') + String(detail || '').slice(0, 500));
 }
 
+function _preorderIsPlainBackfill(note) {
+  const text = String(note || '');
+  return text.indexOf('source=backfill') >= 0 && text.indexOf('resubmit=1') < 0;
+}
+
+// A legacy row predating response IDs is already the durable record for that email.
+// When backfill starts on an established Form, do not recreate its entire history.
+function _preorderCleanupLegacyBackfill(sheet) {
+  const last = sheet.getLastRow();
+  if (last < 2) return 0;
+  const rows = sheet.getRange(2, 1, last - 1, 8).getValues();
+  const groups = {};
+  rows.forEach((row, index) => {
+    const email = _emailIdentityKey(row[2]);
+    if (!email) return;
+    (groups[email] = groups[email] || []).push({ row: row, index: index, rowNumber: index + 2 });
+  });
+
+  const remove = [];
+  Object.keys(groups).forEach(email => {
+    const entries = groups[email];
+    const plainBackfills = entries.filter(entry => _preorderIsPlainBackfill(entry.row[7]));
+    if (!plainBackfills.length) return;
+    const hasEstablishedRecord = entries.some(entry => !_preorderIsPlainBackfill(entry.row[7]));
+    if (hasEstablishedRecord) {
+      plainBackfills.forEach(entry => remove.push(entry.rowNumber));
+      return;
+    }
+    // If the old Form history contains repeated ordinary submits but no prior sheet
+    // row, retain only the first one. Explicit “Nhập lại” rows are never touched.
+    plainBackfills.sort((a, b) => a.index - b.index);
+    plainBackfills.slice(1).forEach(entry => remove.push(entry.rowNumber));
+  });
+  remove.sort((a, b) => b - a).forEach(rowNumber => sheet.deleteRow(rowNumber));
+  return remove.length;
+}
+
 function _preorderRetryInfo(note) {
   const text = String(note || '');
   const count = Number((text.match(/retry=(\d+)/) || [])[1] || 0);
@@ -3671,6 +3712,11 @@ function _preorderQueueFormResponse(response, source) {
   const responseId = response && response.getId ? String(response.getId() || '') : '';
   if (responseId && _preorderFindRowByFormResponseId(sheet, responseId)) return 0;
 
+  // Backfill/recovery must not recreate legacy rows that existed before response IDs
+  // were introduced. A normal live trigger still records duplicate submissions so it
+  // can show the customer the correct “use Nhập lại” outcome.
+  if (!data.resubmit && source !== 'trigger' && _preorderFindRowByEmail(sheet, data.email)) return 0;
+
   const code = data.resubmit ? _preorderReplacementCode(data.email || ('invalid-' + Date.now()))
     : _preorderCode(data.email || ('invalid-' + Date.now()));
   const status = data.resubmit ? 'cho_xac_minh_lai' : 'cho_xac_minh';
@@ -3777,6 +3823,9 @@ function _preorderBackfillFormResponses() {
   const responses = since ? form.getResponses(since) : form.getResponses();
   let latest = lastSeen;
   let added = 0;
+  const sheet = _preorderSheet();
+  const removed = _preorderCleanupLegacyBackfill(sheet);
+  if (removed) ghiLog('Dọn dòng backfill pre-order trùng', removed + ' dòng');
   responses.forEach(response => {
     const timestamp = response.getTimestamp ? response.getTimestamp() : null;
     if (timestamp) latest = Math.max(latest, timestamp.getTime());
