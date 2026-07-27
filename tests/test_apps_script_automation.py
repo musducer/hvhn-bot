@@ -330,10 +330,15 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("PREORDER_RESUBMIT_TITLE", self.src)
         self.assertIn("function _ensurePreorderResubmitChoice(form)", self.src)
         self.assertIn("function _preorderBackfillFormResponses()", self.src)
+        self.assertIn("function phucHoiFormPreorderTheoEmail(email)", self.src)
+        self.assertIn("function phucHoiFormPreorderBangMenu()", self.src)
+        self.assertIn("PREORDER_PRIORITY_CODE_PROP", self.src)
+        self.assertIn("const delivery = xuLyDonPreorderTuDong() || { status: 'scheduled' };", self.src)
         self.assertIn("_preorderQueueFormResponse(e && e.response, 'trigger')", handler)
         self.assertNotIn("_preorderAllowedEmails", handler)
         self.assertIn("_preorderBackfillFormResponses()", worker)
         self.assertIn("_preorderDeleteOtherRowsByEmail", worker)
+        self.assertIn("return { status: 'sent', code: code, email: email, row: row, mail: mailResult };", worker)
 
     def test_then_web_viewer_access_follows_customer_lifecycle(self):
         self.assertIn("const THEN_TREN_WEB_FILE_ID = '1I_L8b8U0y7mBx6IW_MGIOAo1lgV8eXr4'", self.src)

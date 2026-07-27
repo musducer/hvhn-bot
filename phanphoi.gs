@@ -202,6 +202,7 @@ function onOpen() {
       .addItem('1. Kết nối sheet responses cũ', 'caiDatEmailPreorder')
       .addItem('2. Tạo/lấy lại Form pre-order', 'taoLaiFormPreorder')
       .addItem('🔎 Kiểm tra email pre-order', 'kiemTraEmailPreorder')
+      .addItem('Khôi phục email pre-order bị thiếu', 'phucHoiFormPreorderBangMenu')
       .addItem('🔁 Gửi lại link Discord cho khách đang chọn', 'guiLaiLinkDiscordChoPreorderDangChon'))
     .addToUi();
 }
@@ -3338,6 +3339,7 @@ function _preorderReplacementCode(email) {
 const PREORDER_RESUBMIT_TITLE = 'Nhập lại / tạo link Discord mới';
 const PREORDER_RESUBMIT_CHOICE = 'Tôi chưa nhận được link hoặc cần tạo link mới';
 const PREORDER_FORM_BACKFILL_CURSOR_PROP = 'PREORDER_FORM_BACKFILL_CURSOR_MS';
+const PREORDER_PRIORITY_CODE_PROP = 'PREORDER_PRIORITY_CODE';
 
 function _ensurePreorderResubmitChoice(form) {
   let choice = null;
@@ -3680,6 +3682,90 @@ function _preorderQueueFormResponse(response, source) {
   return sheet.getLastRow();
 }
 
+function _preorderLatestFormResponseForEmail(form, email) {
+  const identity = _emailIdentityKey(email);
+  const responses = form.getResponses();
+  for (let i = responses.length - 1; i >= 0; i--) {
+    const data = _preorderResponseData(responses[i]);
+    if (_emailIdentityKey(data.email) === identity) return responses[i];
+  }
+  return null;
+}
+
+// Recovery tool for a specific customer. It also repairs the current Form trigger and
+// worker under the automation owner's account before queueing the exact response.
+function phucHoiFormPreorderTheoEmail(email) {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!_isValidEmail(cleanEmail)) throw new Error('Email không hợp lệ.');
+  const props = PropertiesService.getScriptProperties();
+  const form = _openFormIfAlive(props.getProperty(PREORDER_FORM_ID_PROP));
+  if (!form) throw new Error('Không mở được Form pre-order hiện tại.');
+
+  _ensureFormEmailValidation(form);
+  _ensurePreorderResubmitChoice(form);
+  _ensureSingleFormTrigger('xuLyFormPreorder', form);
+  _ensurePreorderWorkerTrigger();
+
+  const response = _preorderLatestFormResponseForEmail(form, cleanEmail);
+  if (!response) {
+    return { found: false, email: cleanEmail, detail: 'Không tìm thấy response này trong Form hiện tại.' };
+  }
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    const row = _preorderQueueFormResponse(response, 'targeted_recovery');
+    const sheet = _preorderSheet();
+    const data = _preorderResponseData(response);
+    const code = data.resubmit ? _preorderReplacementCode(data.email) : _preorderCode(data.email);
+    const responseId = response.getId ? String(response.getId() || '') : '';
+    const actualRow = row || _preorderFindRowByFormResponseId(sheet, responseId);
+    const actualCode = actualRow ? String(sheet.getRange(actualRow, 4).getValue() || code) : code;
+    props.setProperty(PREORDER_PRIORITY_CODE_PROP, actualCode);
+    _schedulePreorderWorkerSoon(PREORDER_FAST_DELAY_MS);
+    ghiLog('Phục hồi Form pre-order theo email', cleanEmail + ' -> dòng ' + (actualRow || '(đã có)'));
+    return { found: true, queued: !!row, row: actualRow || 0, code: actualCode };
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Owner-only manual recovery for a specific Form response. This is intentionally a
+// Spreadsheet menu action rather than a public endpoint: it can read private Form
+// history and send a customer email, so it must retain the owner's Apps Script grant.
+function phucHoiFormPreorderBangMenu() {
+  const ui = SpreadsheetApp.getUi();
+  const prompt = ui.prompt(
+    'Khôi phục email pre-order bị thiếu',
+    'Nhập email khách đã gửi Form. Hệ thống sẽ tìm response gốc, sửa trigger nếu cần và gửi link ngay.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (prompt.getSelectedButton() !== ui.Button.OK) return;
+
+  const email = String(prompt.getResponseText() || '').trim().toLowerCase();
+  try {
+    const recovery = phucHoiFormPreorderTheoEmail(email);
+    if (!recovery.found) {
+      ui.alert('Không tìm thấy response của ' + email + ' trong Form pre-order hiện tại.');
+      return;
+    }
+    const delivery = xuLyDonPreorderTuDong() || { status: 'scheduled' };
+    const messages = {
+      sent: 'Đã gửi link Discord tới ' + email + '.',
+      rejected_allowlist: 'Email này không có trong allowlist pre-order.',
+      rejected_duplicate: 'Response này trùng bản ghi hiện có; khách cần chọn “Nhập lại” khi gửi Form.',
+      retry_verification: 'Chưa đọc được allowlist. Hệ thống đã lưu yêu cầu và sẽ tự thử lại.',
+      retry_invite: 'Chưa tạo được link Discord. Hệ thống đã lưu yêu cầu và sẽ tự thử lại.',
+      retry_email: 'Đã tạo link nhưng chưa gửi được email. Hệ thống sẽ tự thử lại.',
+      busy: 'Hệ thống đang xử lý một yêu cầu khác. Yêu cầu này đã được lưu và sẽ tự chạy lại.',
+    };
+    ui.alert(messages[delivery.status] || ('Đã khôi phục yêu cầu. Trạng thái: ' + delivery.status));
+  } catch (error) {
+    ghiLog('LỖI khôi phục pre-order qua menu', email + ' - ' + ((error && error.message) || String(error)));
+    ui.alert('Không thể khôi phục: ' + ((error && error.message) || String(error)));
+  }
+}
+
 // Bù các response Form nếu trigger từng bị nghẽn/tắt. Lần đầu chạy quét lịch sử Form;
 // các lần sau chỉ quét từ mốc gần nhất, có overlap để không bỏ sót response sát thời điểm lưu.
 function _preorderBackfillFormResponses() {
@@ -3704,7 +3790,7 @@ function _preorderBackfillFormResponses() {
 // Dòng đang tạo quá lâu được thử lại an toàn: endpoint bot idempotent theo mã pre-order.
 function xuLyDonPreorderTuDong() {
   const lock = LockService.getScriptLock();
-  if (!lock.tryLock(1000)) return;
+  if (!lock.tryLock(1000)) return { status: 'busy' };
   try {
     try {
       const recovered = _preorderBackfillFormResponses();
@@ -3714,9 +3800,17 @@ function xuLyDonPreorderTuDong() {
     }
     const sheet = _preorderSheet();
     const last = sheet.getLastRow();
-    if (last < 2) return;
+    if (last < 2) return { status: 'idle' };
     const rows = sheet.getRange(2, 1, last - 1, 8).getValues();
-    for (let i = 0; i < rows.length; i++) {
+    const priorityCode = PropertiesService.getScriptProperties().getProperty(PREORDER_PRIORITY_CODE_PROP) || '';
+    const indexes = rows.map((_, i) => i).sort((a, b) => {
+      const aPriority = String(rows[a][3] || '') === priorityCode ? 1 : 0;
+      const bPriority = String(rows[b][3] || '') === priorityCode ? 1 : 0;
+      if (aPriority !== bPriority) return bPriority - aPriority;
+      return b - a; // đơn mới nhất đi trước; tránh để một retry cũ chặn khách mới.
+    });
+    for (let n = 0; n < indexes.length; n++) {
+      const i = indexes[n];
       let row = i + 2;
       const name = String(rows[i][1] || '').trim();
       const email = String(rows[i][2] || '').trim().toLowerCase();
@@ -3738,8 +3832,9 @@ function xuLyDonPreorderTuDong() {
           const allowed = _preorderAllowedEmails();
           if (!allowed[_emailIdentityKey(email)]) {
             _preorderMarkFailure(sheet, row, 'tu_choi_allowlist', 'Email không có trong sheet responses cũ.');
+            if (code === priorityCode) PropertiesService.getScriptProperties().deleteProperty(PREORDER_PRIORITY_CODE_PROP);
             ghiLog('Từ chối pre-order (email không có trong allowlist)', email);
-            return;
+            return { status: 'rejected_allowlist', code: code, email: email };
           }
 
           const isResubmission = note.indexOf('resubmit=1') >= 0;
@@ -3752,8 +3847,9 @@ function xuLyDonPreorderTuDong() {
             const existing = _preorderFindRowByEmail(sheet, email);
             if (existing && existing !== row) {
               _preorderMarkFailure(sheet, row, 'tu_choi_da_submit', 'Đã có một lần gửi trước đó. Tích "Nhập lại" trên Form nếu cần link mới.');
+              if (code === priorityCode) PropertiesService.getScriptProperties().deleteProperty(PREORDER_PRIORITY_CODE_PROP);
               ghiLog('Từ chối Form pre-order trùng', code + ' - ' + email);
-              return;
+              return { status: 'rejected_duplicate', code: code, email: email };
             }
           }
           sheet.getRange(row, 5).setValue('cho_tao_invite');
@@ -3761,7 +3857,7 @@ function xuLyDonPreorderTuDong() {
         } catch (verifyError) {
           _preorderScheduleFailure(sheet, row, 'loi_xac_minh', verifyError);
           ghiLog('LỖI xác minh allowlist pre-order', code + ' - ' + ((verifyError && verifyError.message) || String(verifyError)));
-          return;
+          return { status: 'retry_verification', code: code, email: email };
         }
       }
 
@@ -3781,13 +3877,16 @@ function xuLyDonPreorderTuDong() {
         sheet.getRange(row, 6).setValue(out.invite_url);
         sheet.getRange(row, 7).setValue(new Date());
         _preorderSetNote(sheet, row, (out.reused ? 'gui_lai_invite_cu' : 'invite_moi') + '; mail=' + mailResult);
+        if (code === priorityCode) PropertiesService.getScriptProperties().deleteProperty(PREORDER_PRIORITY_CODE_PROP);
         ghiLog('Đã cấp link Discord pre-order', code + ' - ' + name + ' - ' + email);
+        return { status: 'sent', code: code, email: email, row: row, mail: mailResult };
       } catch (e) {
         _preorderScheduleFailure(sheet, row, stage === 'gui_email' ? 'loi_gui_email' : 'loi_tao_invite', e);
         ghiLog('LỖI worker pre-order', code + ' - ' + ((e && e.message) || String(e)));
+        return { status: stage === 'gui_email' ? 'retry_email' : 'retry_invite', code: code, email: email, row: row };
       }
-      return; // Mỗi lượt chỉ xử lý 1 đơn để tránh chuỗi request mạng kéo dài.
     }
+    return { status: 'idle' };
   } finally {
     lock.releaseLock();
   }
