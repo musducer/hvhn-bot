@@ -72,7 +72,7 @@ def home():
 def mint_invite():
     """Phase 3 (Cách A): Apps Script gọi sau khi đối soát chuyển khoản.
 
-    Body JSON: {order_code, name, email, duration_days}. Header: X-HVHN-Secret.
+    Body JSON: {order_code, name, email, duration_days, replace_pending_preorder?}. Header: X-HVHN-Secret.
     Trả {invite_url, order_code, reused, ...}. Idempotent theo order_code (chống double-credit).
     """
     if not MINT_SECRET:
@@ -87,6 +87,7 @@ def mint_invite():
     order_code = str(data.get("order_code") or "").strip()
     name = str(data.get("name") or "").strip()
     email = str(data.get("email") or "").strip().lower()
+    replace_pending_preorder = data.get("replace_pending_preorder", False)
     try:
         days = int(data.get("duration_days") or 0)
     except (TypeError, ValueError):
@@ -95,6 +96,7 @@ def mint_invite():
         return jsonify({"error": "missing_fields", "detail": "Cần order_code, name, email, duration_days > 0"}), 400
     if (not _valid_order_code(order_code) or not _valid_name(name)
             or len(email) > 320 or days > 366
+            or not isinstance(replace_pending_preorder, bool)
             or not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email)):
         return jsonify({"error": "invalid_input"}), 400
     if not _allow_mint_attempt():
@@ -109,7 +111,9 @@ def mint_invite():
     fut = None
     try:
         fut = asyncio.run_coroutine_threadsafe(
-            cog.mint_invite_for_order(order_code, name, email, days), loop
+            cog.mint_invite_for_order(
+                order_code, name, email, days, replace_pending_preorder,
+            ), loop
         )
         result = fut.result(timeout=MINT_TIMEOUT)
     except FutureTimeoutError:

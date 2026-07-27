@@ -293,8 +293,9 @@ class AppsScriptAutomationTest(unittest.TestCase):
             self.src.index("function xuLyFormPreorder(e)"):
             self.src.index("function guiLaiLinkDiscordChoPreorderDangChon()")
         ]
-        self.assertIn("const out = _pmtMintInvite(code, name, email);", worker)
-        self.assertIn("'cho_tao_invite'", form_handler)
+        self.assertIn("const out = _pmtMintInvite(code, name, email, {", worker)
+        self.assertIn("replacePendingPreorder", worker)
+        self.assertIn("'cho_xac_minh'", self.src)
         self.assertNotIn("_pmtMintInvite", form_handler)
         self.assertIn("loi_tao_invite", worker)
         self.assertIn("loi_gui_email", worker)
@@ -320,11 +321,19 @@ class AppsScriptAutomationTest(unittest.TestCase):
         system_tabs = self.src[self.src.index("function isSystemTab"):self.src.index("function _isValidClientTabName")]
         self.assertIn("PMT_ORDER_TAB, PREORDER_TAB", system_tabs)
 
-    def test_preorder_rejects_a_second_form_submit_for_the_same_email(self):
+    def test_preorder_form_persists_first_and_supports_an_explicit_resubmission(self):
         handler = self.src[self.src.index("function xuLyFormPreorder(e)"):]
-        self.assertIn("if (row) {", handler)
-        self.assertIn("Từ chối Form pre-order (đã submit)", handler)
-        self.assertIn("return;", handler)
+        worker = self.src[
+            self.src.index("function xuLyDonPreorderTuDong()"):
+            self.src.index("function xuLyFormPreorder(e)")
+        ]
+        self.assertIn("PREORDER_RESUBMIT_TITLE", self.src)
+        self.assertIn("function _ensurePreorderResubmitChoice(form)", self.src)
+        self.assertIn("function _preorderBackfillFormResponses()", self.src)
+        self.assertIn("_preorderQueueFormResponse(e && e.response, 'trigger')", handler)
+        self.assertNotIn("_preorderAllowedEmails", handler)
+        self.assertIn("_preorderBackfillFormResponses()", worker)
+        self.assertIn("_preorderDeleteOtherRowsByEmail", worker)
 
     def test_then_web_viewer_access_follows_customer_lifecycle(self):
         self.assertIn("const THEN_TREN_WEB_FILE_ID = '1I_L8b8U0y7mBx6IW_MGIOAo1lgV8eXr4'", self.src)

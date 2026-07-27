@@ -381,7 +381,8 @@ class Membership(commands.Cog):
             invite_code, days, order_code, name, email,
         )
 
-    async def mint_invite_for_order(self, order_code: str, name: str, email: str, days: int) -> dict:
+    async def mint_invite_for_order(self, order_code: str, name: str, email: str, days: int,
+                                    replace_pending_preorder: bool = False) -> dict:
         """Phase 3 (Cách A): Apps Script gọi sau khi khớp chuyển khoản.
 
         Tạo invite-1-lần + ghi dòng pending gắn order_code. Idempotent theo order_code để chống
@@ -393,9 +394,12 @@ class Membership(commands.Cog):
         if lock is None:  # hỗ trợ object khởi tạo tối giản trong test/maintenance tools
             lock = self._mint_lock = asyncio.Lock()
         async with lock:
-            return await self._mint_invite_for_order_locked(order_code, name, email, days)
+            return await self._mint_invite_for_order_locked(
+                order_code, name, email, days, replace_pending_preorder,
+            )
 
-    async def _mint_invite_for_order_locked(self, order_code: str, name: str, email: str, days: int) -> dict:
+    async def _mint_invite_for_order_locked(self, order_code: str, name: str, email: str, days: int,
+                                            replace_pending_preorder: bool = False) -> dict:
         order_code = (order_code or "").strip()
         name = (name or "").strip()
         email = (email or "").strip().lower()
@@ -407,6 +411,10 @@ class Membership(commands.Cog):
             raise ValueError("Email không hợp lệ")
         if days <= 0 or days > 3650:
             raise ValueError("duration_days phải trong khoảng 1–3650")
+        if not isinstance(replace_pending_preorder, bool):
+            raise ValueError("replace_pending_preorder không hợp lệ")
+        if replace_pending_preorder and not order_code.startswith("PRE"):
+            raise ValueError("Chỉ đơn pre-order mới được thay invite đang chờ")
 
         store = self.bot.db
         acquire = getattr(store, "acquire", None)
@@ -419,13 +427,21 @@ class Membership(commands.Cog):
                         "SELECT pg_advisory_xact_lock(1213614158, hashtext($1))",
                         order_code,
                     )
+                    if replace_pending_preorder:
+                        await conn.execute(
+                            "SELECT pg_advisory_xact_lock(1213614158, hashtext($1))",
+                            "preorder-email:" + email,
+                        )
                     return await self._mint_invite_for_order_with_store(
-                        conn, order_code, name, email, days,
+                        conn, order_code, name, email, days, replace_pending_preorder,
                     )
-        return await self._mint_invite_for_order_with_store(store, order_code, name, email, days)
+        return await self._mint_invite_for_order_with_store(
+            store, order_code, name, email, days, replace_pending_preorder,
+        )
 
     async def _mint_invite_for_order_with_store(self, store, order_code: str,
-                                                 name: str, email: str, days: int) -> dict:
+                                                  name: str, email: str, days: int,
+                                                  replace_pending_preorder: bool = False) -> dict:
         existing = await store.fetchrow(
             "SELECT invite_code, status FROM hvhn_members WHERE order_code=$1 ORDER BY id DESC LIMIT 1",
             order_code,
@@ -438,6 +454,9 @@ class Membership(commands.Cog):
                 "reused": True,
                 "status": existing["status"],
             }
+
+        if replace_pending_preorder:
+            await self._supersede_pending_preorder_invites(store, email, order_code)
 
         guild = self._guild()
         if guild is None:
@@ -468,6 +487,38 @@ class Membership(commands.Cog):
             "invite_hours": INVITE_HOURS,
             "duration_days": days,
         }
+
+    async def _supersede_pending_preorder_invites(self, store, email: str, keep_order_code: str) -> None:
+        """Invalidate earlier unused PRE invites for one email before issuing a replacement."""
+        rows = await store.fetch(
+            "SELECT id, invite_code FROM hvhn_members "
+            "WHERE lower(email)=lower($1) AND status='pending' AND order_code LIKE 'PRE%' AND order_code<>$2 "
+            "FOR UPDATE",
+            email, keep_order_code,
+        )
+        if not rows:
+            return
+        ids = [row["id"] for row in rows]
+        await store.execute(
+            "UPDATE hvhn_members SET status='replaced' WHERE id = ANY($1::bigint[]) AND status='pending'",
+            ids,
+        )
+        codes = {str(row["invite_code"] or "") for row in rows if row["invite_code"]}
+        if not codes:
+            return
+        guild = self._guild()
+        if guild is None:
+            return
+        try:
+            invites = await guild.invites()
+            for invite in invites:
+                if getattr(invite, "code", None) in codes:
+                    try:
+                        await invite.delete(reason="HVHN replacement pre-order invite")
+                    except (discord.Forbidden, discord.HTTPException) as exc:
+                        print(f"[debug] preorder_replace_invite_delete_failed code={invite.code} err={exc}", flush=True)
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            print(f"[debug] preorder_replace_invite_list_failed err={exc}", flush=True)
 
     async def _mark_invite_joined(self, invite_code: str, discord_id: int) -> dict | None:
         return await self.bot.db.fetchrow(
@@ -563,7 +614,7 @@ class Membership(commands.Cog):
             yield store
 
     async def _activate_customer(self, member_or_id, name: str, email: str, requested_by: int | None = None):
-        """Cho mỗi Discord account kích hoạt đúng một lần, gắn với đúng một email."""
+        """Kích hoạt hoặc sửa thông tin của một Discord account, giữ ràng buộc email đơn đã đăng ký."""
         discord_id = member_or_id if isinstance(member_or_id, int) else member_or_id.id
         async with self._lifecycle_store(discord_id) as store:
             return await self._activate_customer_once(
@@ -589,7 +640,7 @@ class Membership(commands.Cog):
             # The active check and provisioning enqueue run in one database
             # transaction in production, guarded across bot processes.
             already_active = await store.fetchrow(
-                "SELECT id, email, expires_at FROM hvhn_members "
+                "SELECT id, name, email, order_code, expires_at FROM hvhn_members "
                 "WHERE discord_id=$1 AND status='active' ORDER BY id DESC LIMIT 1",
                 discord_id,
             )
@@ -600,12 +651,42 @@ class Membership(commands.Cog):
                         raise RuntimeError(
                             "Không thể cấp đủ role khách HVHN. Hãy kiểm tra cấu hình role/quyền bot rồi thử lại."
                         )
+                    if str(already_active.get("name") or "").strip() != name:
+                        await store.execute(
+                            "UPDATE hvhn_members SET name=$2 WHERE id=$1 AND status='active'",
+                            already_active["id"], name,
+                        )
                     return already_active["expires_at"], None, True
-                raise RuntimeError(
-                    "Tài khoản Discord này đã kích hoạt quyền truy cập tài liệu rồi. "
-                    "Để bảo vệ quyền học liệu, mỗi tài khoản chỉ được liên kết với một email; "
-                    "nếu cần sửa thông tin, hãy liên hệ quản trị viên."
+
+                # Email của invite thanh toán/pre-order là allowlist đã xác nhận; không
+                # cho phép đổi nó từ Discord. Khách vẫn có thể bấm lại, modal đã điền sẵn
+                # email đúng để sửa lỗi gõ ở lần đầu.
+                if already_active.get("order_code"):
+                    raise RuntimeError(
+                        "Email bạn nhập không khớp email đã đăng ký cho lượt mời này. "
+                        f"Hãy bấm lại nút và dùng đúng email: {active_email}."
+                    )
+
+                # Invite thủ công không có email allowlist. Cho phép khách tự sửa email,
+                # đồng thời xếp thu hồi email cũ và cấp lại email mới để không để lộ học liệu.
+                if not await self._grant_roles(member):
+                    raise RuntimeError(
+                        "Không thể cấp đủ role khách HVHN. Hãy kiểm tra cấu hình role/quyền bot rồi thử lại."
+                    )
+                corrected = await store.fetchrow(
+                    "UPDATE hvhn_members SET name=$2, email=$3 WHERE id=$1 AND status='active' RETURNING id",
+                    already_active["id"], name, email,
                 )
+                if corrected is None:
+                    raise RuntimeError("Thông tin vừa thay đổi; vui lòng bấm lại để kiểm tra.")
+                jid_remove = None
+                if active_email:
+                    jid_remove = await self._enqueue("remove_client", active_email, requested_by, db=store)
+                jid_add = await self._enqueue("add_client", f"{name}\t{email}", requested_by, db=store)
+                remove_note = f"#{jid_remove}" if jid_remove is not None else "không có email cũ"
+                return already_active["expires_at"], (
+                    f" Đã xếp thu hồi email cũ {remove_note} và cấp lại email mới #{jid_add}."
+                ), True
 
             row = await store.fetchrow(
                 "SELECT id, email, duration_days, expires_at, status FROM hvhn_members "
@@ -631,8 +712,8 @@ class Membership(commands.Cog):
             bound_email = (row["email"] or "").strip().lower()
             if bound_email and email != bound_email:
                 raise RuntimeError(
-                    "Lượt mời này đã được gắn với một email khác. Để bảo vệ quyền học liệu, "
-                    "bạn hãy dùng đúng email đã đăng ký hoặc liên hệ quản trị viên."
+                    "Email bạn nhập không khớp email đã đăng ký cho lượt mời này. "
+                    f"Hãy bấm lại nút và dùng đúng email: {bound_email}."
                 )
 
             if not await self._grant_roles(member):
@@ -651,11 +732,11 @@ class Membership(commands.Cog):
             jid_add = await self._enqueue("add_client", f"{name}\t{email}", requested_by, db=store)
             return expires, jid_add, False
 
-        expires, jid_add, already_active = await activate_with_store(db or self.bot.db)
+        expires, job_note, already_active = await activate_with_store(db or self.bot.db)
 
         if already_active:
-            return expires, " Quyền hiện có đã được kiểm tra lại; hệ thống không tạo đơn trùng.", True
-        return expires, f" Đã xếp cấp tài liệu #{jid_add}.", False
+            return expires, job_note or " Quyền hiện có đã được kiểm tra lại; hệ thống không tạo đơn trùng.", True
+        return expires, f" Đã xếp cấp tài liệu #{job_note}.", False
 
     async def _grant_roles(self, member: discord.Member) -> bool:
         resolved = [(name, discord.utils.get(member.guild.roles, name=name)) for name in GRANT_ROLES]

@@ -89,6 +89,14 @@ class FakeDB:
         self._job_id = 0
 
     async def fetchrow(self, sql, *args):
+        if "UPDATE hvhn_members SET name=$2, email=$3 WHERE id=$1 AND status='active'" in sql:
+            rid, name, email = args
+            for row in self.rows:
+                if row["id"] == rid and row["status"] == "active":
+                    row["name"] = name
+                    row["email"] = email
+                    return {"id": rid}
+            return None
         if "SET name=$2, email=$3, granted_at=$4, expires_at=$5" in sql and "RETURNING id" in sql:
             rid = args[0]
             for row in self.rows:
@@ -147,6 +155,19 @@ class FakeDB:
             return {"id": row["id"], "duration_days": row["duration_days"]}
         return None
 
+    async def fetch(self, sql, *args):
+        if "order_code LIKE 'PRE%'" in sql and "status='pending'" in sql:
+            email, keep_order_code = args
+            return [
+                {"id": row["id"], "invite_code": row.get("invite_code")}
+                for row in self.rows
+                if row["status"] == "pending"
+                and str(row.get("email") or "").lower() == str(email).lower()
+                and str(row.get("order_code") or "").startswith("PRE")
+                and row.get("order_code") != keep_order_code
+            ]
+        return []
+
     async def fetchval(self, sql, *args):
         if "SELECT 1 FROM hvhn_doc_jobs" in sql:
             email = args[0].lower()
@@ -185,6 +206,10 @@ class FakeDB:
         return None
 
     async def execute(self, sql, *args):
+        if "UPDATE hvhn_members SET status='replaced'" in sql:
+            for row in self.rows:
+                if row["id"] in args[0] and row["status"] == "pending":
+                    row["status"] = "replaced"
         if "UPDATE hvhn_members SET name=COALESCE" in sql:
             rid = args[0]
             for r in self.rows:
@@ -297,17 +322,18 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(m.bot.db.rows[0]["status"], "joined")
         self.assertEqual(m.bot.db.jobs, [])
 
-    async def test_active_customer_cannot_change_email_or_create_another_job(self):
+    async def test_active_manual_customer_can_correct_email_and_reprovision_access(self):
         m = self._cog()
         await m._create_pending_invite("abc", 7, 999)
         await m._mark_invite_joined("abc", 111)
         await m._activate_customer(111, "An", "wrong@example.com", 111)
-        with self.assertRaisesRegex(RuntimeError, "mỗi tài khoản chỉ được liên kết với một email"):
-            await m._activate_customer(111, "An", "right@example.com", 111)
-        self.assertEqual(m.bot.db.rows[0]["email"], "wrong@example.com")
-        self.assertEqual([j["job_type"] for j in m.bot.db.jobs], ["add_client"])
+        _, note, corrected = await m._activate_customer(111, "An", "right@example.com", 111)
+        self.assertTrue(corrected)
+        self.assertIn("thu hồi email cũ", note)
+        self.assertEqual(m.bot.db.rows[0]["email"], "right@example.com")
+        self.assertEqual([j["job_type"] for j in m.bot.db.jobs], ["add_client", "remove_client", "add_client"])
 
-    async def test_active_account_cannot_activate_a_second_invite_for_another_email(self):
+    async def test_active_manual_account_can_correct_to_a_new_email_without_second_active_row(self):
         m = self._cog()
         await m._create_pending_invite("first", 7, 999)
         await m._mark_invite_joined("first", 111)
@@ -315,18 +341,20 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
         await m._create_pending_invite("second", 7, 999)
         await m._mark_invite_joined("second", 111)
 
-        with self.assertRaises(RuntimeError):
-            await m._activate_customer(111, "An", "second@example.com", 111)
+        await m._activate_customer(111, "An", "second@example.com", 111)
 
-        self.assertEqual([r["email"] for r in m.bot.db.rows if r["status"] == "active"], ["first@example.com"])
-        self.assertEqual([j["text_payload"] for j in m.bot.db.jobs], ["An\tfirst@example.com"])
+        self.assertEqual([r["email"] for r in m.bot.db.rows if r["status"] == "active"], ["second@example.com"])
+        self.assertEqual(
+            [j["text_payload"] for j in m.bot.db.jobs],
+            ["An\tfirst@example.com", "first@example.com", "An\tsecond@example.com"],
+        )
 
     async def test_paid_or_preorder_invite_is_bound_to_its_registered_email(self):
         m = self._cog()
         await m._create_pending_order("abc", 7, "PRE1", "An", "registered@example.com")
         await m._mark_invite_joined("abc", 111)
 
-        with self.assertRaisesRegex(RuntimeError, "đúng email đã đăng ký"):
+        with self.assertRaisesRegex(RuntimeError, "không khớp email đã đăng ký"):
             await m._activate_customer(111, "An", "other@example.com", 111)
 
         self.assertEqual(m.bot.db.rows[0]["status"], "joined")
@@ -436,6 +464,10 @@ class FakeInvite:
     def __init__(self, code):
         self.code = code
         self.url = f"https://discord.gg/{code}"
+        self.deleted = False
+
+    async def delete(self, **_kwargs):
+        self.deleted = True
 
 
 class FakeInviteChannel:
@@ -456,6 +488,9 @@ class FakeGuildG:
         self.chan = FakeInviteChannel()
         self.text_channels = [self.chan]
         self.system_channel = self.chan
+
+    async def invites(self):
+        return []
 
 
 class FakeBotG:
@@ -496,6 +531,17 @@ class MintInviteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["invite_url"], first["invite_url"])  # trả lại link cũ
         self.assertEqual(len(m.bot.db.rows), 1)                       # không tạo dòng mới
         self.assertEqual(guild.chan.created, 1)                       # không tạo invite mới
+
+    async def test_preorder_resubmission_replaces_earlier_pending_invite(self):
+        m, guild = self._cog()
+        first = await m.mint_invite_for_order("PREOLD", "An", "an@example.com", 30)
+        replacement = await m.mint_invite_for_order(
+            "PRENEW-R-1", "An", "an@example.com", 30, True,
+        )
+        self.assertFalse(replacement["reused"])
+        self.assertNotEqual(first["invite_url"], replacement["invite_url"])
+        self.assertEqual([row["status"] for row in m.bot.db.rows], ["replaced", "pending"])
+        self.assertEqual(guild.chan.created, 2)
 
     async def test_mint_is_safe_when_duplicate_webhooks_arrive_concurrently(self):
         m, guild = self._cog()
