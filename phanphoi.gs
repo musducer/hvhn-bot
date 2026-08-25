@@ -177,6 +177,7 @@ function onOpen() {
     .addItem('🗑️ Xóa TÀI LIỆU đã tích', 'xoaTaiLieuDaTich')
     .addItem('🗑️ Xóa KHÁCH đã tích (cột H)', 'xoaKhachDaTich')
     .addItem('🗑️ Xóa TẤT CẢ khách', 'xoaTatCaKhach')
+    .addItem('🛡️ Kiểm tra an toàn hạn dùng', 'kiemTraAnToanHanDung')
     .addItem('Cấp quyền xem folder cho khách', 'capQuyenFolderKhachHang')
     .addSeparator()
     .addItem('📱 Tạo lại RIÊNG Form thêm khách', 'taoLaiFormKhach')
@@ -204,6 +205,8 @@ function onOpen() {
       .addItem('🔎 Kiểm tra email pre-order', 'kiemTraEmailPreorder')
       .addItem('Khôi phục email pre-order bị thiếu', 'phucHoiFormPreorderBangMenu')
       .addItem('🔁 Gửi lại link Discord cho khách đang chọn', 'guiLaiLinkDiscordChoPreorderDangChon'))
+    .addSubMenu(ui.createMenu('🛡️ Thao tác xóa cần xác nhận')
+      .addItem('Duyệt lệnh xóa từ Discord', 'xuLyLenhDiscordDaXacNhan'))
     .addToUi();
 }
 
@@ -437,10 +440,9 @@ function hvhnTuDongHoa() {
     xuLyGiaHanTuDong();       // tick Gia hạn -> tự gia hạn, nếu cần thì phân phối lại
     xuLyLenhGiaHanDiscordTuDong(); // lệnh gia hạn từ Discord
     kiemTraHetHan();          // quá hạn -> tự gỡ quyền/xoá file
-    xuLyLenhDiscordTuDong();  // lệnh xoá từ Discord -> xoá Sheet/Drive thật
     donTaiLieuBotOnlyKhoKhachTuDong(); // tài liệu bot-only lỡ lọt kho khách -> gỡ khỏi Sheet/Drive
-    // Xóa khách chạy bằng worker riêng để một trigger sai tài khoản không làm hỏng cả vòng tổng.
-    xoaTaiLieuDaTichTuDong(); // tick Xóa tài liệu -> tự xoá, không cần bấm menu
+    // Customer/document deletion is never run from a recurring trigger. Stale ticks
+    // or mirrored commands must not be able to delete data without owner approval.
     capNhatTaiLieu();         // tab Tài liệu luôn mới
     canhBaoTrungTenKhach();   // B1: cảnh báo khách trùng tên (khác email) -> tránh dùng chung folder
     capNhatDashboard();       // dashboard luôn mới
@@ -460,9 +462,10 @@ function _triggerHandlers() {
     hvhnXuLyNhanh: true,
     tuDongXuLyFileMoi: true,
     kiemTraHetHan: true,
+    dongBoTaiLieuFormTuDong: true,
+    xuLyGuiLaiEmailThanhToanTuDong: true,
     xuLyDonPreorderTuDong: true,
     xuLyDonPreorderNhanh: true,
-    xuLyXoaKhachDaTichAnToan: true,
   };
 }
 
@@ -474,6 +477,7 @@ function _legacyDriveTriggerHandlers() {
     xoaKhachDaTichTuDong: true,
     xoaTaiLieuDaTichTuDong: true,
     xuLyGiaHanTuDong: true,
+    xuLyXoaKhachDaTichAnToan: true,
   };
 }
 
@@ -541,7 +545,7 @@ function kiemTraTuDongHoa() {
     '- hvhnXuLyNhanh: ' + (counts.hvhnXuLyNhanh || 0),
     '- kiemTraHetHan: ' + (counts.kiemTraHetHan || 0),
     '- xuLyDonPreorderTuDong: ' + (counts.xuLyDonPreorderTuDong || 0),
-    '- xuLyXoaKhachDaTichAnToan: ' + (counts.xuLyXoaKhachDaTichAnToan || 0),
+    '- Xóa khách tự động: ĐÃ TẮT (chỉ xóa sau xác nhận menu)',
     '- Trigger edit cũ cần dọn: ' + _demTriggerLegacyDrive(),
     '- Tài khoản Drive automation: ' + (PropertiesService.getScriptProperties().getProperty(AUTOMATION_OWNER_PROP) || '(chưa xác minh)'),
     '',
@@ -554,13 +558,14 @@ function kiemTraTuDongHoa() {
 
 function damBaoTuDongHoa() {
   if (!_coTrigger('hvhnTuDongHoa') || !_coTrigger('hvhnXuLyNhanh')
-      || !_coTrigger('kiemTraHetHan') || !_coTrigger('xuLyDonPreorderTuDong')
-      || !_coTrigger('xuLyXoaKhachDaTichAnToan')
+      || !_coTrigger('kiemTraHetHan') || !_coTrigger('dongBoTaiLieuFormTuDong')
+      || !_coTrigger('xuLyGuiLaiEmailThanhToanTuDong')
+      || !_coTrigger('xuLyDonPreorderTuDong')
       || _demTriggerLegacyDrive()) {
     caiDatTuDongHoa();
     return;
   }
-  SpreadsheetApp.getActiveSpreadsheet().toast('Trigger đã có: làn nhanh mỗi 1 phút + tự động hoá tổng mỗi 5 phút.');
+  SpreadsheetApp.getActiveSpreadsheet().toast('Trigger đã có: làn nhanh mỗi 1 phút + tự động hoá tổng mỗi 5 phút. Xóa luôn cần xác nhận menu.');
 }
 
 function _caiDatTuDongHoaCore(owner) {
@@ -592,12 +597,17 @@ function _caiDatTuDongHoaCore(owner) {
     .everyDays(1)
     .create();
 
-  ScriptApp.newTrigger('xuLyDonPreorderTuDong')
+  ScriptApp.newTrigger('dongBoTaiLieuFormTuDong')
     .timeBased()
     .everyMinutes(1)
     .create();
 
-  ScriptApp.newTrigger('xuLyXoaKhachDaTichAnToan')
+  ScriptApp.newTrigger('xuLyGuiLaiEmailThanhToanTuDong')
+    .timeBased()
+    .everyMinutes(1)
+    .create();
+
+  ScriptApp.newTrigger('xuLyDonPreorderTuDong')
     .timeBased()
     .everyMinutes(1)
     .create();
@@ -607,8 +617,8 @@ function _caiDatTuDongHoaCore(owner) {
   ensureRegistry();
   capNhatTaiLieu();
   capNhatDashboard();
-  ghiLog('Cài tự động hoá', 'chủ Drive=' + owner + '; làn nhanh new_rows, pre-order và xóa khách mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h; đã dọn ' + removedLegacy + ' trigger cũ');
-  ss.toast('Đã cài tự động hoá. File mới, pre-order và xóa khách chờ xử lý mỗi 1 phút.');
+  ghiLog('Cài tự động hoá', 'chủ Drive=' + owner + '; new_rows, Form tài liệu, email QR và pre-order mỗi 1 phút; hvhnTuDongHoa mỗi 5 phút; kiemTraHetHan hằng ngày 1h; xóa chỉ chạy khi xác nhận menu; đã dọn ' + removedLegacy + ' trigger cũ');
+  ss.toast('Đã cài tự động hoá. File mới, Form tài liệu, email QR và pre-order chạy mỗi 1 phút; xóa luôn cần xác nhận menu.');
   return { owner: owner, removedLegacy: removedLegacy };
 }
 
@@ -640,7 +650,7 @@ function suaLoiQuyenDriveVaTrigger() {
   const ui = SpreadsheetApp.getUi();
   try {
     const result = _caiDatTuDongHoaCore(_claimDriveAutomationOwner());
-    ui.alert('Đã xác nhận quyền Drive cho ' + result.owner + ' và cài lại trigger. Tick cột "Xóa khách" sẽ được worker an toàn xử lý trong tối đa 1 phút.');
+    ui.alert('Đã xác nhận quyền Drive cho ' + result.owner + ' và cài lại trigger. Các thao tác xóa hiện chỉ thực hiện qua menu có xác nhận, không còn tự xóa theo tick.');
   } catch (e) {
     const account = Session.getEffectiveUser().getEmail() || '(không xác định được email)';
     ui.alert(
@@ -655,7 +665,7 @@ function suaLoiQuyenDriveVaTrigger() {
 // thay trigger cũ và trả kết quả máy đọc được. Không mở dữ liệu ra bên ngoài.
 function tuSuaXoaKhachTuDong() {
   const result = _caiDatTuDongHoaCore(_claimDriveAutomationOwner());
-  return JSON.stringify({ owner: result.owner, removedLegacy: result.removedLegacy, deleteWorker: 'every_1_minute' });
+  return JSON.stringify({ owner: result.owner, removedLegacy: result.removedLegacy, automaticDeletion: 'disabled' });
 }
 
 // Gộp các dòng đang nằm ở tab "Nhập mới" (đường tay dự phòng, khi không dùng new_rows.csv)
@@ -1087,6 +1097,21 @@ function _hoursBetween(a, b) {
   return (b.getTime() - a.getTime()) / 3600000;
 }
 
+// Never treat an empty, malformed, or locale-ambiguous value as expired. Google
+// Sheets normally stores a Date object; this guard keeps bad manual edits from
+// becoming destructive revocations.
+function _expiryTimeOrNull(value) {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  const time = date.getTime();
+  return isNaN(time) ? null : time;
+}
+
+function _isActuallyExpired(expiry, now) {
+  const expiryTime = _expiryTimeOrNull(expiry);
+  return expiryTime !== null && expiryTime < (now || _now()).getTime();
+}
+
 // Hiển thị thời lượng còn lại thân thiện: <48h -> "Xh"; >=48h -> "Yn Zh".
 function _fmtRemaining(hoursLeft) {
   if (hoursLeft < 0) return 'Hết hạn';
@@ -1150,7 +1175,7 @@ function capNhatTrangThaiHan(reg) {
     let remaining = row[4];
     let status = row[5];
     const expiry = row[3] ? new Date(row[3]) : null;
-    if (!expiry) {
+    if (!expiry || isNaN(expiry.getTime())) {
       out.push(['', status]);
       return;
     }
@@ -1182,7 +1207,13 @@ function kiemTraHetHan() {
   for (let i = 0; i < vals.length; i++) {
     const [name, email, grant, expiry, , status] = vals[i];
     if (!name || !expiry || status === 'Đã gỡ quyền') continue;
-    if (new Date(expiry).getTime() > now.getTime()) continue; // còn hạn (so tới GIỜ)
+    if (_expiryTimeOrNull(expiry) === null) {
+      ghiLog('Bỏ qua gỡ quyền do hạn dùng không hợp lệ', name + ' - ' + email);
+      continue;
+    }
+    // The 72-hour warning is display-only. This is the sole automatic revocation
+    // gate and passes only when the exact expiry instant is strictly in the past.
+    if (!_isActuallyExpired(expiry, now)) continue;
 
     // Quá hạn: xoá toàn bộ file trong folder khách + reset trạng thái các dòng của khách ở tab
     const folders = destRoot.getFoldersByName(name);
@@ -1218,6 +1249,34 @@ function kiemTraHetHan() {
   decorateRegistry(reg);
   Logger.log(`Đã gỡ quyền ${revoked} khách hết hạn.`);
   capNhatDashboard();
+}
+
+// Read-only operator check: proves how many accounts are merely near expiry versus
+// truly past the precise expiry timestamp. It never changes Drive or Sheet data.
+function kiemTraAnToanHanDung() {
+  const reg = ensureRegistry();
+  const last = reg.getLastRow();
+  const now = _now();
+  let active = 0, warning = 0, expired = 0, invalid = 0;
+  if (last >= 2) {
+    reg.getRange(2, 1, last - 1, 6).getValues().forEach(row => {
+      if (!row[0]) return;
+      const expiryTime = _expiryTimeOrNull(row[3]);
+      if (expiryTime === null) { invalid++; return; }
+      const hours = _hoursBetween(now, new Date(expiryTime));
+      if (hours < 0) expired++;
+      else if (hours <= WARN_HOURS) warning++;
+      else active++;
+    });
+  }
+  SpreadsheetApp.getUi().alert(
+    'Kiểm tra hạn dùng (chỉ xem):\n\n'
+      + '• Còn hạn trên 3 ngày: ' + active + '\n'
+      + '• Sắp hết, vẫn còn quyền: ' + warning + '\n'
+      + '• Đã quá hạn chính xác: ' + expired + '\n'
+      + '• Hạn dùng không hợp lệ, đã chặn gỡ quyền: ' + invalid + '\n\n'
+      + 'Hệ thống chỉ tự gỡ quyền ở nhóm “Đã quá hạn chính xác”.'
+  );
 }
 
 // Gia hạn 1 dòng: cộng số GIỜ ở cột I (trống = SUB_HOURS = 720h); nếu đã gỡ -> chuẩn bị phân phối lại.
@@ -1736,8 +1795,8 @@ function _readTextFiles(folderName) {
   return jobs;
 }
 
-// Discord -> watcher -> folder Drive mirror -> Apps Script:
-// xoá thật trên Sheet/Drive, không cần bấm menu.
+// Destructive Discord jobs are intentionally NOT called by recurring automation.
+// They can be executed only through the owner-confirmed menu wrapper below.
 function xuLyLenhDiscordTuDong() {
   const ss = SpreadsheetApp.getActiveSpreadsheet();
   const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
@@ -1802,46 +1861,80 @@ function xoaKhachDaTich() {
     + '\n\nSẽ xoá file + gỡ quyền + xoá tab của họ. Không hoàn tác được.',
     ui.ButtonSet.YES_NO);
   if (resp !== ui.Button.YES) return;
+  const confirm = ui.prompt(
+    'Xác nhận xóa cuối cùng',
+    'Gõ XOA ' + targets.length + ' để xóa đúng ' + targets.length + ' khách đã tích.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (confirm.getSelectedButton() !== ui.Button.OK
+      || String(confirm.getResponseText() || '').trim().toUpperCase() !== 'XOA ' + targets.length) return;
 
-  // UI chỉ đánh dấu/yêu cầu xóa. Worker được xác minh quyền Drive sẽ xử lý trong nền.
-  // Nhờ vậy tài khoản chỉ có quyền Sheet không thể làm bật lỗi quyền truy cập Drive.
-  ghiLog('Xếp hàng xóa khách', targets.length + ' khách; chờ worker Drive được ủy quyền');
-  ui.alert('Đã xếp ' + targets.length + ' khách vào hàng xóa an toàn. Hệ thống sẽ xử lý trong tối đa 1 phút.');
+  try {
+    _assertDestructiveOperationOwner();
+    const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
+    targets.sort((a, b) => b.row - a.row).forEach(target => {
+      // Re-read the row: a concurrent edit must not cause deletion of a different customer.
+      const current = reg.getRange(target.row, 1, 1, DEL_COL).getValues()[0];
+      if (current[DEL_COL - 1] !== true || String(current[0] || '') !== String(target.name || '')
+          || _emailIdentityKey(current[1]) !== _emailIdentityKey(target.email)) {
+        throw new Error('Dữ liệu dòng xóa đã thay đổi; không xóa để bảo vệ khách hàng.');
+      }
+      _xoaMotKhach(ss, destRoot, target.name, target.email);
+      reg.deleteRow(target.row);
+    });
+    decorateRegistry(reg);
+    capNhatDashboard();
+    ghiLog('Xóa khách đã xác nhận', targets.length + ' khách');
+    ui.alert('Đã xóa ' + targets.length + ' khách đã xác nhận.');
+  } catch (error) {
+    ghiLog('LỖI xóa khách đã xác nhận', (error && error.message) || String(error));
+    ui.alert('Không xóa hết do lỗi an toàn: ' + ((error && error.message) || String(error)));
+  }
 }
 
-// Bản tự động: tick cột H là xoá trong vòng chạy trigger kế tiếp, không cần bấm menu.
+function xuLyLenhDiscordDaXacNhan() {
+  const ui = SpreadsheetApp.getUi();
+  const response = ui.prompt(
+    'Duyệt lệnh xóa từ Discord',
+    'Gõ XOA DISCORD để xử lý các file lệnh xóa đang chờ. Mỗi lệnh sẽ xóa thật Sheet/Drive.',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (response.getSelectedButton() !== ui.Button.OK
+      || String(response.getResponseText() || '').trim().toUpperCase() !== 'XOA DISCORD') return;
+  try {
+    _assertDestructiveOperationOwner();
+    xuLyLenhDiscordTuDong();
+    ui.alert('Đã duyệt các lệnh xóa Discord đang chờ. Xem tab Nhật ký để đối chiếu.');
+  } catch (error) {
+    ghiLog('LỖI duyệt lệnh xóa Discord', (error && error.message) || String(error));
+    ui.alert('Không xử lý lệnh xóa: ' + ((error && error.message) || String(error)));
+  }
+}
+
+function _assertDestructiveOperationOwner() {
+  const owner = String(PropertiesService.getScriptProperties().getProperty(AUTOMATION_OWNER_PROP) || '').trim().toLowerCase();
+  const current = _automationExecutionEmail();
+  if (!owner || !current || current !== owner) {
+    throw new Error('Chỉ tài khoản chủ automation (' + (owner || 'chưa cấu hình') + ') được phép xóa.');
+  }
+}
+
+// Compatibility guard for any old trigger that survives outside the current account.
+// It deliberately clears stale delete ticks instead of touching Drive or customer rows.
 function xoaKhachDaTichTuDong() {
-  if (_skipDriveAutomationForUntrustedExecutor('xoaKhachDaTichTuDong')) return;
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
   const reg = ensureRegistry();
   const last = reg.getLastRow();
   if (last < 2) return;
-
-  const vals = reg.getRange(2, 1, last - 1, DEL_COL).getValues();
-  const targets = [];
-  vals.forEach((r, i) => { if (r[DEL_COL - 1] === true) targets.push({ row: i + 2, name: r[0], email: r[1] }); });
-  if (!targets.length) return;
-
-  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
-  targets.sort((a, b) => b.row - a.row);
-  targets.forEach(t => {
-    _xoaMotKhach(ss, destRoot, t.name, t.email);
-    reg.deleteRow(t.row);
-  });
-  decorateRegistry(reg);
-  capNhatDashboard();
-  ghiLog('Tự động xoá khách đã tick', targets.length + ' khách');
+  const checks = reg.getRange(2, DEL_COL, last - 1, 1).getValues();
+  if (!checks.some(row => row[0] === true)) return;
+  reg.getRange(2, DEL_COL, last - 1, 1).setValue(false);
+  ghiLog('Đã hủy tick xóa khách tự động', 'Xóa tự động đã bị vô hiệu hóa để bảo vệ dữ liệu.');
 }
 
 // Worker riêng cho hàng xóa khách. Chạy tách khỏi worker tổng để lỗi Drive không chặn
 // các luồng phân phối, gia hạn hay pre-order.
 function xuLyXoaKhachDaTichAnToan() {
-  if (_skipDriveAutomationForUntrustedExecutor('xuLyXoaKhachDaTichAnToan')) return;
-  try {
-    xoaKhachDaTichTuDong();
-  } catch (e) {
-    ghiLog('LỖI worker xóa khách', (e && e.message) || String(e));
-  }
+  xoaKhachDaTichTuDong();
 }
 
 // Menu: xoá TẤT CẢ khách (dọn sạch để bắt đầu lại). Xác nhận 2 lớp.
@@ -1852,6 +1945,8 @@ function xoaTatCaKhach() {
   if (r1 !== ui.Button.YES) return;
   const r2 = ui.prompt('Xác nhận lần 2', 'Gõ đúng chữ XOA rồi bấm OK để tiếp tục:', ui.ButtonSet.OK_CANCEL);
   if (r2.getSelectedButton() !== ui.Button.OK || r2.getResponseText().trim().toUpperCase() !== 'XOA') return;
+  try { _assertDestructiveOperationOwner(); }
+  catch (error) { ui.alert((error && error.message) || String(error)); return; }
 
   const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
   const reg = ensureRegistry();
@@ -2047,6 +2142,12 @@ function xoaTaiLieuDaTich() {
     + targets.map(t => '• ' + t).join('\n') + '\n\nKhông hoàn tác được.', ui.ButtonSet.YES_NO);
   if (resp !== ui.Button.YES) return;
 
+  const confirm = ui.prompt('Xác nhận xóa cuối cùng', 'Gõ XOA ' + targets.length + ' để tiếp tục.', ui.ButtonSet.OK_CANCEL);
+  if (confirm.getSelectedButton() !== ui.Button.OK
+      || String(confirm.getResponseText() || '').trim().toUpperCase() !== 'XOA ' + targets.length) return;
+  try { _assertDestructiveOperationOwner(); }
+  catch (error) { ui.alert((error && error.message) || String(error)); return; }
+
   const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
   const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
   targets.forEach(docBase => _xoaMotTaiLieu(ss, sourceFolder, destRoot, docBase));
@@ -2057,21 +2158,12 @@ function xoaTaiLieuDaTich() {
 
 // Bản tự động: tick cột "Xóa tài liệu" là xoá trong vòng chạy trigger kế tiếp.
 function xoaTaiLieuDaTichTuDong() {
-  if (_skipDriveAutomationForUntrustedExecutor('xoaTaiLieuDaTichTuDong')) return;
-  const ss = SpreadsheetApp.getActiveSpreadsheet();
   const sh = ss.getSheetByName(DOCS_NAME);
   if (!sh || sh.getLastRow() < 2) return;
-
-  const vals = sh.getRange(2, 1, sh.getLastRow() - 1, 3).getValues();
-  const targets = vals.filter(r => r[2] === true).map(r => r[0]);
-  if (!targets.length) return;
-
-  const sourceFolder = DriveApp.getFolderById(SOURCE_FOLDER_ID);
-  const destRoot = DriveApp.getFolderById(DEST_ROOT_FOLDER_ID);
-  targets.forEach(docBase => _xoaMotTaiLieu(ss, sourceFolder, destRoot, docBase));
-  capNhatTaiLieu();
-  capNhatDashboard();
-  ghiLog('Tự động xoá tài liệu đã tick', targets.length + ' tài liệu');
+  const checks = sh.getRange(2, 3, sh.getLastRow() - 1, 1).getValues();
+  if (!checks.some(row => row[0] === true)) return;
+  sh.getRange(2, 3, sh.getLastRow() - 1, 1).setValue(false);
+  ghiLog('Đã hủy tick xóa tài liệu tự động', 'Xóa tự động đã bị vô hiệu hóa để bảo vệ dữ liệu.');
 }
 
 // ============ GOOGLE FORM CHO ĐIỆN THOẠI ============
@@ -2083,6 +2175,7 @@ const JOBS_KHACH_NAME = '_don_them_khach';      // nơi ghi đơn thêm khách (
 const INCOMING_DOCS_NAME = '_don_them_tai_lieu'; // nơi chứa PDF tài liệu mới (watcher PC đọc)
 const BOT_DOCS_FORM_NAME = '_don_them_tai_lieu_bot'; // PDF chỉ nạp cho AI/bot, không phân phối khách
 const INCOMING_BOT_MD_NAME = '_don_them_tai_lieu_bot_md'; // .md chỉ nạp cho AI/bot, không phân phối khách
+const FORM_TL_BACKFILL_CURSOR_PROP = 'FORM_TL_BACKFILL_CURSOR_MS';
 
 // Mở form theo ID nếu form còn sống (không bị xoá/thùng rác); ngược lại trả null.
 function _openFormIfAlive(id) {
@@ -2300,14 +2393,21 @@ function xuLyFormKhach(e) {
   jobsFolder.createFile('khach_' + Date.now() + '.txt', name + '\t' + email, MimeType.PLAIN_TEXT);
 }
 
-// Handler khi có người submit Form "Thêm tài liệu": copy file PDF vào folder _don_them_tai_lieu.
-function xuLyFormTaiLieu(e) {
-  if (!_formAllowed(e)) return;
+function _formResponseAllowed(response) {
+  const allow = _managerEmails();
+  if (!allow.length) return false;
+  let email = '';
+  try { email = String(response && response.getRespondentEmail && response.getRespondentEmail() || '').trim().toLowerCase(); }
+  catch (e) {}
+  return !!email && allow.indexOf(email) >= 0;
+}
+
+function _copyTaiLieuFormResponse(response) {
   const props = PropertiesService.getScriptProperties();
   const incoming = DriveApp.getFolderById(props.getProperty('INCOMING_DOCS_ID'));
   let tenTL = '';
   let fileIds = [];
-  e.response.getItemResponses().forEach(it => {
+  (response && response.getItemResponses ? response.getItemResponses() : []).forEach(it => {
     const type = it.getItem().getType();
     if (type === FormApp.ItemType.FILE_UPLOAD) {
       fileIds = fileIds.concat(it.getResponse());
@@ -2315,13 +2415,48 @@ function xuLyFormTaiLieu(e) {
       tenTL = String(it.getResponse()).trim();
     }
   });
+  let copied = 0;
   fileIds.forEach(id => {
     const f = DriveApp.getFileById(id);
     let newName = f.getName();
     if (tenTL) newName = tenTL.replace(/[\\\/:*?"<>|]/g, '').trim() + '.pdf';
     if (!/\.pdf$/i.test(newName)) newName += '.pdf';
+    // Backfill can see an already-processed response. A matching incoming filename
+    // is the durable idempotency marker used by the local renderer/watcher.
+    if (incoming.getFilesByName(newName).hasNext()) return;
     f.makeCopy(newName, incoming);
+    copied++;
   });
+  return copied;
+}
+
+// Handler when a manager submits the document Form: copy immediately. The one-minute
+// backfill below retries from Form history if this invocation ever fails mid-flight.
+function xuLyFormTaiLieu(e) {
+  if (!_formAllowed(e)) return;
+  const copied = _copyTaiLieuFormResponse(e && e.response);
+  ghiLog('Đã nhận Form tài liệu', copied + ' file');
+}
+
+function dongBoTaiLieuFormTuDong() {
+  if (_skipDriveAutomationForUntrustedExecutor('dongBoTaiLieuFormTuDong')) return { skipped: true };
+  const props = PropertiesService.getScriptProperties();
+  const form = _openFormIfAlive(props.getProperty('FORM_TL_ID'));
+  if (!form) return { status: 'no_form' };
+  const lastSeen = Number(props.getProperty(FORM_TL_BACKFILL_CURSOR_PROP) || 0);
+  const since = lastSeen ? new Date(Math.max(0, lastSeen - 60000)) : null;
+  const responses = since ? form.getResponses(since) : form.getResponses();
+  let latest = lastSeen;
+  let copied = 0;
+  responses.forEach(response => {
+    const timestamp = response.getTimestamp ? response.getTimestamp() : null;
+    if (timestamp) latest = Math.max(latest, timestamp.getTime());
+    if (!_formResponseAllowed(response)) return;
+    copied += _copyTaiLieuFormResponse(response);
+  });
+  if (latest) props.setProperty(FORM_TL_BACKFILL_CURSOR_PROP, String(latest));
+  if (copied) ghiLog('Phục hồi Form tài liệu', copied + ' file từ lịch sử Form');
+  return { status: 'ok', copied: copied };
 }
 
 function xuLyFormTaiLieuBot(e) {
@@ -2863,6 +2998,56 @@ function _pmtSendPaymentEmail(email, name, shortCode, amount, checkoutUrl, qrDat
     '<p style="font-size:13px;color:#5f6368">Nếu QR không hiển thị, hãy bấm nút “Mở trang thanh toán an toàn”. Nếu quá thời hạn hoặc cần hỗ trợ, hãy tạo lại đơn bằng Form HVHN.</p>' +
     '<p>Trân trọng,<br><strong>HVHN · Hồn Văn, Hồn Người</strong></p></div>';
   MailApp.sendEmail({ to: email, subject: '[HVHN] Mã QR thanh toán ' + _pmtFormatAmount(amount), body: body, htmlBody: html, name: 'HVHN' });
+}
+
+// A successful QR creation must not depend on a single MailApp attempt. This worker
+// only retries rows that already contain the original payment link, so it cannot
+// create an additional payment request or alter the amount/order code.
+function xuLyGuiLaiEmailThanhToanTuDong() {
+  const lock = LockService.getScriptLock();
+  if (!lock.tryLock(1000)) return { status: 'busy' };
+  try {
+    const sheet = _pmtOrderSheet();
+    const last = sheet.getLastRow();
+    if (last < 2) return { status: 'idle' };
+    const now = _now().getTime();
+    const rows = sheet.getRange(2, 1, last - 1, 15).getValues();
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const status = String(row[5] || '');
+      const emailSentAt = row[8];
+      const expiryTime = _expiryTimeOrNull(row[14]);
+      const checkoutUrl = String(row[12] || '').trim();
+      if (emailSentAt || !checkoutUrl || expiryTime === null || expiryTime <= now) continue;
+      if (status !== 'loi_gui_email_qr' && status !== 'cho_thanh_toan') continue;
+
+      const rowNumber = i + 2;
+      const name = String(row[2] || '').trim();
+      const email = String(row[3] || '').trim().toLowerCase();
+      const code = String(row[1] || '').trim();
+      const amount = Number(row[4] || 0);
+      if (!_isValidPersonName(name) || !_isValidEmail(email) || !code || amount < 1000) {
+        sheet.getRange(rowNumber, 10).setValue('Không thể gửi lại: dữ liệu đơn không hợp lệ.');
+        continue;
+      }
+      try {
+        _pmtSendPaymentEmail(email, name, code, amount, checkoutUrl, String(row[13] || ''), new Date(expiryTime));
+        sheet.getRange(rowNumber, 6).setValue('cho_thanh_toan');
+        sheet.getRange(rowNumber, 9).setValue(new Date());
+        sheet.getRange(rowNumber, 10).setValue('Đã tự gửi lại email QR.');
+        ghiLog('Tự gửi lại email QR', code + ' - ' + email);
+        return { status: 'sent', row: rowNumber, email: email };
+      } catch (error) {
+        sheet.getRange(rowNumber, 6).setValue('loi_gui_email_qr');
+        sheet.getRange(rowNumber, 10).setValue(String((error && error.message) || error).slice(0, 500));
+        ghiLog('LỖI tự gửi lại email QR', code + ' - ' + ((error && error.message) || String(error)));
+        return { status: 'retry', row: rowNumber, email: email };
+      }
+    }
+    return { status: 'idle' };
+  } finally {
+    lock.releaseLock();
+  }
 }
 
 // onFormSubmit: tạo QR/link PayOS riêng, lưu đầy đủ thông tin trước rồi mới gửi email.

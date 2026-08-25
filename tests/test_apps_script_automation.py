@@ -20,8 +20,10 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn(".everyMinutes(5)", self.src)
         self.assertIn("function hvhnXuLyNhanh()", self.src)
         self.assertIn("ScriptApp.newTrigger('hvhnXuLyNhanh')", self.src)
+        self.assertIn("ScriptApp.newTrigger('dongBoTaiLieuFormTuDong')", self.src)
+        self.assertIn("ScriptApp.newTrigger('xuLyGuiLaiEmailThanhToanTuDong')", self.src)
         self.assertIn("ScriptApp.newTrigger('xuLyDonPreorderTuDong')", self.src)
-        self.assertIn("ScriptApp.newTrigger('xuLyXoaKhachDaTichAnToan')", self.src)
+        self.assertNotIn("ScriptApp.newTrigger('xuLyXoaKhachDaTichAnToan')", self.src)
         self.assertIn("function _schedulePreorderWorkerSoon(delayMs)", self.src)
         self.assertIn("PREORDER_FAST_DELAY_MS = 10000", self.src)
         self.assertIn("function _relayPreorderWorkerToDeploymentOwner()", self.src)
@@ -44,15 +46,19 @@ class AppsScriptAutomationTest(unittest.TestCase):
         self.assertIn("onEdit: true", self.src)
         self.assertIn("legacyHandlers[handler]", installer)
 
-    def test_customer_deletion_is_queued_and_only_authorized_workers_touch_drive(self):
+    def test_customer_deletion_never_runs_automatically(self):
         manual = self.src[self.src.index("function xoaKhachDaTich()"):self.src.index("function xoaKhachDaTichTuDong()")]
         worker = self.src[self.src.index("function xoaKhachDaTichTuDong()"):self.src.index("function xoaTatCaKhach()")]
-        self.assertNotIn("DriveApp.", manual)
-        self.assertIn("Đã xếp", manual)
-        self.assertIn("_skipDriveAutomationForUntrustedExecutor('xoaKhachDaTichTuDong')", worker)
+        self.assertIn("_assertDestructiveOperationOwner();", manual)
+        self.assertIn("XOA ' + targets.length", manual)
+        self.assertNotIn("DriveApp.", worker)
+        self.assertIn("setValue(false)", worker)
         self.assertIn("function xuLyXoaKhachDaTichAnToan()", worker)
         self.assertIn("AUTOMATION_OWNER_PROP", self.src)
         self.assertIn("function tuSuaXoaKhachTuDong()", self.src)
+        automation = self.src[self.src.index("function hvhnTuDongHoa()"):self.src.index("function _triggerHandlers()")]
+        self.assertNotIn("xuLyLenhDiscordTuDong();", automation)
+        self.assertNotIn("xoaTaiLieuDaTichTuDong();", automation)
 
     def test_fast_lane_recovers_every_pending_distribution_state(self):
         self.assertIn("phanPhoi({ onlyMissing: true, skipPostSync: true", self.src)
@@ -106,12 +112,28 @@ class AppsScriptAutomationTest(unittest.TestCase):
             self.src.index("function xuLyFormDatMua(e)"):self.src.index("function _pmtMintInvite")
         ]
         self.assertIn("_pmtHasOpenOrderForEmail(sheet, email)", form_handler)
+        retry = self.src[
+            self.src.index("function xuLyGuiLaiEmailThanhToanTuDong()"):
+            self.src.index("function xuLyFormDatMua(e)")
+        ]
+        self.assertIn("_pmtSendPaymentEmail(email, name, code, amount, checkoutUrl", retry)
+        self.assertNotIn("_pmtCreatePayosLink", retry)
 
     def test_expiry_and_document_deletion_cover_duplicate_legacy_folders(self):
-        expiry = self.src[self.src.index("function kiemTraHetHan()"):self.src.index("function giaHanMotDong")]
+        expiry = self.src[self.src.index("function kiemTraHetHan()"):self.src.index("function kiemTraAnToanHanDung()")]
         remove_doc = self.src[self.src.index("function _xoaMotTaiLieu"):self.src.index("function xoaTaiLieuDaTich")]
         self.assertIn("while (folders.hasNext())", expiry)
         self.assertIn("while (folders.hasNext())", remove_doc)
+        self.assertIn("function _isActuallyExpired(expiry, now)", self.src)
+        self.assertIn("if (!_isActuallyExpired(expiry, now)) continue;", expiry)
+        self.assertNotIn("WARN_HOURS", expiry)
+
+    def test_document_form_has_idempotent_history_recovery(self):
+        self.assertIn("const FORM_TL_BACKFILL_CURSOR_PROP", self.src)
+        self.assertIn("function _copyTaiLieuFormResponse(response)", self.src)
+        self.assertIn("function dongBoTaiLieuFormTuDong()", self.src)
+        self.assertIn("incoming.getFilesByName(newName).hasNext()", self.src)
+        self.assertIn("form.getResponses(since)", self.src)
 
     def test_client_name_email_identity_is_enforced_before_distribution(self):
         merge = self.src[
