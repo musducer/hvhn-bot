@@ -23,6 +23,7 @@ from env_utils import env_int
 GRANT_ROLES = [r.strip() for r in os.getenv("HVHN_KHACH_ROLES", "Dân làng Hua Tát").split(",") if r.strip()]
 GRACE_DAYS = env_int("HVHN_KHACH_GRACE_DAYS", 3, minimum=0, maximum=365)
 DEFAULT_DURATION_DAYS = env_int("HVHN_KHACH_DURATION_DAYS", 30, minimum=1, maximum=3650)
+EXPIRY_CHECK_HOURS = env_int("HVHN_KHACH_EXPIRY_CHECK_HOURS", 6, minimum=1, maximum=168)
 GUILD_ID = env_int("HVHN_GUILD_ID", 0, minimum=0, maximum=2**63 - 1)
 INVITE_HOURS = env_int("HVHN_KHACH_INVITE_HOURS", 72, minimum=1, maximum=8760)
 ONBOARDING_CLEANUP_HOURS = env_int(
@@ -1024,7 +1025,7 @@ class Membership(commands.Cog):
             ephemeral=True)
 
     # ---- vòng lặp tự động ----
-    @tasks.loop(hours=1)
+    @tasks.loop(hours=EXPIRY_CHECK_HOURS)
     async def expiry_loop(self):
         try:
             await self._run_expiry_tick()

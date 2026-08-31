@@ -7,7 +7,8 @@ import watcher
 class WatcherSpeedTest(unittest.TestCase):
     def test_default_local_drive_poll_is_fast_and_configurable(self):
         self.assertLessEqual(watcher.POLL_SECONDS, 5)
-        self.assertGreaterEqual(watcher.DISCORD_JOB_IDLE_POLL_SECONDS, 300)
+        self.assertGreaterEqual(watcher.DISCORD_JOB_IDLE_POLL_SECONDS, 21600)
+        self.assertLess(watcher._last_discord_job_poll, 0)
         self.assertEqual(watcher.DB_POOL_MIN_SIZE, 0)
         source = inspect.getsource(watcher)
         self.assertIn("HVHN_WATCHER_POLL_SECONDS", source)

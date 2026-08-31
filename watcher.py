@@ -76,17 +76,17 @@ DB_POOL_MIN_SIZE = env_int("HVHN_DB_POOL_MIN_SIZE", 0, minimum=0, maximum=20)
 DB_POOL_MAX_SIZE = max(DB_POOL_MIN_SIZE, env_int("HVHN_DB_POOL_MAX_SIZE", 2, minimum=1, maximum=20))
 DB_POOL_IDLE_SECONDS = env_float("HVHN_DB_POOL_IDLE_SECONDS", 30, minimum=0, maximum=3600)
 DISCORD_JOB_IDLE_POLL_SECONDS = env_int(
-    "HVHN_WATCHER_DB_IDLE_POLL_SECONDS", 900, minimum=60, maximum=86400,
+    "HVHN_WATCHER_DB_IDLE_POLL_SECONDS", 21600, minimum=60, maximum=86400,
 )
 RUNTIME_STATUS_SYNC_SECONDS = env_int(
-    "HVHN_WATCHER_STATUS_SYNC_SECONDS", 900, minimum=60, maximum=86400,
+    "HVHN_WATCHER_STATUS_SYNC_SECONDS", 21600, minimum=60, maximum=86400,
 )
 _db_backoff_seconds = DB_RETRY_BASE_SECONDS
 _last_db_error = ""
 _db_pool = None
 _db_pool_loop_id = None
-_last_discord_job_poll = 0.0
-_last_runtime_status_sync = 0.0
+_last_discord_job_poll = -DISCORD_JOB_IDLE_POLL_SECONDS
+_last_runtime_status_sync = -RUNTIME_STATUS_SYNC_SECONDS
 _db_reconnect_count = 0
 _db_last_success = ""
 _db_last_latency_ms = 0.0

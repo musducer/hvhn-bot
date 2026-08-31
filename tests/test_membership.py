@@ -449,6 +449,11 @@ class RegisterTest(unittest.IsolatedAsyncioTestCase):
             cleanup_source.index("UPDATE hvhn_members SET status='kicked'"),
         )
 
+    def test_expiry_loop_interval_is_configurable_for_free_database_sleep(self):
+        source = Path("cogs/membership.py").read_text(encoding="utf-8")
+        self.assertIn("HVHN_KHACH_EXPIRY_CHECK_HOURS", source)
+        self.assertIn("@tasks.loop(hours=EXPIRY_CHECK_HOURS)", source)
+
     async def test_activation_requires_member_still_in_guild(self):
         m = self._cog()
         async def _missing_member(discord_id):
