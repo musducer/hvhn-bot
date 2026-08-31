@@ -2173,6 +2173,7 @@ function xoaTaiLieuDaTichTuDong() {
 const HVHN_PARENT_FOLDER_ID = '10RjJY_DVmI8Ys-tV1k_HzMLIIFCvbRWs'; // folder cha "TÀI LIỆU ĐỘC QUYỀN HVHN"
 const JOBS_KHACH_NAME = '_don_them_khach';      // nơi ghi đơn thêm khách (watcher PC đọc)
 const INCOMING_DOCS_NAME = '_don_them_tai_lieu'; // nơi chứa PDF tài liệu mới (watcher PC đọc)
+const PROCESSED_DOCS_NAME = '_da_xu_ly_tai_lieu'; // PDF gốc đã được watcher xử lý; dùng để chặn backfill cũ
 const BOT_DOCS_FORM_NAME = '_don_them_tai_lieu_bot'; // PDF chỉ nạp cho AI/bot, không phân phối khách
 const INCOMING_BOT_MD_NAME = '_don_them_tai_lieu_bot_md'; // .md chỉ nạp cho AI/bot, không phân phối khách
 const FORM_TL_BACKFILL_CURSOR_PROP = 'FORM_TL_BACKFILL_CURSOR_MS';
@@ -2325,6 +2326,7 @@ function caiDatForm() {
   const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
   const jobsFolder = getOrCreateFolder(parent, JOBS_KHACH_NAME);
   const incomingFolder = getOrCreateFolder(parent, INCOMING_DOCS_NAME);
+  getOrCreateFolder(parent, PROCESSED_DOCS_NAME);
   const botDocsFolder = getOrCreateFolder(parent, BOT_DOCS_FORM_NAME);
 
   const props = PropertiesService.getScriptProperties();
@@ -2402,9 +2404,27 @@ function _formResponseAllowed(response) {
   return !!email && allow.indexOf(email) >= 0;
 }
 
+function _folderHasFileName(folder, name) {
+  try { return !!folder && folder.getFilesByName(name).hasNext(); }
+  catch (e) { return false; }
+}
+
+function _rememberTaiLieuFormCursor(response) {
+  try {
+    const timestamp = response && response.getTimestamp ? response.getTimestamp() : null;
+    if (!timestamp) return;
+    const props = PropertiesService.getScriptProperties();
+    const current = Number(props.getProperty(FORM_TL_BACKFILL_CURSOR_PROP) || 0);
+    props.setProperty(FORM_TL_BACKFILL_CURSOR_PROP, String(Math.max(current, timestamp.getTime())));
+  } catch (e) {}
+}
+
 function _copyTaiLieuFormResponse(response) {
   const props = PropertiesService.getScriptProperties();
-  const incoming = DriveApp.getFolderById(props.getProperty('INCOMING_DOCS_ID'));
+  const parent = DriveApp.getFolderById(HVHN_PARENT_FOLDER_ID);
+  const incomingId = props.getProperty('INCOMING_DOCS_ID');
+  const incoming = incomingId ? DriveApp.getFolderById(incomingId) : getOrCreateFolder(parent, INCOMING_DOCS_NAME);
+  const processed = getOrCreateFolder(parent, PROCESSED_DOCS_NAME);
   let tenTL = '';
   let fileIds = [];
   (response && response.getItemResponses ? response.getItemResponses() : []).forEach(it => {
@@ -2421,9 +2441,9 @@ function _copyTaiLieuFormResponse(response) {
     let newName = f.getName();
     if (tenTL) newName = tenTL.replace(/[\\\/:*?"<>|]/g, '').trim() + '.pdf';
     if (!/\.pdf$/i.test(newName)) newName += '.pdf';
-    // Backfill can see an already-processed response. A matching incoming filename
-    // is the durable idempotency marker used by the local renderer/watcher.
-    if (incoming.getFilesByName(newName).hasNext()) return;
+    // Backfill can see an old response. Incoming means "already queued"; processed
+    // means "watcher already handled it", so neither should be queued again.
+    if (_folderHasFileName(incoming, newName) || _folderHasFileName(processed, newName)) return;
     f.makeCopy(newName, incoming);
     copied++;
   });
@@ -2435,6 +2455,7 @@ function _copyTaiLieuFormResponse(response) {
 function xuLyFormTaiLieu(e) {
   if (!_formAllowed(e)) return;
   const copied = _copyTaiLieuFormResponse(e && e.response);
+  _rememberTaiLieuFormCursor(e && e.response);
   ghiLog('Đã nhận Form tài liệu', copied + ' file');
 }
 
@@ -2444,8 +2465,13 @@ function dongBoTaiLieuFormTuDong() {
   const form = _openFormIfAlive(props.getProperty('FORM_TL_ID'));
   if (!form) return { status: 'no_form' };
   const lastSeen = Number(props.getProperty(FORM_TL_BACKFILL_CURSOR_PROP) || 0);
-  const since = lastSeen ? new Date(Math.max(0, lastSeen - 60000)) : null;
-  const responses = since ? form.getResponses(since) : form.getResponses();
+  if (!lastSeen) {
+    props.setProperty(FORM_TL_BACKFILL_CURSOR_PROP, String(Date.now()));
+    ghiLog('Khoi tao moc Form tai lieu', 'Bo qua lich su Form cu; chi phuc hoi submit moi tu sau moc nay');
+    return { status: 'cursor_initialized', copied: 0 };
+  }
+  const since = new Date(Math.max(0, lastSeen - 60000));
+  const responses = form.getResponses(since);
   let latest = lastSeen;
   let copied = 0;
   responses.forEach(response => {

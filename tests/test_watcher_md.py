@@ -159,6 +159,36 @@ class WatcherMdTest(unittest.TestCase):
             self.assertEqual(second.read_bytes(), b"%PDF-second")
             self.assertEqual(list(store.glob("*.part")), [])
 
+    def test_processed_document_replay_is_moved_without_rendering(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                incoming = Path(temp_dir) / "incoming"
+                processed = Path(temp_dir) / "processed"
+                store = Path(temp_dir) / "docs"
+                incoming.mkdir()
+                store.mkdir()
+                (store / "lesson.pdf").write_bytes(b"%PDF-same-content")
+                replay = incoming / "old-form-response.pdf"
+                replay.write_bytes(b"%PDF-same-content")
+
+                with patch.object(watcher, "INCOMING_DOCS", str(incoming)), \
+                        patch.object(watcher, "PROCESSED_DOCS", str(processed)), \
+                        patch.object(watcher, "DOCS_DIR", str(store)), \
+                        patch.object(watcher, "_stable", return_value=True), \
+                        patch.object(watcher, "_validate_local_pdf"), \
+                        patch.object(watcher, "_index_pdf_for_ai", new=AsyncMock()) as index_pdf, \
+                        patch.object(watcher, "render_batch") as render_batch, \
+                        patch.object(watcher, "write_new_rows_csv") as write_csv:
+                    await watcher.xu_ly_don_them_tai_lieu()
+
+                self.assertFalse(replay.exists())
+                self.assertEqual(len(list(processed.glob("old-form-response*.pdf"))), 1)
+                index_pdf.assert_not_awaited()
+                render_batch.assert_not_called()
+                write_csv.assert_not_called()
+
+        asyncio.run(scenario())
+
     def test_discord_job_ack_retries_without_repeating_the_side_effect(self):
         async def scenario():
             mark = AsyncMock(side_effect=[False, False, True])

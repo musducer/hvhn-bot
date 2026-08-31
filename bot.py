@@ -8,12 +8,22 @@ from discord import app_commands
 from dotenv import load_dotenv
 
 from cogs.admin_visibility import apply_admin_command_visibility
+from env_utils import env_int
 from keep_alive import keep_alive
 from pdf_knowledge import PDF_KNOWLEDGE_SCHEMA
 from md_knowledge import MD_KNOWLEDGE_SCHEMA
 from internet_curator import INTERNET_CURATOR_SCHEMA
 
 load_dotenv()
+
+BOT_DB_POOL_MIN_SIZE = env_int("HVHN_BOT_DB_POOL_MIN_SIZE", 0, minimum=0, maximum=20)
+BOT_DB_POOL_MAX_SIZE = max(
+    1,
+    env_int("HVHN_BOT_DB_POOL_MAX_SIZE", 2, minimum=1, maximum=20),
+)
+if BOT_DB_POOL_MAX_SIZE < BOT_DB_POOL_MIN_SIZE:
+    BOT_DB_POOL_MAX_SIZE = max(1, BOT_DB_POOL_MIN_SIZE)
+BOT_DB_IDLE_SECONDS = env_int("HVHN_BOT_DB_IDLE_SECONDS", 30, minimum=0, maximum=3600)
 
 INITIAL_EXTENSIONS = [
     "cogs.setup",
@@ -260,7 +270,12 @@ class HVHNBot(commands.Bot):
         self.db: asyncpg.Pool | None = None
 
     async def setup_hook(self):
-        self.db = await asyncpg.create_pool(self.database_url)
+        self.db = await asyncpg.create_pool(
+            self.database_url,
+            min_size=BOT_DB_POOL_MIN_SIZE,
+            max_size=BOT_DB_POOL_MAX_SIZE,
+            max_inactive_connection_lifetime=BOT_DB_IDLE_SECONDS,
+        )
         await self.db.execute(SCHEMA)
 
         for extension in INITIAL_EXTENSIONS:

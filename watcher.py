@@ -32,7 +32,7 @@ from pdf_knowledge import (
     remove_pdf_document_by_title,
     sync_pdf_folder,
 )
-from md_knowledge import MD_KNOWLEDGE_SCHEMA, index_md_path
+from md_knowledge import MD_KNOWLEDGE_SCHEMA, index_md_bytes
 
 load_dotenv()
 
@@ -72,12 +72,21 @@ DB_CONNECT_TIMEOUT_SECONDS = env_float("HVHN_DB_CONNECT_TIMEOUT_SECONDS", 20, mi
 DB_COMMAND_TIMEOUT_SECONDS = env_float("HVHN_DB_COMMAND_TIMEOUT_SECONDS", 30, minimum=1, maximum=600)
 DB_QUERY_TIMEOUT_SECONDS = env_float("HVHN_DB_QUERY_TIMEOUT_SECONDS", 30, minimum=1, maximum=600)
 DB_LONG_QUERY_SECONDS = env_float("HVHN_DB_LONG_QUERY_SECONDS", 5, minimum=0.1, maximum=300)
-DB_POOL_MIN_SIZE = env_int("HVHN_DB_POOL_MIN_SIZE", 1, minimum=1, maximum=20)
-DB_POOL_MAX_SIZE = max(DB_POOL_MIN_SIZE, env_int("HVHN_DB_POOL_MAX_SIZE", 4, minimum=1, maximum=20))
+DB_POOL_MIN_SIZE = env_int("HVHN_DB_POOL_MIN_SIZE", 0, minimum=0, maximum=20)
+DB_POOL_MAX_SIZE = max(DB_POOL_MIN_SIZE, env_int("HVHN_DB_POOL_MAX_SIZE", 2, minimum=1, maximum=20))
+DB_POOL_IDLE_SECONDS = env_float("HVHN_DB_POOL_IDLE_SECONDS", 30, minimum=0, maximum=3600)
+DISCORD_JOB_IDLE_POLL_SECONDS = env_int(
+    "HVHN_WATCHER_DB_IDLE_POLL_SECONDS", 900, minimum=60, maximum=86400,
+)
+RUNTIME_STATUS_SYNC_SECONDS = env_int(
+    "HVHN_WATCHER_STATUS_SYNC_SECONDS", 900, minimum=60, maximum=86400,
+)
 _db_backoff_seconds = DB_RETRY_BASE_SECONDS
 _last_db_error = ""
 _db_pool = None
 _db_pool_loop_id = None
+_last_discord_job_poll = 0.0
+_last_runtime_status_sync = 0.0
 _db_reconnect_count = 0
 _db_last_success = ""
 _db_last_latency_ms = 0.0
@@ -140,6 +149,7 @@ async def _get_db_pool(context="db"):
             DATABASE_URL,
             min_size=DB_POOL_MIN_SIZE,
             max_size=DB_POOL_MAX_SIZE,
+            max_inactive_connection_lifetime=DB_POOL_IDLE_SECONDS,
             timeout=DB_CONNECT_TIMEOUT_SECONDS,
             command_timeout=DB_COMMAND_TIMEOUT_SECONDS,
         )
@@ -405,18 +415,27 @@ def _discord_pdf_path(folder, filename, job_id):
     return str(folder / f"discord_{int(job_id)}__{stem}.pdf")
 
 
+def _find_existing_pdf_by_content(source, folder):
+    if not os.path.isdir(folder):
+        return None
+    for existing in Path(folder).glob("*.pdf"):
+        try:
+            if filecmp.cmp(source, existing, shallow=False):
+                return str(existing)
+        except OSError:
+            continue
+    return None
+
+
 def _copy_pdf_to_store(source, folder, filename):
     folder = Path(folder)
     folder.mkdir(parents=True, exist_ok=True)
     # A lost DB acknowledgement or duplicate Form upload may give the same
     # bytes another inbox filename. Content is authoritative: reuse the first
     # stored document so it is never distributed twice under suffixes.
-    for existing in folder.glob("*.pdf"):
-        try:
-            if filecmp.cmp(source, existing, shallow=False):
-                return str(existing)
-        except OSError:
-            continue
+    existing = _find_existing_pdf_by_content(source, folder)
+    if existing:
+        return existing
     safe_name = _safe_stem(Path(filename).stem, "tai_lieu") + ".pdf"
     target = Path(_unique_path(folder, safe_name))
     pending = target.with_name(target.name + ".part")
@@ -782,6 +801,31 @@ async def _xu_ly_don_discord():
             lease_task.cancel()
             with suppress(asyncio.CancelledError):
                 await lease_task
+    return len(jobs)
+
+
+async def _xu_ly_don_discord_khi_den_luot():
+    global _last_discord_job_poll
+    now = time.monotonic()
+    if now - _last_discord_job_poll < DISCORD_JOB_IDLE_POLL_SECONDS:
+        return 0
+    _last_discord_job_poll = now
+    processed = await _xu_ly_don_discord()
+    if processed:
+        # A busy DB queue should drain quickly once we have already woken the
+        # database. Idle polling remains slow enough for Neon to scale to zero.
+        _last_discord_job_poll = 0.0
+    return processed
+
+
+async def _sync_runtime_status_khi_den_luot(*, force=False):
+    global _last_runtime_status_sync
+    now = time.monotonic()
+    if not force and now - _last_runtime_status_sync < RUNTIME_STATUS_SYNC_SECONDS:
+        return False
+    _last_runtime_status_sync = now
+    await _sync_runtime_status()
+    return True
 
 
 def _count_files(folder, suffix=None):
@@ -1076,6 +1120,14 @@ async def xu_ly_don_them_tai_lieu():
         try:
             print(f"[TÀI LIỆU] {pdf}", flush=True)
             _validate_local_pdf(path)
+            existing_doc = _find_existing_pdf_by_content(path, DOCS_DIR)
+            if existing_doc:
+                print(
+                    f"[TAI LIEU] bo qua replay da xu ly: {pdf} -> {os.path.basename(existing_doc)}",
+                    flush=True,
+                )
+                shutil.move(path, _unique_path(PROCESSED_DOCS, pdf))
+                continue
             # Replays reuse the exact same source; genuinely different files with the
             # same upload name get a suffix instead of overwriting the existing book.
             dest_doc = _copy_pdf_to_store(path, DOCS_DIR, pdf)
@@ -1114,8 +1166,15 @@ async def xu_ly_don_them_tai_lieu_bot():
 async def _index_md_for_ai(path):
     if not DATABASE_URL:
         return "db_failed"
+    pool = await _get_db_pool("index_md")
+    if pool is None:
+        return "db_failed"
     try:
-        result = await index_md_path(DATABASE_URL, path)
+        with open(path, "rb") as f:
+            data = f.read()
+        title = os.path.splitext(os.path.basename(str(path)))[0]
+        async with pool.acquire() as conn:
+            result = await index_md_bytes(conn, title, data, source=str(path))
         status = "indexed" if result.get("changed", True) else "unchanged"
         print(f"[AI MD] {os.path.basename(path)} -> {result.get('passages', 0)} passage ({status})", flush=True)
         await _set_runtime_status("ai_md_last_indexed", f"{result.get('title')} ({result.get('passages', 0)} passage, {status})")
@@ -1201,21 +1260,22 @@ async def main_async():
     print(f"Hop don tai lieu:  {INCOMING_DOCS}", flush=True)
     print(f"Hop don bot:       {INCOMING_BOT_DOCS}", flush=True)
     while True:
+        processed_discord = 0
         try:
-            await _xu_ly_don_discord()
             xu_ly_don_them_khach()
             await xu_ly_don_them_tai_lieu()
             await xu_ly_don_them_tai_lieu_bot()
             await xu_ly_don_them_md()
             xu_ly_don_xoa_khach()
             await xu_ly_don_xoa_tai_lieu()
-            await _sync_runtime_status()
+            processed_discord = await _xu_ly_don_discord_khi_den_luot()
+            await _sync_runtime_status_khi_den_luot(force=bool(processed_discord))
             await _sync_pdf_knowledge()
         except Exception:
             traceback.print_exc()
         # Neu con file dang sync/cho xu ly, quay lai nhanh hon de khong lo mot
         # vong poll day du chi vi file vua on dinh sau khi kiem tra.
-        await asyncio.sleep(1 if _has_local_pending_jobs() else POLL_SECONDS)
+        await asyncio.sleep(1 if (_has_local_pending_jobs() or processed_discord) else POLL_SECONDS)
 
 
 def main():

@@ -130,9 +130,13 @@ class AppsScriptAutomationTest(unittest.TestCase):
 
     def test_document_form_has_idempotent_history_recovery(self):
         self.assertIn("const FORM_TL_BACKFILL_CURSOR_PROP", self.src)
+        self.assertIn("const PROCESSED_DOCS_NAME = '_da_xu_ly_tai_lieu'", self.src)
         self.assertIn("function _copyTaiLieuFormResponse(response)", self.src)
         self.assertIn("function dongBoTaiLieuFormTuDong()", self.src)
-        self.assertIn("incoming.getFilesByName(newName).hasNext()", self.src)
+        self.assertIn("_folderHasFileName(incoming, newName)", self.src)
+        self.assertIn("_folderHasFileName(processed, newName)", self.src)
+        self.assertIn("function _rememberTaiLieuFormCursor(response)", self.src)
+        self.assertIn("status: 'cursor_initialized'", self.src)
         self.assertIn("form.getResponses(since)", self.src)
 
     def test_client_name_email_identity_is_enforced_before_distribution(self):
