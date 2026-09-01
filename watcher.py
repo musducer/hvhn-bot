@@ -3,6 +3,7 @@ SCRIPT CANH (chạy trên PC). Đọc đơn từ điện thoại (qua Google For
 tự render watermark rồi đẩy lại Drive để phân phối. Chạy: python watcher.py
 Hoặc bấm đúp run_watcher.bat. Cứ để chạy khi PC bật; đơn tới lúc nào xử lúc đó.
 """
+import argparse
 import os
 import time
 import shutil
@@ -25,7 +26,8 @@ from env_utils import env_float, env_int
 from hvhn_batch import (
     MIRROR_SOURCE, DOCS_DIR, load_clients, append_client,
     list_docs, render_batch, write_new_rows_csv, remove_client, remove_doc,
-    find_client, validate_pdf_source, normalize_document_base, DuplicateClientNameError,
+    find_client, validate_pdf_source, normalize_client_name, normalize_document_base,
+    DuplicateClientNameError,
 )
 from pdf_knowledge import (
     PDF_KNOWLEDGE_SCHEMA,
@@ -448,6 +450,30 @@ def _copy_pdf_to_store(source, folder, filename):
         except FileNotFoundError:
             pass
     return str(target)
+
+
+def _watermarked_document_name(doc_path, recipient):
+    doc_name = Path(doc_path).stem
+    recipient_name = normalize_client_name(recipient.get("name"))
+    return f"{recipient_name}__{doc_name}.pdf"
+
+
+def _recipients_missing_document_output(doc_path, recipients):
+    """Return recipients without a queued watermark PDF for this stored document."""
+    if not recipients:
+        return []
+    if not os.path.isdir(MIRROR_SOURCE):
+        return list(recipients)
+
+    try:
+        queued_names = {path.name for path in Path(MIRROR_SOURCE).glob("*.pdf")}
+    except OSError:
+        return list(recipients)
+    return [
+        recipient
+        for recipient in recipients
+        if _watermarked_document_name(doc_path, recipient) not in queued_names
+    ]
 
 
 def _folder_has_any(folder, suffixes):
@@ -1121,26 +1147,63 @@ async def xu_ly_don_them_tai_lieu():
             print(f"[TÀI LIỆU] {pdf}", flush=True)
             _validate_local_pdf(path)
             existing_doc = _find_existing_pdf_by_content(path, DOCS_DIR)
+            clients = load_clients()
             if existing_doc:
+                missing_recipients = _recipients_missing_document_output(existing_doc, clients)
+                if not missing_recipients:
+                    print(
+                        f"[TAI LIEU] bo qua replay da xu ly: {pdf} -> {os.path.basename(existing_doc)}",
+                        flush=True,
+                    )
+                    shutil.move(path, _unique_path(PROCESSED_DOCS, pdf))
+                    continue
                 print(
-                    f"[TAI LIEU] bo qua replay da xu ly: {pdf} -> {os.path.basename(existing_doc)}",
+                    f"[TAI LIEU] khoi phuc phan phoi con thieu: {pdf} -> "
+                    f"{len(missing_recipients)}/{len(clients)} khach",
                     flush=True,
                 )
-                shutil.move(path, _unique_path(PROCESSED_DOCS, pdf))
-                continue
-            # Replays reuse the exact same source; genuinely different files with the
-            # same upload name get a suffix instead of overwriting the existing book.
-            dest_doc = _copy_pdf_to_store(path, DOCS_DIR, pdf)
-            await _index_pdf_for_ai(dest_doc)
+                dest_doc = existing_doc
+                recipients_to_render = missing_recipients
+            else:
+                # Replays reuse the exact same source; genuinely different files with the
+                # same upload name get a suffix instead of overwriting the existing book.
+                dest_doc = _copy_pdf_to_store(path, DOCS_DIR, pdf)
+                await _index_pdf_for_ai(dest_doc)
+                recipients_to_render = clients
 
-            clients = load_clients()
-            rows = render_batch([dest_doc], clients)
+            rows = render_batch([dest_doc], recipients_to_render)
             write_new_rows_csv(rows, filename=f"new_rows_tailieu_{_ts()}_{uuid.uuid4().hex[:8]}.csv")
 
             shutil.move(path, _unique_path(PROCESSED_DOCS, pdf))  # dọn khỏi hộp đơn
         except Exception:
             print("  LỖI xử lý đơn tài liệu:", flush=True)
             traceback.print_exc()
+
+
+def phan_phoi_lai_tai_lieu(pdf_path):
+    """Queue only the missing watermark outputs for one manually selected PDF."""
+    source = os.path.abspath(pdf_path)
+    _validate_local_pdf(source)
+    existing_doc = _find_existing_pdf_by_content(source, DOCS_DIR)
+    doc_path = existing_doc or _copy_pdf_to_store(source, DOCS_DIR, os.path.basename(source))
+    clients = load_clients()
+    missing_recipients = _recipients_missing_document_output(doc_path, clients)
+    if not missing_recipients:
+        print(f"[TAI LIEU] da co du file watermark: {os.path.basename(doc_path)}", flush=True)
+        return None
+
+    print(
+        f"[TAI LIEU] phan phoi lai {os.path.basename(doc_path)} -> "
+        f"{len(missing_recipients)}/{len(clients)} khach",
+        flush=True,
+    )
+    rows = render_batch([doc_path], missing_recipients)
+    csv_path = write_new_rows_csv(
+        rows,
+        filename=f"new_rows_tailieu_recovery_{_ts()}_{uuid.uuid4().hex[:8]}.csv",
+    )
+    print(f"[TAI LIEU] da xep {len(rows)} dong phan phoi: {csv_path}", flush=True)
+    return csv_path
 
 
 async def xu_ly_don_them_tai_lieu_bot():
@@ -1278,7 +1341,17 @@ async def main_async():
         await asyncio.sleep(1 if (_has_local_pending_jobs() or processed_discord) else POLL_SECONDS)
 
 
-def main():
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="HVHN local watcher")
+    parser.add_argument(
+        "--redistribute",
+        metavar="PDF_PATH",
+        help="chi render va xep lai cac ban watermark con thieu cho mot PDF",
+    )
+    args = parser.parse_args(argv)
+    if args.redistribute:
+        phan_phoi_lai_tai_lieu(args.redistribute)
+        return
     asyncio.run(main_async())
 
 

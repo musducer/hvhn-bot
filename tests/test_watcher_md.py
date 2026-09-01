@@ -165,17 +165,22 @@ class WatcherMdTest(unittest.TestCase):
                 incoming = Path(temp_dir) / "incoming"
                 processed = Path(temp_dir) / "processed"
                 store = Path(temp_dir) / "docs"
+                source = Path(temp_dir) / "source"
                 incoming.mkdir()
                 store.mkdir()
+                source.mkdir()
                 (store / "lesson.pdf").write_bytes(b"%PDF-same-content")
+                (source / "Linh__lesson.pdf").write_bytes(b"%PDF-watermarked")
                 replay = incoming / "old-form-response.pdf"
                 replay.write_bytes(b"%PDF-same-content")
 
                 with patch.object(watcher, "INCOMING_DOCS", str(incoming)), \
                         patch.object(watcher, "PROCESSED_DOCS", str(processed)), \
                         patch.object(watcher, "DOCS_DIR", str(store)), \
+                        patch.object(watcher, "MIRROR_SOURCE", str(source)), \
                         patch.object(watcher, "_stable", return_value=True), \
                         patch.object(watcher, "_validate_local_pdf"), \
+                        patch.object(watcher, "load_clients", return_value=[{"name": "Linh", "email": "linh@example.com"}]), \
                         patch.object(watcher, "_index_pdf_for_ai", new=AsyncMock()) as index_pdf, \
                         patch.object(watcher, "render_batch") as render_batch, \
                         patch.object(watcher, "write_new_rows_csv") as write_csv:
@@ -188,6 +193,76 @@ class WatcherMdTest(unittest.TestCase):
                 write_csv.assert_not_called()
 
         asyncio.run(scenario())
+
+    def test_processed_document_replay_recovers_missing_watermark_outputs(self):
+        async def scenario():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                incoming = Path(temp_dir) / "incoming"
+                processed = Path(temp_dir) / "processed"
+                store = Path(temp_dir) / "docs"
+                source = Path(temp_dir) / "source"
+                incoming.mkdir()
+                store.mkdir()
+                source.mkdir()
+                document = store / "lesson.pdf"
+                document.write_bytes(b"%PDF-same-content")
+                replay = incoming / "old-form-response.pdf"
+                replay.write_bytes(b"%PDF-same-content")
+                clients = [
+                    {"name": "Linh", "email": "linh@example.com"},
+                    {"name": "Mai", "email": "mai@example.com"},
+                ]
+                rows = [("Linh", "linh@example.com", "Linh__lesson.pdf")]
+
+                with patch.object(watcher, "INCOMING_DOCS", str(incoming)), \
+                        patch.object(watcher, "PROCESSED_DOCS", str(processed)), \
+                        patch.object(watcher, "DOCS_DIR", str(store)), \
+                        patch.object(watcher, "MIRROR_SOURCE", str(source)), \
+                        patch.object(watcher, "_stable", return_value=True), \
+                        patch.object(watcher, "_validate_local_pdf"), \
+                        patch.object(watcher, "load_clients", return_value=clients), \
+                        patch.object(watcher, "_index_pdf_for_ai", new=AsyncMock()) as index_pdf, \
+                        patch.object(watcher, "render_batch", return_value=rows) as render_batch, \
+                        patch.object(watcher, "write_new_rows_csv") as write_csv:
+                    await watcher.xu_ly_don_them_tai_lieu()
+
+                self.assertFalse(replay.exists())
+                self.assertEqual(len(list(processed.glob("old-form-response*.pdf"))), 1)
+                index_pdf.assert_not_awaited()
+                render_batch.assert_called_once_with([str(document)], clients)
+                self.assertEqual(write_csv.call_args.args[0], rows)
+
+        asyncio.run(scenario())
+
+    def test_manual_redistribution_queues_only_missing_recipients(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source = Path(temp_dir) / "source"
+            store = Path(temp_dir) / "docs"
+            mirror = Path(temp_dir) / "mirror"
+            source.mkdir()
+            store.mkdir()
+            mirror.mkdir()
+            source_pdf = source / "lesson.pdf"
+            source_pdf.write_bytes(b"%PDF-same-content")
+            stored = store / "lesson.pdf"
+            stored.write_bytes(b"%PDF-same-content")
+            (mirror / "Linh__lesson.pdf").write_bytes(b"%PDF-watermarked")
+            clients = [
+                {"name": "Linh", "email": "linh@example.com"},
+                {"name": "Mai", "email": "mai@example.com"},
+            ]
+
+            with patch.object(watcher, "DOCS_DIR", str(store)), \
+                    patch.object(watcher, "MIRROR_SOURCE", str(mirror)), \
+                    patch.object(watcher, "_validate_local_pdf"), \
+                    patch.object(watcher, "load_clients", return_value=clients), \
+                    patch.object(watcher, "render_batch", return_value=[("Mai", "mai@example.com", "Mai__lesson.pdf")]) as render_batch, \
+                    patch.object(watcher, "write_new_rows_csv", return_value="queued.csv") as write_csv:
+                result = watcher.phan_phoi_lai_tai_lieu(str(source_pdf))
+
+            self.assertEqual(result, "queued.csv")
+            render_batch.assert_called_once_with([str(stored)], [clients[1]])
+            self.assertEqual(write_csv.call_args.args[0], [("Mai", "mai@example.com", "Mai__lesson.pdf")])
 
     def test_discord_job_ack_retries_without_repeating_the_side_effect(self):
         async def scenario():
